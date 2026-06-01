@@ -1,0 +1,10 @@
+{
+  "name": "lidar-box-measure",
+  "version": "1.0.0",
+  "description": "LiDAR box measurement native module",
+  "main": "index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "expo-modules-core": "*"
+  }
+}

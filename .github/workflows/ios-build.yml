@@ -1,0 +1,67 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:   # permite rodar manualmente com 1 clique
+
+jobs:
+  build-ios:
+    runs-on: macos-15   # Mac virtual grátis com Xcode 16
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Instalar dependências
+        run: npm install
+
+      - name: Instalar Expo CLI
+        run: npm install -g expo-cli @expo/cli
+
+      - name: Gerar projeto iOS nativo (prebuild)
+        run: npx expo prebuild --platform ios --clean --no-install
+        env:
+          EXPO_NO_TELEMETRY: 1
+
+      - name: Instalar CocoaPods
+        run: |
+          cd ios
+          pod install --repo-update
+        env:
+          NO_FLIPPER: 1
+
+      - name: Compilar app (sem assinatura)
+        run: |
+          xcodebuild archive \
+            -workspace ios/MedidorCaixas.xcworkspace \
+            -scheme MedidorCaixas \
+            -configuration Release \
+            -archivePath $RUNNER_TEMP/MedidorCaixas.xcarchive \
+            -destination "generic/platform=iOS" \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty
+
+      - name: Empacotar IPA (sem assinatura — Sideloadly vai assinar)
+        run: |
+          mkdir -p $RUNNER_TEMP/Payload
+          cp -r "$RUNNER_TEMP/MedidorCaixas.xcarchive/Products/Applications/MedidorCaixas.app" \
+            $RUNNER_TEMP/Payload/
+          cd $RUNNER_TEMP
+          zip -r MedidorCaixas.ipa Payload/
+          echo "IPA gerado: $RUNNER_TEMP/MedidorCaixas.ipa"
+
+      - name: Upload IPA como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: MedidorCaixas-iOS
+          path: ${{ runner.temp }}/MedidorCaixas.ipa
+          retention-days: 30
