@@ -52,12 +52,20 @@ jobs:
 
       - name: Empacotar IPA (sem assinatura — Sideloadly vai assinar)
         run: |
+          echo "=== Estrutura do xcarchive ==="
+          find $RUNNER_TEMP/MedidorCaixas.xcarchive -name "*.app" -type d
+          APP_PATH=$(find $RUNNER_TEMP/MedidorCaixas.xcarchive -name "*.app" -type d | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERRO: .app não encontrado no xcarchive"
+            ls -la $RUNNER_TEMP/
+            exit 1
+          fi
+          echo "App encontrado em: $APP_PATH"
           mkdir -p $RUNNER_TEMP/Payload
-          cp -r "$RUNNER_TEMP/MedidorCaixas.xcarchive/Products/Applications/MedidorCaixas.app" \
-            $RUNNER_TEMP/Payload/
+          cp -r "$APP_PATH" $RUNNER_TEMP/Payload/
           cd $RUNNER_TEMP
           zip -r MedidorCaixas.ipa Payload/
-          echo "IPA gerado: $RUNNER_TEMP/MedidorCaixas.ipa"
+          echo "IPA gerado com sucesso"
 
       - name: Upload IPA como artefato
         uses: actions/upload-artifact@v4
