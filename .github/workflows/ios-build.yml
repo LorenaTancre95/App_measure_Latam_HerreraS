@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-14   # Xcode 15 — mais compatível com Expo SDK 52
+    runs-on: macos-14   # Xcode 15 — mais compatível com Expo SDK 51
 
     steps:
       - name: Checkout código
@@ -30,27 +30,29 @@ jobs:
         env:
           EXPO_NO_TELEMETRY: 1
 
-      - name: Patch Podfile (Swift 5 dentro do post_install existente)
+      - name: Patch Podfile (Swift 5 + sem otimização)
         run: |
-          python3 << 'PYEOF'
+          python3 - << 'PYEOF'
+          import re
+
           with open('ios/Podfile', 'r') as f:
               content = f.read()
 
           patch = """
+
             installer.pods_project.targets.each do |target|
               target.build_configurations.each do |config|
                 config.build_settings['SWIFT_VERSION'] = '5.0'
+                config.build_settings['SWIFT_OPTIMIZATION_LEVEL'] = '-Onone'
                 config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
                 config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
+                config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
               end
             end
           """
 
-          content = content.replace(
-              'post_install do |installer|',
-              'post_install do |installer|\n' + patch,
-              1
-          )
+          content = content.replace('post_install do |installer|',
+                                    'post_install do |installer|\n' + patch, 1)
 
           with open('ios/Podfile', 'w') as f:
               f.write(content)
