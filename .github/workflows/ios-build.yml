@@ -39,33 +39,39 @@ jobs:
 
       - name: Compilar app (sem assinatura)
         run: |
-          xcodebuild archive \
+          set -euo pipefail
+          xcodebuild build \
             -workspace ios/MedidorCaixas.xcworkspace \
             -scheme MedidorCaixas \
             -configuration Release \
-            -archivePath $RUNNER_TEMP/MedidorCaixas.xcarchive \
-            -destination "generic/platform=iOS" \
+            -sdk iphoneos \
+            CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/BuildOutput \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            | xcpretty
+            2>&1
 
-      - name: Empacotar IPA (sem assinatura — Sideloadly vai assinar)
+      - name: Verificar output e empacotar IPA
         run: |
-          echo "=== Estrutura do xcarchive ==="
-          find $RUNNER_TEMP/MedidorCaixas.xcarchive -name "*.app" -type d
-          APP_PATH=$(find $RUNNER_TEMP/MedidorCaixas.xcarchive -name "*.app" -type d | head -1)
+          echo "=== Conteúdo de BuildOutput ==="
+          ls -la $RUNNER_TEMP/BuildOutput/ 2>/dev/null || echo "BuildOutput não existe"
+
+          APP_PATH=$(find $RUNNER_TEMP/BuildOutput -name "*.app" -type d 2>/dev/null \
+            | grep -v "\.xctest" | head -1)
+
           if [ -z "$APP_PATH" ]; then
-            echo "ERRO: .app não encontrado no xcarchive"
+            echo "ERRO: .app não encontrado. Conteúdo de RUNNER_TEMP:"
             ls -la $RUNNER_TEMP/
             exit 1
           fi
-          echo "App encontrado em: $APP_PATH"
+
+          echo "App encontrado: $APP_PATH"
           mkdir -p $RUNNER_TEMP/Payload
-          cp -r "$APP_PATH" $RUNNER_TEMP/Payload/
+          cp -r "$APP_PATH" $RUNNER_TEMP/Payload/MedidorCaixas.app
           cd $RUNNER_TEMP
           zip -r MedidorCaixas.ipa Payload/
-          echo "IPA gerado com sucesso"
+          ls -lh MedidorCaixas.ipa
+          echo "IPA criado com sucesso!"
 
       - name: Upload IPA como artefato
         uses: actions/upload-artifact@v4
