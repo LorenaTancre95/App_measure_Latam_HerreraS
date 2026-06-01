@@ -30,20 +30,33 @@ jobs:
         env:
           EXPO_NO_TELEMETRY: 1
 
-      - name: Patch Podfile (Swift 5 + deployment target)
+      - name: Patch Podfile (Swift 5 dentro do post_install existente)
         run: |
-          cat >> ios/Podfile << 'EOF'
+          python3 << 'PYEOF'
+          with open('ios/Podfile', 'r') as f:
+              content = f.read()
 
-          post_install do |installer|
+          patch = """
             installer.pods_project.targets.each do |target|
               target.build_configurations.each do |config|
                 config.build_settings['SWIFT_VERSION'] = '5.0'
-                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
                 config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
               end
             end
-          end
-          EOF
+          """
+
+          content = content.replace(
+              'post_install do |installer|',
+              'post_install do |installer|\n' + patch,
+              1
+          )
+
+          with open('ios/Podfile', 'w') as f:
+              f.write(content)
+
+          print('Podfile patched OK')
+          PYEOF
 
       - name: Instalar CocoaPods
         run: |
