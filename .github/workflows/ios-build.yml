@@ -7,7 +7,7 @@ on:
 
 jobs:
   build-ios:
-    runs-on: macos-15   # Mac virtual grátis com Xcode 16
+    runs-on: macos-14   # Xcode 15 — mais compatível com Expo SDK 52
 
     steps:
       - name: Checkout código
@@ -29,6 +29,21 @@ jobs:
         run: npx expo prebuild --platform ios --clean --no-install
         env:
           EXPO_NO_TELEMETRY: 1
+
+      - name: Patch Podfile (Swift 5 + deployment target)
+        run: |
+          cat >> ios/Podfile << 'EOF'
+
+          post_install do |installer|
+            installer.pods_project.targets.each do |target|
+              target.build_configurations.each do |config|
+                config.build_settings['SWIFT_VERSION'] = '5.0'
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
+                config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
+              end
+            end
+          end
+          EOF
 
       - name: Instalar CocoaPods
         run: |
