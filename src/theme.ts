@@ -1,13 +1,14 @@
 export const Colors = {
-  background:    '#0D0D38',
-  card:          '#181848',
-  fieldBG:       '#101038',
-  fieldBorder:   '#484884',
-  accent:        '#6B47E8',
-  yellow:        '#FFCC00',
-  green:         '#00C24D',
-  pink:          '#E81F64',
-  cyan:          '#00D9F5',
+  background:    '#1A0EA0',   // violeta LATAM Cargo (exato do logo)
+  card:          '#2010B8',   // violeta médio
+  fieldBG:       '#140B80',   // violeta escuro
+  fieldBorder:   '#4030CC',   // borda sutil
+  accent:        '#E31837',   // vermelho LATAM
+  accentHover:   '#C0122B',   // vermelho escuro
+  yellow:        '#FFCC00',   // avisos / calibração
+  green:         '#00C24D',   // confirmado
+  pink:          '#E31837',   // finalizar (usa o vermelho LATAM)
+  cyan:          '#00D9F5',   // overlay AR
   textPrimary:   '#FFFFFF',
   textSecondary: '#9999CC',
   white:         '#FFFFFF',

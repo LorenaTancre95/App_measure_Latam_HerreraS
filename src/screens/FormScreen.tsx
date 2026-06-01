@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity,
-  StyleSheet, SafeAreaView, ActivityIndicator,
+  StyleSheet, SafeAreaView, ActivityIndicator, Image,
 } from 'react-native';
 import { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { RootStackParamList } from '../../App';
@@ -64,7 +64,11 @@ export function FormScreen({ navigation }: Props) {
   return (
     <SafeAreaView style={styles.safe}>
       <View style={styles.header}>
-        <Text style={styles.headerBack}>{'< Voltar'}</Text>
+        <Image
+          source={require('../../assets/logo_latam.png')}
+          style={styles.logo}
+          resizeMode="contain"
+        />
         <Text style={styles.headerTitle}>REGISTRAR MEDIÇÃO</Text>
       </View>
 
@@ -163,11 +167,13 @@ const styles = StyleSheet.create({
   safe:        { flex: 1, backgroundColor: Colors.background },
   header:      {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md,
-    backgroundColor: Colors.accent,
+    paddingHorizontal: Spacing.lg, paddingVertical: 10,
+    backgroundColor: Colors.background,
+    borderBottomWidth: 2,
+    borderBottomColor: Colors.accent,
   },
-  headerBack:  { color: Colors.white, fontSize: 14 },
-  headerTitle: { color: Colors.white, fontSize: 13, fontWeight: '700', letterSpacing: 1 },
+  logo:        { width: 120, height: 40 },
+  headerTitle: { color: Colors.white, fontSize: 11, fontWeight: '700', letterSpacing: 1 },
   scroll:      { padding: Spacing.lg, paddingBottom: 40 },
 
   row:         { flexDirection: 'row', alignItems: 'flex-end' },
@@ -188,6 +194,11 @@ const styles = StyleSheet.create({
     borderRadius: Radius.md,
     paddingVertical: 16,
     alignItems: 'center',
+    shadowColor: Colors.accent,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.4,
+    shadowRadius: 8,
+    elevation: 6,
   },
   disabled:    { opacity: 0.4 },
   adicionarText: { color: Colors.white, fontSize: 16, fontWeight: '700', letterSpacing: 1 },
