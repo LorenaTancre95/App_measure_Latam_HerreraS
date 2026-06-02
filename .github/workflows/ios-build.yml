@@ -70,9 +70,9 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -jobs 1 \
-            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_IDENTITY="-" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_ALLOWED=YES \
             2>&1 | tee /tmp/build.log
 
       - name: Mostrar erros reais se falhou
@@ -97,6 +97,8 @@ jobs:
           fi
 
           echo "App encontrado: $APP_PATH"
+          echo "Tamanho: $(du -sh "$APP_PATH" | cut -f1)"
+          echo "Conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
           mkdir -p $RUNNER_TEMP/Payload
           cp -r "$APP_PATH" $RUNNER_TEMP/Payload/MedidorCaixas.app
           cd $RUNNER_TEMP
