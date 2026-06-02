@@ -244,6 +244,21 @@ jobs:
 
           echo "Binary OK: $(ls -lh "$BINARY_PATH")"
 
+          # Garantir permissões de câmera no Info.plist do .app compilado
+          FINAL_PLIST="$APP_PATH/Info.plist"
+          echo "=== Injetando chaves no Info.plist final ==="
+          inject_plist_key() {
+            local key="$1" val="$2"
+            /usr/libexec/PlistBuddy -c "Set :$key '$val'" "$FINAL_PLIST" 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Add :$key string '$val'" "$FINAL_PLIST"
+            echo "  $key OK"
+          }
+          inject_plist_key NSCameraUsageDescription "Necessário para medir caixas com LiDAR"
+          inject_plist_key NSMotionUsageDescription "Necessário para rastreamento e medição 3D"
+          echo "=== Info.plist final ==="
+          /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$FINAL_PLIST"
+          /usr/libexec/PlistBuddy -c "Print :NSMotionUsageDescription" "$FINAL_PLIST"
+
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -r "$APP_PATH" "$RUNNER_TEMP/Payload/MedidorCaixas.app"
           cd "$RUNNER_TEMP"
