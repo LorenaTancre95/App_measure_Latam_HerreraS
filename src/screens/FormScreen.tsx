@@ -9,6 +9,7 @@ import { BoxMeasurement } from '../models/BoxMeasurement';
 import { Volume, pesoTotal, pesoCubadoTotal } from '../models/Volume';
 import { Colors, Spacing, Radius } from '../theme';
 import { ARCameraScreen } from './ARCameraScreen';
+import { isLidarSupported, openARCamera } from '../../modules/lidar-box-measure';
 
 export function FormScreen() {
   const [minuta, setMinuta]       = useState('');
@@ -92,7 +93,18 @@ export function FormScreen() {
           <View style={{ width: Spacing.sm }} />
           <TouchableOpacity
             style={[styles.iconBtn, { borderColor: photoAttached ? Colors.green : Colors.fieldBorder }]}
-            onPress={() => setCameraOpen(true)}
+            onPress={async () => {
+              if (isLidarSupported()) {
+                try {
+                  const m = await openARCamera();
+                  onMeasurement(m);
+                } catch {
+                  // user cancelled — do nothing
+                }
+              } else {
+                setCameraOpen(true);
+              }
+            }}
           >
             <Text style={styles.iconBtnText}>📷</Text>
           </TouchableOpacity>

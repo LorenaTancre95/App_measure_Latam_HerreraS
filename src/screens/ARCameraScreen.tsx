@@ -12,17 +12,9 @@ type Props = {
 };
 type ARMode = 'auto' | 'manual';
 
-// Em Expo Go o módulo nativo não está disponível — usamos entrada manual.
-// Quando compilado com EAS (build real), o LiDAR é ativado automaticamente.
-let ARBoxView: React.ComponentType<any> | null = null;
-try {
-  const mod = require('../../modules/lidar-box-measure');
-  ARBoxView = mod?.ARBoxView ?? null;
-} catch {
-  ARBoxView = null;
-}
-
-const lidarAvailable = ARBoxView != null;
+// This screen is only shown when LiDAR is NOT available (Expo Go / non-LiDAR device).
+// When LiDAR is available, FormScreen calls openARCamera() → native UIViewController.
+const lidarAvailable = false;
 
 export function ARCameraScreen({ onMeasurement: onMeasurementProp, onClose }: Props) {
   const [mode, setMode] = useState<ARMode>('auto');
