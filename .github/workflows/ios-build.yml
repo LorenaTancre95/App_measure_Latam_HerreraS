@@ -70,7 +70,6 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -parallelizeTargets NO \
-            CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/BuildOutput \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -87,15 +86,13 @@ jobs:
 
       - name: Verificar output e empacotar IPA
         run: |
-          echo "=== Conteúdo de BuildOutput ==="
-          ls -la $RUNNER_TEMP/BuildOutput/ 2>/dev/null || echo "BuildOutput não existe"
-
-          APP_PATH=$(find $RUNNER_TEMP/BuildOutput -name "*.app" -type d 2>/dev/null \
-            | grep -v "\.xctest" | head -1)
+          echo "=== Procurando .app em DerivedData ==="
+          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData \
+            -name "MedidorCaixas.app" -type d 2>/dev/null | head -1)
 
           if [ -z "$APP_PATH" ]; then
-            echo "ERRO: .app não encontrado. Conteúdo de RUNNER_TEMP:"
-            ls -la $RUNNER_TEMP/
+            echo "ERRO: .app não encontrado. DerivedData:"
+            ls ~/Library/Developer/Xcode/DerivedData/ 2>/dev/null
             exit 1
           fi
 
