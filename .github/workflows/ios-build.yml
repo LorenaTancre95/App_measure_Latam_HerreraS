@@ -64,11 +64,12 @@ jobs:
 
       - name: Compilar app (sem assinatura)
         run: |
-          xcodebuild build \
+          xcodebuild archive \
             -workspace ios/MedidorCaixas.xcworkspace \
             -scheme MedidorCaixas \
             -configuration Release \
             -sdk iphoneos \
+            -archivePath $RUNNER_TEMP/MedidorCaixas.xcarchive \
             -jobs 1 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -86,40 +87,26 @@ jobs:
 
       - name: Verificar output e empacotar IPA
         run: |
-          DERIVED=$(find /Users/runner/Library/Developer/Xcode/DerivedData \
-            -maxdepth 1 -name "MedidorCaixas-*" -type d 2>/dev/null | head -1)
-          echo "DerivedData: $DERIVED"
+          ARCHIVE=$RUNNER_TEMP/MedidorCaixas.xcarchive
+          echo "Verificando xcarchive: $ARCHIVE"
 
-          APP_PATH=$(find "$DERIVED/Build/Products" \
-            -name "MedidorCaixas.app" -type d 2>/dev/null | head -1)
-          if [ -z "$APP_PATH" ]; then
-            echo "ERRO: .app não encontrado"
-            ls "$DERIVED/Build/Products/" 2>/dev/null
+          if [ ! -d "$ARCHIVE" ]; then
+            echo "ERRO: xcarchive não foi criado"
+            ls $RUNNER_TEMP/
             exit 1
           fi
-          echo "App: $APP_PATH  |  conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
 
-          # Com CODE_SIGNING_ALLOWED=NO o binário fica em Intermediates — copiar para o .app
-          if [ ! -f "$APP_PATH/MedidorCaixas" ]; then
-            echo "Binário ausente no .app — buscando em Intermediates..."
-            BINARY=$(find "$DERIVED/Build/Intermediates.noindex" \
-              -path "*/Release-iphoneos/MedidorCaixas.build/Objects-normal/arm64/MedidorCaixas" \
-              -type f 2>/dev/null | head -1)
-            if [ -z "$BINARY" ]; then
-              BINARY=$(find "$DERIVED" -name "MedidorCaixas" -type f 2>/dev/null \
-                | grep -v "\.app/" | grep -v "\.xctest" | grep -v "\.swiftmodule" | head -1)
-            fi
-            if [ -z "$BINARY" ]; then
-              echo "ERRO: binário não encontrado em Intermediates"
-              find "$DERIVED" -name "MedidorCaixas" 2>/dev/null | head -10
-              exit 1
-            fi
-            echo "Binário: $BINARY"
-            cp "$BINARY" "$APP_PATH/MedidorCaixas"
-            chmod +x "$APP_PATH/MedidorCaixas"
+          APP_PATH=$(find "$ARCHIVE/Products" -name "*.app" -type d 2>/dev/null | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERRO: .app não encontrado no xcarchive"
+            find "$ARCHIVE" -maxdepth 5 2>/dev/null | head -20
+            exit 1
           fi
 
-          echo "Tamanho do .app: $(du -sh "$APP_PATH" | cut -f1)"
+          echo "App: $APP_PATH"
+          echo "Tamanho: $(du -sh "$APP_PATH" | cut -f1)"
+          echo "Conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
+
           mkdir -p $RUNNER_TEMP/Payload
           cp -r "$APP_PATH" $RUNNER_TEMP/Payload/MedidorCaixas.app
           cd $RUNNER_TEMP
