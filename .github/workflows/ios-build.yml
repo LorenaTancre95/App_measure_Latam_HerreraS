@@ -37,7 +37,6 @@ jobs:
               content = f.read()
 
           patch = """
-
             installer.pods_project.targets.each do |target|
               target.build_configurations.each do |config|
                 config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
@@ -64,13 +63,15 @@ jobs:
 
       - name: Compilar app (sem assinatura)
         run: |
-          xcodebuild archive \
+          set -o pipefail
+          xcodebuild build \
             -workspace ios/MedidorCaixas.xcworkspace \
             -scheme MedidorCaixas \
             -configuration Release \
             -sdk iphoneos \
-            -archivePath $RUNNER_TEMP/MedidorCaixas.xcarchive \
-            -jobs 1 \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
@@ -82,34 +83,62 @@ jobs:
           echo "====== ERROS DE COMPILAÇÃO ======"
           grep -E "^/.+:[0-9]+:[0-9]+: error:" /tmp/build.log | head -40 || true
           echo ""
-          echo "====== ÚLTIMAS 30 LINHAS ======"
-          tail -30 /tmp/build.log
+          echo "====== ÚLTIMAS 50 LINHAS ======"
+          tail -50 /tmp/build.log
 
       - name: Verificar output e empacotar IPA
         run: |
-          ARCHIVE=$RUNNER_TEMP/MedidorCaixas.xcarchive
-          echo "Verificando xcarchive: $ARCHIVE"
+          DERIVED="$RUNNER_TEMP/DerivedData"
+          PRODUCTS="$DERIVED/Build/Products/Release-iphoneos"
 
-          if [ ! -d "$ARCHIVE" ]; then
-            echo "ERRO: xcarchive não foi criado"
-            ls $RUNNER_TEMP/
+          echo "=== Buscando .app em: $PRODUCTS ==="
+          ls -la "$PRODUCTS" 2>/dev/null || {
+            echo "Products dir não encontrado. Buscando em todo DerivedData..."
+            find "$DERIVED" -name "*.app" -type d 2>/dev/null | grep -v "/Pods/" | head -10
             exit 1
-          fi
+          }
 
-          APP_PATH=$(find "$ARCHIVE/Products" -name "*.app" -type d 2>/dev/null | head -1)
+          APP_PATH=$(find "$PRODUCTS" -name "*.app" -maxdepth 1 -type d | head -1)
           if [ -z "$APP_PATH" ]; then
-            echo "ERRO: .app não encontrado no xcarchive"
-            find "$ARCHIVE" -maxdepth 5 2>/dev/null | head -20
+            echo "ERRO: .app não encontrado em $PRODUCTS"
+            find "$PRODUCTS" -maxdepth 3 2>/dev/null | head -30
             exit 1
           fi
+
+          BINARY_NAME=$(basename "$APP_PATH" .app)
+          BINARY_PATH="$APP_PATH/$BINARY_NAME"
 
           echo "App: $APP_PATH"
-          echo "Tamanho: $(du -sh "$APP_PATH" | cut -f1)"
-          echo "Conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
+          echo "Conteúdo do .app:"
+          ls -la "$APP_PATH/"
 
-          mkdir -p $RUNNER_TEMP/Payload
-          cp -r "$APP_PATH" $RUNNER_TEMP/Payload/MedidorCaixas.app
-          cd $RUNNER_TEMP
+          # Se o binary não está no .app, buscar nos Intermediates e copiar
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo ""
+            echo "Binary ausente no .app — buscando em Intermediates..."
+            INTERMEDIATES="$DERIVED/Build/Intermediates.noindex"
+            while IFS= read -r candidate; do
+              if file "$candidate" 2>/dev/null | grep -qi "mach-o"; then
+                echo "Copiando binary de: $candidate"
+                cp "$candidate" "$BINARY_PATH"
+                chmod +x "$BINARY_PATH"
+                break
+              fi
+            done < <(find "$INTERMEDIATES" -name "$BINARY_NAME" \
+              -not -name "*.o" -not -name "*.d" -not -name "*.dia" \
+              2>/dev/null | head -10)
+          fi
+
+          if [ ! -f "$BINARY_PATH" ]; then
+            echo "ERRO: Binary não encontrado nem em Products nem em Intermediates"
+            exit 1
+          fi
+
+          echo "Binary OK: $(ls -lh "$BINARY_PATH")"
+
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -r "$APP_PATH" "$RUNNER_TEMP/Payload/MedidorCaixas.app"
+          cd "$RUNNER_TEMP"
           zip -r MedidorCaixas.ipa Payload/
           ls -lh MedidorCaixas.ipa
           echo "IPA criado com sucesso!"
