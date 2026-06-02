@@ -15,108 +15,109 @@ class ARBoxView: ExpoView {
 
     // MARK: - Properties
     var arMode: ARMode = .auto {
-        didSet { coordinator.mode = arMode }
+        didSet { coordinator?.mode = arMode }
     }
 
-    // MARK: - Internals
-    private let sceneView  = ARSCNView()
-    private lazy var coordinator = BoxDetectionCoordinator(
-        sceneView: sceneView,
-        onUpdate: { [weak self] m in
-            self?.onMeasurementUpdate([
-                "comprimento": m.comprimento,
-                "largura":     m.largura,
-                "altura":      m.altura,
-            ])
-        },
-        onPlaneFound: { [weak self] in
-            self?.onPlaneFound([:])
-        }
-    )
+    // MARK: - Internals — lazily created after camera permission
+    private var sceneView: ARSCNView?
+    private var coordinator: BoxDetectionCoordinator?
 
     // MARK: - Init
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
-        setupSceneView()
-        setupGesture()
-        startSession()
+        backgroundColor = .black
+        requestCameraAndStart()
     }
 
-    private func setupSceneView() {
-        sceneView.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(sceneView)
-        NSLayoutConstraint.activate([
-            sceneView.topAnchor.constraint(equalTo: topAnchor),
-            sceneView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            sceneView.leadingAnchor.constraint(equalTo: leadingAnchor),
-            sceneView.trailingAnchor.constraint(equalTo: trailingAnchor),
-        ])
-        sceneView.delegate = coordinator
-        sceneView.session.delegate = coordinator
-        sceneView.autoenablesDefaultLighting = true
-    }
-
-    private func setupGesture() {
-        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-        sceneView.addGestureRecognizer(tap)
-    }
-
-    private func startSession() {
-        guard ARWorldTrackingConfiguration.isSupported else { return }
-
+    // MARK: - Permission → setup → session
+    private func requestCameraAndStart() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            runARSession()
+            DispatchQueue.main.async { self.setupAndStart() }
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                guard granted else { return }
-                DispatchQueue.main.async { self?.runARSession() }
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                DispatchQueue.main.async {
+                    if granted { self.setupAndStart() }
+                }
             }
         default:
             break
         }
     }
 
-    private func runARSession() {
+    private func setupAndStart() {
+        guard ARWorldTrackingConfiguration.isSupported else { return }
+
+        let sv = ARSCNView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.autoenablesDefaultLighting = true
+        addSubview(sv)
+        NSLayoutConstraint.activate([
+            sv.topAnchor.constraint(equalTo: topAnchor),
+            sv.bottomAnchor.constraint(equalTo: bottomAnchor),
+            sv.leadingAnchor.constraint(equalTo: leadingAnchor),
+            sv.trailingAnchor.constraint(equalTo: trailingAnchor),
+        ])
+
+        let coord = BoxDetectionCoordinator(
+            sceneView: sv,
+            onUpdate: { [weak self] m in
+                self?.onMeasurementUpdate([
+                    "comprimento": m.comprimento,
+                    "largura":     m.largura,
+                    "altura":      m.altura,
+                ])
+            },
+            onPlaneFound: { [weak self] in
+                self?.onPlaneFound([:])
+            }
+        )
+        sv.delegate = coord
+        sv.session.delegate = coord
+        sv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
+
+        sceneView = sv
+        coordinator = coord
+        coord.mode = arMode
+
+        runARSession(sv)
+    }
+
+    private func runARSession(_ sv: ARSCNView) {
         let config = ARWorldTrackingConfiguration()
         config.planeDetection = [.horizontal]
-
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
         }
-
-        sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        sv.session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
 
     // MARK: - Manual tap
     @objc private func handleTap(_ r: UITapGestureRecognizer) {
-        guard arMode == .manual else { return }
-
-        let loc = r.location(in: sceneView)
+        guard arMode == .manual, let sv = sceneView else { return }
+        let loc = r.location(in: sv)
         guard
-            let query = sceneView.raycastQuery(from: loc,
-                                               allowing: .existingPlaneGeometry,
-                                               alignment: .any),
-            let result = sceneView.session.raycast(query).first
+            let query = sv.raycastQuery(from: loc, allowing: .existingPlaneGeometry, alignment: .any),
+            let result = sv.session.raycast(query).first
         else { return }
-
         let p = result.worldTransform.columns.3
-        coordinator.addManualPoint(SIMD3<Float>(p.x, p.y, p.z))
+        coordinator?.addManualPoint(SIMD3<Float>(p.x, p.y, p.z))
     }
 
-    // MARK: - Public: confirm (called from RN ref)
+    // MARK: - Public
     func confirm() {
-        guard let m = coordinator.lastMeasurement else { return }
+        guard let m = coordinator?.lastMeasurement, let sv = sceneView else { return }
         onMeasurementConfirmed([
             "comprimento": m.comprimento,
             "largura":     m.largura,
             "altura":      m.altura,
         ])
-        coordinator.clearOverlay()
+        coordinator?.clearOverlay()
+        _ = sv
     }
 
     func reset() {
-        coordinator.reset()
-        startSession()
+        coordinator?.reset()
+        if let sv = sceneView { runARSession(sv) }
     }
 }

@@ -56,33 +56,14 @@ final class BoxDetectionCoordinator: NSObject {
         visionRequest.minimumConfidence  = 0.65
     }
 
-    // MARK: - Frame processing
-    func processFrame(_ frame: ARFrame) {
-        guard
-            mode == .auto,
-            frame.timestamp - lastVisionTime > visionInterval,
-            let depthData = frame.sceneDepth
-        else { return }
+    // MARK: - Frame processing (background-thread safe)
+    // (processing moved to ARSessionDelegate extension below)
 
-        lastVisionTime = frame.timestamp
-
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: frame.capturedImage,
-            orientation: .right,
-            options: [:]
-        )
-        try? handler.perform([visionRequest])
-
-        guard
-            let results = visionRequest.results as? [VNRectangleObservation],
-            let best = results.max(by: { $0.boundingBox.area < $1.boundingBox.area }),
-            best.boundingBox.area > 0.04
-        else { return }
-
-        measure(rectangle: best, frame: frame, depth: depthData)
+    // MARK: - LiDAR measurement (must run on main thread)
+    private func measureOnMain(snapshot: ARFrameSnapshot) {
+        measure(rectangle: snapshot.observation, frame: snapshot.frame, depth: snapshot.depth)
     }
 
-    // MARK: - LiDAR measurement
     private func measure(rectangle obs: VNRectangleObservation,
                          frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
@@ -289,7 +270,31 @@ extension BoxDetectionCoordinator: ARSCNViewDelegate {
 
 extension BoxDetectionCoordinator: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        processFrame(frame)
+        // Vision runs on ARKit background thread — UIKit calls dispatched to main
+        guard
+            mode == .auto,
+            frame.timestamp - lastVisionTime > visionInterval,
+            let depthData = frame.sceneDepth
+        else { return }
+        lastVisionTime = frame.timestamp
+
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: frame.capturedImage,
+            orientation: .right,
+            options: [:]
+        )
+        try? handler.perform([visionRequest])
+
+        guard
+            let results = visionRequest.results as? [VNRectangleObservation],
+            let best = results.max(by: { $0.boundingBox.area < $1.boundingBox.area }),
+            best.boundingBox.area > 0.04
+        else { return }
+
+        let snapshot = ARFrameSnapshot(frame: frame, depth: depthData, observation: best)
+        DispatchQueue.main.async { [weak self] in
+            self?.measureOnMain(snapshot: snapshot)
+        }
     }
 
     func session(_ session: ARSession, didFailWithError error: Error) {
@@ -307,4 +312,10 @@ extension BoxDetectionCoordinator: ARSessionDelegate {
 
 private extension CGRect {
     var area: CGFloat { width * height }
+}
+
+private struct ARFrameSnapshot {
+    let frame: ARFrame
+    let depth: ARDepthData
+    let observation: VNRectangleObservation
 }
