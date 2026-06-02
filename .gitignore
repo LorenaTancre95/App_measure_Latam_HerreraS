@@ -1,6 +1,8 @@
 node_modules/
 ios/
+!modules/**/ios/
 android/
+!modules/**/android/
 .expo/
 dist/
 *.ipa

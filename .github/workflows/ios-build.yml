@@ -59,6 +59,21 @@ jobs:
         env:
           EXPO_NO_TELEMETRY: 1
 
+      - name: Garantir permissões de câmera no Info.plist
+        run: |
+          PLIST="ios/MedidorCaixas/Info.plist"
+          add_if_missing() {
+            local key="$1" val="$2"
+            if ! /usr/libexec/PlistBuddy -c "Print :$key" "$PLIST" &>/dev/null; then
+              /usr/libexec/PlistBuddy -c "Add :$key string '$val'" "$PLIST"
+              echo "Adicionado: $key"
+            else
+              echo "Já existe: $key"
+            fi
+          }
+          add_if_missing NSCameraUsageDescription "Necessário para medir caixas com LiDAR"
+          add_if_missing NSLiDARDepthUsageDescription "Necessário para medir profundidade das caixas"
+
       - name: Patch Podfile
         run: |
           python3 - << 'PYEOF'
