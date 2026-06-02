@@ -1,19 +1,16 @@
 import React, { useState, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity,
-  StyleSheet, SafeAreaView, ActivityIndicator, Image,
+  StyleSheet, SafeAreaView, ActivityIndicator, Image, Modal,
 } from 'react-native';
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
 import { FormField } from '../components/FormField';
 import { VolumeTableHeader, VolumeRow, TotalsCard } from '../components/VolumeRow';
 import { BoxMeasurement } from '../models/BoxMeasurement';
 import { Volume, pesoTotal, pesoCubadoTotal } from '../models/Volume';
 import { Colors, Spacing, Radius } from '../theme';
+import { ARCameraScreen } from './ARCameraScreen';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'Form'>;
-
-export function FormScreen({ navigation }: Props) {
+export function FormScreen() {
   const [minuta, setMinuta]       = useState('');
   const [C, setC]                 = useState('');
   const [L, setL]                 = useState('');
@@ -23,6 +20,7 @@ export function FormScreen({ navigation }: Props) {
   const [volumes, setVolumes]     = useState<Volume[]>([]);
   const [photoAttached, setPhoto] = useState(false);
   const [finalizing, setFinal]    = useState(false);
+  const [cameraOpen, setCameraOpen] = useState(false);
 
   const pesoTotalCalc = React.useMemo(() => {
     const q = parseFloat(vols), p = parseFloat(pesoUnit);
@@ -94,7 +92,7 @@ export function FormScreen({ navigation }: Props) {
           <View style={{ width: Spacing.sm }} />
           <TouchableOpacity
             style={[styles.iconBtn, { borderColor: photoAttached ? Colors.green : Colors.fieldBorder }]}
-            onPress={() => navigation.navigate('ARCamera', { onMeasurement })}
+            onPress={() => setCameraOpen(true)}
           >
             <Text style={styles.iconBtnText}>📷</Text>
           </TouchableOpacity>
@@ -159,6 +157,17 @@ export function FormScreen({ navigation }: Props) {
         )}
 
       </ScrollView>
+
+      <Modal
+        visible={cameraOpen}
+        animationType="slide"
+        onRequestClose={() => setCameraOpen(false)}
+      >
+        <ARCameraScreen
+          onMeasurement={(m) => { onMeasurement(m); setCameraOpen(false); }}
+          onClose={() => setCameraOpen(false)}
+        />
+      </Modal>
     </SafeAreaView>
   );
 }
