@@ -18,13 +18,21 @@ class ARBoxView: ExpoView {
         didSet { coordinator?.mode = arMode }
     }
 
-    // MARK: - Internals — lazily created after camera permission
+    // MARK: - Internals
     private var sceneView: ARSCNView?
     private var coordinator: BoxDetectionCoordinator?
+    private var sessionStarted = false
 
-    // MARK: - Init
+    // MARK: - Init — no UIKit here, safe for any thread
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
+    }
+
+    // MARK: - Lifecycle — guaranteed main thread
+    override func didMoveToSuperview() {
+        super.didMoveToSuperview()
+        guard superview != nil, !sessionStarted else { return }
+        sessionStarted = true
         backgroundColor = .black
         requestCameraAndStart()
     }
@@ -33,11 +41,11 @@ class ARBoxView: ExpoView {
     private func requestCameraAndStart() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
-            DispatchQueue.main.async { self.setupAndStart() }
+            setupAndStart()
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { granted in
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
                 DispatchQueue.main.async {
-                    if granted { self.setupAndStart() }
+                    if granted { self?.setupAndStart() }
                 }
             }
         default:
@@ -68,17 +76,16 @@ class ARBoxView: ExpoView {
                     "altura":      m.altura,
                 ])
             },
-            onPlaneFound: { [weak self] in
-                self?.onPlaneFound([:])
-            }
+            onPlaneFound: { [weak self] in self?.onPlaneFound([:]) }
         )
         sv.delegate = coord
         sv.session.delegate = coord
-        sv.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(handleTap(_:))))
-
-        sceneView = sv
+        sv.addGestureRecognizer(
+            UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+        )
+        sceneView  = sv
         coordinator = coord
-        coord.mode = arMode
+        coord.mode  = arMode
 
         runARSession(sv)
     }
@@ -106,14 +113,13 @@ class ARBoxView: ExpoView {
 
     // MARK: - Public
     func confirm() {
-        guard let m = coordinator?.lastMeasurement, let sv = sceneView else { return }
+        guard let m = coordinator?.lastMeasurement else { return }
         onMeasurementConfirmed([
             "comprimento": m.comprimento,
             "largura":     m.largura,
             "altura":      m.altura,
         ])
         coordinator?.clearOverlay()
-        _ = sv
     }
 
     func reset() {

@@ -3,12 +3,13 @@ import {
   View, Text, TouchableOpacity, StyleSheet,
   SafeAreaView, Animated, TextInput, ScrollView,
 } from 'react-native';
-import { NativeStackScreenProps } from '@react-navigation/native-stack';
-import { RootStackParamList } from '../../App';
 import { BoxMeasurement, volumeM3, pesoCubado } from '../models/BoxMeasurement';
 import { Colors } from '../theme';
 
-type Props = NativeStackScreenProps<RootStackParamList, 'ARCamera'>;
+type Props = {
+  onMeasurement: (m: BoxMeasurement) => void;
+  onClose: () => void;
+};
 type ARMode = 'auto' | 'manual';
 
 // Em Expo Go o módulo nativo não está disponível — usamos entrada manual.
@@ -21,10 +22,9 @@ try {
   ARBoxView = null;
 }
 
-// DEBUG: force manual to isolate crash location
-const lidarAvailable = false;
+const lidarAvailable = ARBoxView != null;
 
-export function ARCameraScreen({ navigation, route }: Props) {
+export function ARCameraScreen({ onMeasurement: onMeasurementProp, onClose }: Props) {
   const [mode, setMode] = useState<ARMode>('auto');
   const [measurement, setMeasurement] = useState<BoxMeasurement | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -62,8 +62,8 @@ export function ARCameraScreen({ navigation, route }: Props) {
 
   const handleUsar = () => {
     if (!measurement) return;
-    route.params.onMeasurement(measurement);
-    navigation.goBack();
+    onMeasurementProp(measurement);
+    onClose();
   };
 
   const handleRemedir = () => {
