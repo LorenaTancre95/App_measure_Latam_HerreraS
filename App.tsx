@@ -19,8 +19,7 @@ export default function App() {
       <StatusBar style="light" />
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         <Stack.Screen name="Form"     component={FormScreen} />
-        <Stack.Screen name="ARCamera" component={ARCameraScreen}
-          options={{ presentation: 'fullScreenModal' }} />
+        <Stack.Screen name="ARCamera" component={ARCameraScreen} />
       </Stack.Navigator>
     </NavigationContainer>
   );

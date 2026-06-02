@@ -15,12 +15,13 @@ type ARMode = 'auto' | 'manual';
 // Quando compilado com EAS (build real), o LiDAR é ativado automaticamente.
 let ARBoxView: React.ComponentType<any> | null = null;
 try {
-  ARBoxView = require('../../modules/lidar-box-measure').ARBoxView;
+  const mod = require('../../modules/lidar-box-measure');
+  ARBoxView = mod?.ARBoxView ?? null;
 } catch {
   ARBoxView = null;
 }
 
-const lidarAvailable = ARBoxView !== null;
+const lidarAvailable = ARBoxView != null;
 
 export function ARCameraScreen({ navigation, route }: Props) {
   const [mode, setMode] = useState<ARMode>('auto');

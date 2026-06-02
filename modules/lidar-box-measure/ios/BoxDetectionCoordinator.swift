@@ -291,6 +291,18 @@ extension BoxDetectionCoordinator: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         processFrame(frame)
     }
+
+    func session(_ session: ARSession, didFailWithError error: Error) {
+        print("[ARKit] session failed: \(error.localizedDescription)")
+    }
+
+    func sessionWasInterrupted(_ session: ARSession) {
+        print("[ARKit] session interrupted")
+    }
+
+    func sessionInterruptionEnded(_ session: ARSession) {
+        print("[ARKit] interruption ended")
+    }
 }
 
 private extension CGRect {
