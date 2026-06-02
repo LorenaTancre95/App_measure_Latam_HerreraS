@@ -72,7 +72,7 @@ jobs:
             fi
           }
           add_if_missing NSCameraUsageDescription "Necessário para medir caixas com LiDAR"
-          add_if_missing NSLiDARDepthUsageDescription "Necessário para medir profundidade das caixas"
+          add_if_missing NSMotionUsageDescription "Necessário para rastreamento e medição 3D"
 
       - name: Patch Podfile
         run: |
@@ -127,6 +127,8 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
+            INFOPLIST_KEY_NSCameraUsageDescription="Necessário para medir caixas com LiDAR" \
+            INFOPLIST_KEY_NSMotionUsageDescription="Necessário para rastreamento e medição 3D" \
             2>&1 | tee /tmp/build.log
 
       - name: Mostrar erros reais se falhou
