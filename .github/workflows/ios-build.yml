@@ -70,9 +70,9 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -jobs 1 \
-            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee /tmp/build.log
 
       - name: Mostrar erros reais se falhou
@@ -86,19 +86,40 @@ jobs:
 
       - name: Verificar output e empacotar IPA
         run: |
-          echo "=== Procurando .app em DerivedData ==="
-          APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData \
-            -name "MedidorCaixas.app" -type d 2>/dev/null | head -1)
+          DERIVED=$(find /Users/runner/Library/Developer/Xcode/DerivedData \
+            -maxdepth 1 -name "MedidorCaixas-*" -type d 2>/dev/null | head -1)
+          echo "DerivedData: $DERIVED"
 
+          APP_PATH=$(find "$DERIVED/Build/Products" \
+            -name "MedidorCaixas.app" -type d 2>/dev/null | head -1)
           if [ -z "$APP_PATH" ]; then
-            echo "ERRO: .app não encontrado. DerivedData:"
-            ls ~/Library/Developer/Xcode/DerivedData/ 2>/dev/null
+            echo "ERRO: .app não encontrado"
+            ls "$DERIVED/Build/Products/" 2>/dev/null
             exit 1
           fi
+          echo "App: $APP_PATH  |  conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
 
-          echo "App encontrado: $APP_PATH"
-          echo "Tamanho: $(du -sh "$APP_PATH" | cut -f1)"
-          echo "Conteúdo: $(ls "$APP_PATH" | tr '\n' ' ')"
+          # Com CODE_SIGNING_ALLOWED=NO o binário fica em Intermediates — copiar para o .app
+          if [ ! -f "$APP_PATH/MedidorCaixas" ]; then
+            echo "Binário ausente no .app — buscando em Intermediates..."
+            BINARY=$(find "$DERIVED/Build/Intermediates.noindex" \
+              -path "*/Release-iphoneos/MedidorCaixas.build/Objects-normal/arm64/MedidorCaixas" \
+              -type f 2>/dev/null | head -1)
+            if [ -z "$BINARY" ]; then
+              BINARY=$(find "$DERIVED" -name "MedidorCaixas" -type f 2>/dev/null \
+                | grep -v "\.app/" | grep -v "\.xctest" | grep -v "\.swiftmodule" | head -1)
+            fi
+            if [ -z "$BINARY" ]; then
+              echo "ERRO: binário não encontrado em Intermediates"
+              find "$DERIVED" -name "MedidorCaixas" 2>/dev/null | head -10
+              exit 1
+            fi
+            echo "Binário: $BINARY"
+            cp "$BINARY" "$APP_PATH/MedidorCaixas"
+            chmod +x "$APP_PATH/MedidorCaixas"
+          fi
+
+          echo "Tamanho do .app: $(du -sh "$APP_PATH" | cut -f1)"
           mkdir -p $RUNNER_TEMP/Payload
           cp -r "$APP_PATH" $RUNNER_TEMP/Payload/MedidorCaixas.app
           cd $RUNNER_TEMP
