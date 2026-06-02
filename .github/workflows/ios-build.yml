@@ -3,11 +3,11 @@ name: Build iOS IPA
 on:
   push:
     branches: [main]
-  workflow_dispatch:   # permite rodar manualmente com 1 clique
+  workflow_dispatch:
 
 jobs:
   build-ios:
-    runs-on: macos-14   # Xcode 15 — mais compatível com Expo SDK 51
+    runs-on: macos-14
 
     steps:
       - name: Checkout código
@@ -30,11 +30,9 @@ jobs:
         env:
           EXPO_NO_TELEMETRY: 1
 
-      - name: Patch Podfile (Swift 5 + sem otimização)
+      - name: Patch Podfile
         run: |
           python3 - << 'PYEOF'
-          import re
-
           with open('ios/Podfile', 'r') as f:
               content = f.read()
 
@@ -42,8 +40,6 @@ jobs:
 
             installer.pods_project.targets.each do |target|
               target.build_configurations.each do |config|
-                config.build_settings['SWIFT_VERSION'] = '5.9'
-                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
                 config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
                 config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -strict-concurrency=minimal'
               end
@@ -68,17 +64,26 @@ jobs:
 
       - name: Compilar app (sem assinatura)
         run: |
-          set -euo pipefail
           xcodebuild build \
             -workspace ios/MedidorCaixas.xcworkspace \
             -scheme MedidorCaixas \
             -configuration Release \
             -sdk iphoneos \
+            -parallelizeTargets NO \
             CONFIGURATION_BUILD_DIR=$RUNNER_TEMP/BuildOutput \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
-            2>&1
+            2>&1 | tee /tmp/build.log
+
+      - name: Mostrar erros reais se falhou
+        if: failure()
+        run: |
+          echo "====== ERROS DE COMPILAÇÃO ======"
+          grep -E "^/.+:[0-9]+:[0-9]+: error:" /tmp/build.log | head -40 || true
+          echo ""
+          echo "====== ÚLTIMAS 30 LINHAS ======"
+          tail -30 /tmp/build.log
 
       - name: Verificar output e empacotar IPA
         run: |
