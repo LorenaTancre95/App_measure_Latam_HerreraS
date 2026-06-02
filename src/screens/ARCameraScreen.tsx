@@ -21,7 +21,8 @@ try {
   ARBoxView = null;
 }
 
-const lidarAvailable = ARBoxView != null;
+// DEBUG: force manual to isolate crash location
+const lidarAvailable = false;
 
 export function ARCameraScreen({ navigation, route }: Props) {
   const [mode, setMode] = useState<ARMode>('auto');
