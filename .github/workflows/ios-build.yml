@@ -25,6 +25,35 @@ jobs:
       - name: Instalar Expo CLI
         run: npm install -g expo-cli @expo/cli
 
+      - name: Patch expo-font (Color → UIColor para expo-modules-core 1.12)
+        run: |
+          python3 - << 'PYEOF'
+          # FontUtilsRecords.swift usa SwiftUI Color que não conforma AnyArgument em 1.12
+          # FontUtilsModule.swift converte via UIColor(options.color)
+          # Fix: trocar Color por UIColor em ambos
+
+          import sys
+
+          records = 'node_modules/expo-font/ios/FontUtilsRecords.swift'
+          with open(records) as f:
+              c = f.read()
+          c = c.replace('import SwiftUI', 'import UIKit')
+          c = c.replace('@Field var color: Color = .black', '@Field var color: UIColor = .black')
+          with open(records, 'w') as f:
+              f.write(c)
+          if 'UIColor' not in c:
+              raise RuntimeError('patch FontUtilsRecords.swift falhou')
+          print('FontUtilsRecords.swift OK')
+
+          module = 'node_modules/expo-font/ios/FontUtilsModule.swift'
+          with open(module) as f:
+              c = f.read()
+          c = c.replace('UIColor(options.color)', 'options.color')
+          with open(module, 'w') as f:
+              f.write(c)
+          print('FontUtilsModule.swift OK')
+          PYEOF
+
       - name: Gerar projeto iOS nativo (prebuild)
         run: npx expo prebuild --platform ios --clean --no-install
         env:
