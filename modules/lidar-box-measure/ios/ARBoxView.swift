@@ -1,9 +1,8 @@
 import ExpoModulesCore
-import ARKit
-import AVFoundation
-import Vision
-import SceneKit
+import UIKit
 
+// Minimal test: no ARKit — just a plain UIView.
+// If this mounts without crashing we know the issue is in ARKit/ARSCNView init.
 enum ARMode { case auto, manual }
 
 class ARBoxView: ExpoView {
@@ -13,117 +12,58 @@ class ARBoxView: ExpoView {
     let onMeasurementConfirmed = EventDispatcher()
     let onPlaneFound           = EventDispatcher()
 
-    // MARK: - Properties
-    var arMode: ARMode = .auto {
-        didSet { coordinator?.mode = arMode }
-    }
+    // MARK: - Props
+    var arMode: ARMode = .auto
 
-    // MARK: - Internals
-    private var sceneView: ARSCNView?
-    private var coordinator: BoxDetectionCoordinator?
-    private var sessionStarted = false
-
-    // MARK: - Init — no UIKit here, safe for any thread
+    // MARK: - Init
     required init(appContext: AppContext? = nil) {
         super.init(appContext: appContext)
     }
 
-    // MARK: - Lifecycle — guaranteed main thread
+    // MARK: - Lifecycle
     override func didMoveToSuperview() {
         super.didMoveToSuperview()
-        guard superview != nil, !sessionStarted else { return }
-        sessionStarted = true
-        backgroundColor = .black
-        requestCameraAndStart()
-    }
+        guard superview != nil else { return }
 
-    // MARK: - Permission → setup → session
-    private func requestCameraAndStart() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            setupAndStart()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                DispatchQueue.main.async {
-                    if granted { self?.setupAndStart() }
-                }
-            }
-        default:
-            break
+        // Dark blue background — visible proof the view mounted correctly.
+        backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.25, alpha: 1)
+
+        addSimulatedLabel()
+
+        // After 2 s emit a fake measurement to verify the JS event bridge works.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.onMeasurementUpdate([
+                "comprimento": 60.0,
+                "largura":     40.0,
+                "altura":      30.0,
+            ])
         }
     }
 
-    private func setupAndStart() {
-        guard ARWorldTrackingConfiguration.isSupported else { return }
-
-        let sv = ARSCNView()
-        sv.translatesAutoresizingMaskIntoConstraints = false
-        sv.autoenablesDefaultLighting = true
-        addSubview(sv)
+    private func addSimulatedLabel() {
+        let label = UILabel()
+        label.text = "ARBoxView montado ✓\n(sem ARKit — teste de isolamento)"
+        label.textColor = .white
+        label.numberOfLines = 0
+        label.textAlignment = .center
+        label.font = UIFont.systemFont(ofSize: 16, weight: .medium)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
         NSLayoutConstraint.activate([
-            sv.topAnchor.constraint(equalTo: topAnchor),
-            sv.bottomAnchor.constraint(equalTo: bottomAnchor),
-            sv.leadingAnchor.constraint(equalTo: leadingAnchor),
-            sv.trailingAnchor.constraint(equalTo: trailingAnchor),
+            label.centerXAnchor.constraint(equalTo: centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            label.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 24),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -24),
         ])
-
-        let coord = BoxDetectionCoordinator(
-            sceneView: sv,
-            onUpdate: { [weak self] m in
-                self?.onMeasurementUpdate([
-                    "comprimento": m.comprimento,
-                    "largura":     m.largura,
-                    "altura":      m.altura,
-                ])
-            },
-            onPlaneFound: { [weak self] in self?.onPlaneFound([:]) }
-        )
-        sv.delegate = coord
-        sv.session.delegate = coord
-        sv.addGestureRecognizer(
-            UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-        )
-        sceneView  = sv
-        coordinator = coord
-        coord.mode  = arMode
-
-        runARSession(sv)
     }
 
-    private func runARSession(_ sv: ARSCNView) {
-        let config = ARWorldTrackingConfiguration()
-        config.planeDetection = [.horizontal]
-        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
-            config.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
-        }
-        sv.session.run(config, options: [.resetTracking, .removeExistingAnchors])
-    }
-
-    // MARK: - Manual tap
-    @objc private func handleTap(_ r: UITapGestureRecognizer) {
-        guard arMode == .manual, let sv = sceneView else { return }
-        let loc = r.location(in: sv)
-        guard
-            let query = sv.raycastQuery(from: loc, allowing: .existingPlaneGeometry, alignment: .any),
-            let result = sv.session.raycast(query).first
-        else { return }
-        let p = result.worldTransform.columns.3
-        coordinator?.addManualPoint(SIMD3<Float>(p.x, p.y, p.z))
-    }
-
-    // MARK: - Public
+    // MARK: - Public API (stubs — no ARKit)
     func confirm() {
-        guard let m = coordinator?.lastMeasurement else { return }
         onMeasurementConfirmed([
-            "comprimento": m.comprimento,
-            "largura":     m.largura,
-            "altura":      m.altura,
+            "comprimento": 60.0,
+            "largura":     40.0,
+            "altura":      30.0,
         ])
-        coordinator?.clearOverlay()
     }
-
-    func reset() {
-        coordinator?.reset()
-        if let sv = sceneView { runARSession(sv) }
-    }
+    func reset() {}
 }
