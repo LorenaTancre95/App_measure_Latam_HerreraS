@@ -78,6 +78,7 @@ jobs:
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/result.xcresult" \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
@@ -87,14 +88,65 @@ jobs:
       - name: Mostrar erros reais se falhou
         if: failure()
         run: |
-          echo "====== ERROS SWIFT/C ======"
-          grep -E "error:" /tmp/build.log | grep -v "^note:" | head -60 || true
+          echo "====== ERROS DO XCRESULT ======"
+          xcrun xcresulttool get \
+            --path "$RUNNER_TEMP/result.xcresult" \
+            --format json 2>/dev/null | python3 - << 'PYEOF'
+          import sys, json
+
+          def extract(obj):
+              if isinstance(obj, dict):
+                  t = obj.get('_type', {}).get('_name', '')
+                  if t in ('IssueSummary', 'ResultIssueSummary'):
+                      msg = obj.get('message', {}).get('_value', '')
+                      url = obj.get('documentURL', {}).get('_value', '')
+                      sev = obj.get('issueType', {}).get('_value', 'error')
+                      print(f"[{sev}] {msg}")
+                      if url:
+                          print(f"       {url}")
+                  for v in obj.values():
+                      extract(v)
+              elif isinstance(obj, list):
+                  for item in obj:
+                      extract(item)
+
+          try:
+              data = json.load(sys.stdin)
+              extract(data)
+          except Exception as e:
+              print(f"xcresult parse error: {e}")
+          PYEOF
+
           echo ""
-          echo "====== CONTEXTO ExpoFont ======"
-          grep -A 8 "ExpoFont\|FontLoader\|FontExcept\|FontUtils\|FontFamily" /tmp/build.log | grep -v "^--$" | head -60 || true
+          echo "====== ERROS NO LOG (fallback) ======"
+          grep -E '\.swift:[0-9]+:[0-9]+: error:|\.m:[0-9]+:[0-9]+: error:' /tmp/build.log | head -40 || true
           echo ""
-          echo "====== ÚLTIMAS 80 LINHAS ======"
-          tail -80 /tmp/build.log
+          echo "====== .dia FILES DE ExpoFont ======"
+          find "$RUNNER_TEMP/DerivedData" -name "*.dia" 2>/dev/null \
+            | grep -i "expo\|font\|Font" | head -10 | while read f; do
+            echo "--- $f ---"
+            python3 - "$f" << 'DIAEOF'
+          import sys, struct
+
+          # Minimal LLVM serialized diagnostics reader
+          # Records start with RecordCode. Code 2 = DIAG
+          with open(sys.argv[1], 'rb') as fh:
+              magic = fh.read(4)
+              if magic != b'DIAG':
+                  print("  (not a .dia file or different format)")
+                  sys.exit(0)
+              content = fh.read()
+          # Look for UTF-8 text segments (crude but works for messages)
+          import re
+          for m in re.finditer(rb'[\x20-\x7e]{20,}', content):
+              s = m.group().decode('ascii', errors='replace')
+              if 'error' in s.lower() or '.swift' in s or '.m:' in s:
+                  print(' ', s)
+          DIAEOF
+          done || true
+          echo ""
+          echo "====== ÚLTIMAS 60 LINHAS DO LOG ======"
+          tail -60 /tmp/build.log
 
       - name: Verificar output e empacotar IPA
         run: |
