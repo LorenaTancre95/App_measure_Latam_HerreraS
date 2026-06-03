@@ -88,8 +88,10 @@ jobs:
             installer.pods_project.targets.each do |target|
               target.build_configurations.each do |config|
                 config.build_settings['ENABLE_USER_SCRIPT_SANDBOXING'] = 'NO'
+                config.build_settings['SWIFT_VERSION'] = '5.0'
                 config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
                 config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -strict-concurrency=minimal'
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.0'
               end
             end
           """

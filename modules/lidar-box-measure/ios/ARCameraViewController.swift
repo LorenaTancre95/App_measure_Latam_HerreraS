@@ -9,15 +9,16 @@ final class ARCameraViewController: UIViewController {
     var onCancel:      (() -> Void)?
 
     // MARK: - AR
-    private var sceneView:   ARSCNView!
-    private var coordinator: BoxDetectionCoordinator!
+    private var sceneView:      ARSCNView!
+    private var coordinator:    BoxDetectionCoordinator!
     private var didStartSession = false
 
     // MARK: - UI
     private let statusLabel = UILabel()
-    private let confirmBtn  = UIButton(type: .system)
+    private let confirmBtn  = UIButton(type: .custom)
     private let modeControl = UISegmentedControl(items: ["AUTO", "MANUAL"])
-    private let frameLayer  = CornerFrameLayer()
+    private let frameView   = CornerFrameView()
+    private let bottomPanel = UIView()
 
     // MARK: - Lifecycle
     override func viewDidLoad() {
@@ -39,13 +40,7 @@ final class ARCameraViewController: UIViewController {
         sceneView?.session.pause()
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        let inset: CGFloat = 40
-        frameLayer.frame = view.bounds.insetBy(dx: inset, dy: inset + 40)
-    }
-
-    // MARK: - AR setup
+    // MARK: - AR
     private func buildARView() {
         sceneView = ARSCNView(frame: view.bounds)
         sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -65,93 +60,98 @@ final class ARCameraViewController: UIViewController {
         )
     }
 
-    // MARK: - UI setup
+    // MARK: - UI
     private func buildUI() {
-        view.layer.addSublayer(frameLayer)
+        // Scan-frame overlay (UIView, no CALayer override needed)
+        frameView.translatesAutoresizingMaskIntoConstraints = false
+        frameView.isUserInteractionEnabled = false
+        view.addSubview(frameView)
 
-        // X button
-        let closeBtn = UIButton(type: .system)
-        closeBtn.setImage(UIImage(systemName: "xmark.circle.fill"), for: .normal)
+        // X close button
+        let closeBtn = UIButton(type: .custom)
+        closeBtn.setImage(
+            UIImage(systemName: "xmark.circle.fill",
+                    withConfiguration: UIImage.SymbolConfiguration(pointSize: 30)),
+            for: .normal)
         closeBtn.tintColor = .white
-        closeBtn.contentVerticalAlignment   = .fill
-        closeBtn.contentHorizontalAlignment = .fill
         closeBtn.addTarget(self, action: #selector(didTapCancel), for: .touchUpInside)
         closeBtn.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(closeBtn)
 
         // Mode selector
-        modeControl.selectedSegmentIndex    = 0
-        modeControl.backgroundColor         = UIColor.black.withAlphaComponent(0.6)
+        modeControl.selectedSegmentIndex     = 0
+        modeControl.backgroundColor          = UIColor.black.withAlphaComponent(0.6)
         modeControl.selectedSegmentTintColor = .white
         modeControl.setTitleTextAttributes(
-            [.foregroundColor: UIColor.white], for: .normal)
+            [.foregroundColor: UIColor.white],
+            for: .normal)
         modeControl.setTitleTextAttributes(
-            [.foregroundColor: UIColor.black, .font: UIFont.boldSystemFont(ofSize: 13)],
+            [.foregroundColor: UIColor.black,
+             .font: UIFont.boldSystemFont(ofSize: 13)],
             for: .selected)
         modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
         modeControl.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(modeControl)
 
         // Bottom panel
-        let panel = UIView()
-        panel.backgroundColor = UIColor.black.withAlphaComponent(0.78)
-        panel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(panel)
+        bottomPanel.backgroundColor = UIColor.black.withAlphaComponent(0.78)
+        bottomPanel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(bottomPanel)
 
         // Status label
         statusLabel.text          = "Aponte para a caixa"
         statusLabel.textColor     = .white
-        statusLabel.font          = .systemFont(ofSize: 17, weight: .semibold)
+        statusLabel.font          = UIFont.systemFont(ofSize: 17, weight: .semibold)
         statusLabel.textAlignment = .center
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(statusLabel)
+        bottomPanel.addSubview(statusLabel)
 
         // Confirm button
         confirmBtn.setTitle("Confirmar medição", for: .normal)
-        confirmBtn.titleLabel?.font = .boldSystemFont(ofSize: 15)
-        confirmBtn.backgroundColor  = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1)
         confirmBtn.setTitleColor(.black, for: .normal)
+        confirmBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
+        confirmBtn.backgroundColor  = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1)
         confirmBtn.layer.cornerRadius = 22
+        confirmBtn.clipsToBounds = true
         confirmBtn.isHidden = true
         confirmBtn.addTarget(self, action: #selector(didTapConfirm), for: .touchUpInside)
         confirmBtn.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(confirmBtn)
+        bottomPanel.addSubview(confirmBtn)
 
         let safe = view.safeAreaLayoutGuide
-
         NSLayoutConstraint.activate([
-            // X button — top-left
             closeBtn.topAnchor.constraint(equalTo: safe.topAnchor, constant: 6),
             closeBtn.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 10),
-            closeBtn.widthAnchor.constraint(equalToConstant: 40),
-            closeBtn.heightAnchor.constraint(equalToConstant: 40),
+            closeBtn.widthAnchor.constraint(equalToConstant: 44),
+            closeBtn.heightAnchor.constraint(equalToConstant: 44),
 
-            // Mode control — top-center
             modeControl.centerYAnchor.constraint(equalTo: closeBtn.centerYAnchor),
             modeControl.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             modeControl.widthAnchor.constraint(equalToConstant: 190),
             modeControl.heightAnchor.constraint(equalToConstant: 36),
 
-            // Bottom panel — sticks to bottom
-            panel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            panel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            panel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
 
-            // Status label inside panel
-            statusLabel.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14),
-            statusLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
-            statusLabel.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            frameView.topAnchor.constraint(equalTo: closeBtn.bottomAnchor, constant: 16),
+            frameView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
+            frameView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
+            frameView.bottomAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: -16),
 
-            // Confirm button
+            statusLabel.topAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: 14),
+            statusLabel.leadingAnchor.constraint(equalTo: bottomPanel.leadingAnchor, constant: 16),
+            statusLabel.trailingAnchor.constraint(equalTo: bottomPanel.trailingAnchor, constant: -16),
+
             confirmBtn.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
-            confirmBtn.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            confirmBtn.centerXAnchor.constraint(equalTo: bottomPanel.centerXAnchor),
             confirmBtn.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
             confirmBtn.heightAnchor.constraint(equalToConstant: 44),
             confirmBtn.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -14),
         ])
     }
 
-    // MARK: - Camera permission → ARKit
+    // MARK: - Camera → ARKit
     private func requestCameraAndStart() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -178,14 +178,14 @@ final class ARCameraViewController: UIViewController {
         sceneView.session.run(cfg, options: [.resetTracking, .removeExistingAnchors])
     }
 
-    // MARK: - Measurement callback (already on main thread via coordinator)
+    // MARK: - Measurement callback
     private func handleMeasurement(_ m: NativeMeasurement) {
         let c = Int(m.comprimento.rounded())
         let l = Int(m.largura.rounded())
         let a = Int(m.altura.rounded())
         statusLabel.text = "C: \(c)  ×  L: \(l)  ×  A: \(a) cm"
         confirmBtn.isHidden = false
-        frameLayer.setGreen()
+        frameView.setGreen()
     }
 
     // MARK: - Actions
@@ -208,7 +208,9 @@ final class ARCameraViewController: UIViewController {
         guard coordinator.mode == .manual else { return }
         let loc = r.location(in: sceneView)
         guard
-            let q = sceneView.raycastQuery(from: loc, allowing: .existingPlaneGeometry, alignment: .any),
+            let q   = sceneView.raycastQuery(from: loc,
+                                             allowing: .existingPlaneGeometry,
+                                             alignment: .any),
             let hit = sceneView.session.raycast(q).first
         else { return }
         let p = hit.worldTransform.columns.3
@@ -216,52 +218,54 @@ final class ARCameraViewController: UIViewController {
     }
 }
 
-// MARK: - Corner-frame overlay (CAShapeLayer, no UIView embedding required)
-private final class CornerFrameLayer: CALayer {
-    private let shape = CAShapeLayer()
-    private var isGreen = false
+// MARK: - Corner-frame overlay (UIView with Core Graphics drawing — no CALayer subclassing)
+private final class CornerFrameView: UIView {
+    private var strokeColor: UIColor = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1)
+    private var isGreen              = false
 
-    override init() {
-        super.init()
-        shape.fillColor   = UIColor.clear.cgColor
-        shape.strokeColor = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1).cgColor
-        shape.lineWidth   = 3
-        addSublayer(shape)
-        isOpaque = false
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque        = false
     }
     required init?(coder: NSCoder) { fatalError() }
 
     func setGreen() {
         guard !isGreen else { return }
-        isGreen = true
-        CATransaction.begin()
-        CATransaction.setAnimationDuration(0.3)
-        shape.strokeColor = UIColor(red: 0.2, green: 0.85, blue: 0.2, alpha: 1).cgColor
-        CATransaction.commit()
+        isGreen     = true
+        strokeColor = UIColor(red: 0.2, green: 0.85, blue: 0.2, alpha: 1)
+        setNeedsDisplay()
     }
 
-    override var frame: CGRect {
-        didSet { shape.frame = bounds; redraw() }
-    }
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        ctx.setStrokeColor(strokeColor.cgColor)
+        ctx.setLineWidth(3)
+        ctx.setLineCap(.square)
 
-    private func redraw() {
         let b   = bounds
         let len: CGFloat = 28
-        let p   = CGMutablePath()
 
         // Top-left
-        p.move(to: CGPoint(x: 0, y: len));     p.addLine(to: .zero)
-        p.addLine(to: CGPoint(x: len, y: 0))
-        // Top-right
-        p.move(to: CGPoint(x: b.maxX - len, y: 0)); p.addLine(to: CGPoint(x: b.maxX, y: 0))
-        p.addLine(to: CGPoint(x: b.maxX, y: len))
-        // Bottom-left
-        p.move(to: CGPoint(x: 0, y: b.maxY - len)); p.addLine(to: CGPoint(x: 0, y: b.maxY))
-        p.addLine(to: CGPoint(x: len, y: b.maxY))
-        // Bottom-right
-        p.move(to: CGPoint(x: b.maxX - len, y: b.maxY)); p.addLine(to: CGPoint(x: b.maxX, y: b.maxY))
-        p.addLine(to: CGPoint(x: b.maxX, y: b.maxY - len))
+        ctx.move(to: CGPoint(x: 0, y: len))
+        ctx.addLine(to: CGPoint(x: 0, y: 0))
+        ctx.addLine(to: CGPoint(x: len, y: 0))
 
-        shape.path = p
+        // Top-right
+        ctx.move(to: CGPoint(x: b.maxX - len, y: 0))
+        ctx.addLine(to: CGPoint(x: b.maxX, y: 0))
+        ctx.addLine(to: CGPoint(x: b.maxX, y: len))
+
+        // Bottom-left
+        ctx.move(to: CGPoint(x: 0, y: b.maxY - len))
+        ctx.addLine(to: CGPoint(x: 0, y: b.maxY))
+        ctx.addLine(to: CGPoint(x: len, y: b.maxY))
+
+        // Bottom-right
+        ctx.move(to: CGPoint(x: b.maxX - len, y: b.maxY))
+        ctx.addLine(to: CGPoint(x: b.maxX, y: b.maxY))
+        ctx.addLine(to: CGPoint(x: b.maxX, y: b.maxY - len))
+
+        ctx.strokePath()
     }
 }
