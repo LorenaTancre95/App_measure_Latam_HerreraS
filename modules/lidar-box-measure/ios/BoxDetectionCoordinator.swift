@@ -52,18 +52,20 @@ final class BoxDetectionCoordinator: NSObject {
         let vp = sv.bounds.size
         let cx = vp.width / 2
         let cy = vp.height / 2
-        let center = CGPoint(x: cx, y: cy)
 
-        guard let centerD = sampleDepth(at: center, frame: frame, depth: depth),
+        guard let centerD = sampleDepth(at: CGPoint(x: cx, y: cy), frame: frame, depth: depth),
               centerD > 0.15, centerD < 4.0
         else { return }
 
         let edgeThreshold: Float = 0.10  // 10 cm depth jump = box edge
         let step: CGFloat = 5
+        // Scan stops at 88% of screen to avoid picking up walls/floor beyond a box
+        let limL = vp.width  * 0.12, limR = vp.width  * 0.88
+        let limT = vp.height * 0.12, limB = vp.height * 0.88
 
         func scanEdge(dx: CGFloat, dy: CGFloat) -> CGPoint {
             var x = cx + dx, y = cy + dy
-            while x >= 2, x < vp.width - 2, y >= 2, y < vp.height - 2 {
+            while x >= limL, x <= limR, y >= limT, y <= limB {
                 if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
                     if abs(d - centerD) > edgeThreshold {
                         return CGPoint(x: x - dx, y: y - dy)
@@ -81,8 +83,15 @@ final class BoxDetectionCoordinator: NSObject {
         let tPt = scanEdge(dx: 0, dy: -step)
         let bPt = scanEdge(dx: 0, dy: +step)
 
-        // Require a minimum face size on screen
-        guard rPt.x - lPt.x > 50, bPt.y - tPt.y > 50 else { return }
+        let spanX = rPt.x - lPt.x
+        let spanY = bPt.y - tPt.y
+
+        // Require minimum face size; reject regions that hit the scan limit on ALL sides
+        // (that means we're measuring the floor/wall, not a box face)
+        guard spanX > 50, spanY > 50 else { return }
+        let hitLimitX = lPt.x <= limL + step && rPt.x >= limR - step
+        let hitLimitY = tPt.y <= limT + step && bPt.y >= limB - step
+        guard !(hitLimitX && hitLimitY) else { return }
 
         let bl = CGPoint(x: lPt.x, y: bPt.y)
         let br = CGPoint(x: rPt.x, y: bPt.y)
@@ -95,6 +104,12 @@ final class BoxDetectionCoordinator: NSObject {
             let p3TL = worldPoint(tl, frame: frame, depth: depth),
             let p3TR = worldPoint(tr, frame: frame, depth: depth)
         else { return }
+
+        // Reject horizontal surfaces (floor, table-top): their face normal points up (Y ≈ 1)
+        let right      = simd_normalize(p3BR - p3BL)
+        let up         = simd_normalize(p3TL - p3BL)
+        let faceNormal = simd_normalize(simd_cross(right, up))
+        guard abs(faceNormal.y) < 0.65 else { return }
 
         let c = Double(simd_distance(p3BL, p3BR)) * 100
         let a = Double(simd_distance(p3BL, p3TL)) * 100
