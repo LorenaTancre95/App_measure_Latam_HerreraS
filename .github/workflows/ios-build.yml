@@ -91,7 +91,7 @@ jobs:
                 config.build_settings['SWIFT_VERSION'] = '5.0'
                 config.build_settings['SWIFT_STRICT_CONCURRENCY'] = 'minimal'
                 config.build_settings['OTHER_SWIFT_FLAGS'] = '$(inherited) -strict-concurrency=minimal'
-                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '16.0'
+                config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '14.0'
               end
             end
           """
@@ -136,6 +136,13 @@ jobs:
       - name: Mostrar erros reais se falhou
         if: failure()
         run: |
+          echo "====== ERROS SWIFT (grep direto no log) ======"
+          grep -n "error:" /tmp/build.log \
+            | grep -v "^[^:]*:[^:]*: note:\|^[^:]*:[^:]*: warning:" \
+            | grep -v "WARN\|warn\|StrictConcurrency\|deprecated" \
+            | head -80 || true
+
+          echo ""
           echo "====== ERROS DO XCRESULT ======"
           xcrun xcresulttool get \
             --path "$RUNNER_TEMP/result.xcresult" \
