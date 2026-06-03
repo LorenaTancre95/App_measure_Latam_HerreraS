@@ -78,7 +78,10 @@ final class BoxDetectionCoordinator: NSObject {
                                        centerD: centerD, dW: dW, dH: dH)
         else { return }
 
-        // Depth map bounding box → screen coordinates
+        // Depth map bounding box → screen coordinates.
+        // The displayTransform includes a 90° rotation (landscape camera → portrait screen),
+        // so depth map corner (minX,minY) does NOT map to screen top-left. We compute all 4
+        // corners and sort by screen Y/X to get correctly labelled tl/tr/bl/br.
         let displayTx = frame.displayTransform(for: .portrait, viewportSize: vp)
         func depthToScreen(_ dx: Int, _ dy: Int) -> CGPoint {
             let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
@@ -86,12 +89,19 @@ final class BoxDetectionCoordinator: NSObject {
             return CGPoint(x: ns.x * vp.width, y: ns.y * vp.height)
         }
 
-        let bl = depthToScreen(region.minX, region.maxY)
-        let br = depthToScreen(region.maxX, region.maxY)
-        let tl = depthToScreen(region.minX, region.minY)
-        let tr = depthToScreen(region.maxX, region.minY)
+        let corners = [
+            depthToScreen(region.minX, region.minY),
+            depthToScreen(region.minX, region.maxY),
+            depthToScreen(region.maxX, region.minY),
+            depthToScreen(region.maxX, region.maxY),
+        ]
+        let byY    = corners.sorted { $0.y < $1.y }
+        let topTwo = Array(byY.prefix(2)).sorted { $0.x < $1.x }
+        let botTwo = Array(byY.suffix(2)).sorted { $0.x < $1.x }
+        let tl = topTwo[0], tr = topTwo[1]
+        let bl = botTwo[0], br = botTwo[1]
 
-        guard br.x - bl.x > 30, bl.y - tl.y > 30 else { return }
+        guard br.x - bl.x > 20, bl.y - tl.y > 20 else { return }
 
         // Gradient correction at center — handles angled faces for corner unprojection
         let gs: CGFloat = 30
@@ -147,7 +157,7 @@ final class BoxDetectionCoordinator: NSObject {
                              centerD: Float, dW: Int, dH: Int)
         -> (minX: Int, maxX: Int, minY: Int, maxY: Int)?
     {
-        let threshold: Float = 0.06
+        let threshold: Float = 0.08   // 8 cm: cardboard has higher LiDAR variance than 6 cm
         let maxPixels        = dW * dH * 2 / 5
 
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
