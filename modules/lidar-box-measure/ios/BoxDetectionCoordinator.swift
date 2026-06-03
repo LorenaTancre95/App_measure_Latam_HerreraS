@@ -229,8 +229,9 @@ final class BoxDetectionCoordinator: NSObject {
             return (vals.max() ?? 0) - (vals.min() ?? 0)
         }
 
+        // comprimento and altura come from direct LiDAR corner reads → must stabilize.
+        // largura comes from the noisier depth-probe, so we only take its median.
         guard range(\.comprimento) < thresholdCm,
-              range(\.largura)     < thresholdCm,
               range(\.altura)      < thresholdCm else { return }
 
         let stable = NativeMeasurement(
