@@ -1,6 +1,6 @@
 require 'json'
 
-package = JSON.parse(File.read(File.join(__dir__, '../../package.json')))
+package = JSON.parse(File.read(File.join(__dir__, 'package.json')))
 
 Pod::Spec.new do |s|
   s.name           = 'LidarBoxMeasure'
@@ -9,8 +9,8 @@ Pod::Spec.new do |s|
   s.homepage       = 'https://github.com/coki0291/App_measure_Latam'
   s.license        = { :type => 'MIT' }
   s.authors        = { 'coki0291' => 'slherrera91@gmail.com' }
-  s.platform       = :ios, '17.0'
-  s.source         = { :git => 'https://github.com/coki0291/App_measure_Latam.git', :tag => s.version.to_s }
+  s.platform       = :ios, '14.0'
+  s.source         = { :path => '.' }
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
@@ -18,5 +18,5 @@ Pod::Spec.new do |s|
   s.source_files = 'ios/**/*.{swift,m,mm}'
   s.frameworks = ['ARKit', 'Vision', 'SceneKit', 'AVFoundation']
 
-  s.pod_target_xcconfig = { 'SWIFT_VERSION' => '5.9' }
+  s.pod_target_xcconfig = { 'SWIFT_VERSION' => '5.0' }
 end
