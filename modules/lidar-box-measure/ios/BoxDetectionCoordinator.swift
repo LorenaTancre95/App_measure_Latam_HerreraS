@@ -51,11 +51,12 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     // MARK: - Depth-scan measurement
-    // Scans 5 horizontal + 5 vertical lines from the reticle center.
-    // Uses median edge positions (robust to outlier scan lines).
-    // Unprojects corners using the known face depth (centerD) so edge-pixel depth
-    // noise doesn't corrupt the 3D corner positions.
-    // Applies exponential smoothing to corner positions to reduce wireframe jitter.
+    // Key insight: when the box is at an angle, depth varies linearly across the face.
+    // Comparing against a fixed centerD causes the scan to trigger INSIDE the box.
+    // Solution: estimate the depth gradient at center and use it to predict the
+    // expected depth at every scan position — then only flag deviations from that
+    // prediction as edges. Corner depths are also gradient-estimated so 3D positions
+    // are on the actual angled plane (not a virtual flat-at-centerD plane).
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
@@ -65,19 +66,35 @@ final class BoxDetectionCoordinator: NSObject {
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        let threshold: Float = 0.05   // 5 cm depth jump = box edge
+        // --- Depth gradient estimation ---
+        // Sample ±30 px from center; accept gradient only if both samples are on
+        // the same surface (difference < 20 cm, otherwise one sample is background).
+        let gs: CGFloat = 30
+        let dxL = sampleDepth(at: CGPoint(x: cx - gs, y: cy), frame: frame, depth: depth)
+        let dxR = sampleDepth(at: CGPoint(x: cx + gs, y: cy), frame: frame, depth: depth)
+        let dyT = sampleDepth(at: CGPoint(x: cx, y: cy - gs), frame: frame, depth: depth)
+        let dyB = sampleDepth(at: CGPoint(x: cx, y: cy + gs), frame: frame, depth: depth)
+        let gx: Float = (dxL != nil && dxR != nil && abs(dxR! - dxL!) < 0.20)
+                        ? (dxR! - dxL!) / Float(2 * gs) : 0
+        let gy: Float = (dyT != nil && dyB != nil && abs(dyB! - dyT!) < 0.20)
+                        ? (dyB! - dyT!) / Float(2 * gs) : 0
+
+        // Expected depth on the box face plane at any screen position.
+        func expD(_ px: CGFloat, _ py: CGFloat) -> Float {
+            centerD + gx * Float(px - cx) + gy * Float(py - cy)
+        }
+
+        let threshold: Float = 0.05   // 5 cm deviation from face plane = edge
         let step: CGFloat    = 4
-        let limL = vp.width  * 0.08, limR = vp.width  * 0.92
-        let limT = vp.height * 0.06, limB = vp.height * 0.94
+        let limL = vp.width  * 0.06, limR = vp.width  * 0.94
+        let limT = vp.height * 0.05, limB = vp.height * 0.95
 
         func edgeX(fromX: CGFloat, y: CGFloat, dx: CGFloat) -> CGFloat? {
             var x = fromX + dx
             while (dx < 0 ? x >= limL : x <= limR) {
                 if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
-                    if abs(d - centerD) > threshold { return x - dx }
-                } else {
-                    return x - dx
-                }
+                    if abs(d - expD(x, y)) > threshold { return x - dx }
+                } else { return x - dx }
                 x += dx
             }
             return nil
@@ -87,42 +104,39 @@ final class BoxDetectionCoordinator: NSObject {
             var y = fromY + dy
             while (dy < 0 ? y >= limT : y <= limB) {
                 if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
-                    if abs(d - centerD) > threshold { return y - dy }
-                } else {
-                    return y - dy
-                }
+                    if abs(d - expD(x, y)) > threshold { return y - dy }
+                } else { return y - dy }
                 y += dy
             }
             return nil
         }
 
-        // 5 horizontal lines: validate each starts on the same surface as center
-        let yOffs: [CGFloat] = [-0.15, -0.07, 0, 0.07, 0.15].map { $0 * vp.height }
+        // 5 horizontal scan lines; each validated to start on the box face
+        let yOffs: [CGFloat] = [-0.14, -0.07, 0, 0.07, 0.14].map { $0 * vp.height }
         var lefts: [CGFloat] = [], rights: [CGFloat] = []
         for yOff in yOffs {
             let scanY = cy + yOff
             guard scanY >= limT, scanY <= limB,
                   let d = sampleDepth(at: CGPoint(x: cx, y: scanY), frame: frame, depth: depth),
-                  abs(d - centerD) < threshold
+                  abs(d - expD(cx, scanY)) < threshold
             else { continue }
             if let lx = edgeX(fromX: cx, y: scanY, dx: -step) { lefts.append(lx) }
             if let rx = edgeX(fromX: cx, y: scanY, dx: +step) { rights.append(rx) }
         }
 
-        // 5 vertical lines
-        let xOffs: [CGFloat] = [-0.15, -0.07, 0, 0.07, 0.15].map { $0 * vp.width }
+        // 5 vertical scan lines
+        let xOffs: [CGFloat] = [-0.14, -0.07, 0, 0.07, 0.14].map { $0 * vp.width }
         var tops: [CGFloat] = [], bottoms: [CGFloat] = []
         for xOff in xOffs {
             let scanX = cx + xOff
             guard scanX >= limL, scanX <= limR,
                   let d = sampleDepth(at: CGPoint(x: scanX, y: cy), frame: frame, depth: depth),
-                  abs(d - centerD) < threshold
+                  abs(d - expD(scanX, cy)) < threshold
             else { continue }
             if let ty = edgeY(x: scanX, fromY: cy, dy: -step) { tops.append(ty) }
             if let by = edgeY(x: scanX, fromY: cy, dy: +step) { bottoms.append(by) }
         }
 
-        // Need at least 2 valid readings per direction
         guard lefts.count >= 2, rights.count >= 2,
               tops.count  >= 2, bottoms.count >= 2 else { return }
 
@@ -139,12 +153,13 @@ final class BoxDetectionCoordinator: NSObject {
         let tl = CGPoint(x: finalLeft,  y: finalTop)
         let tr = CGPoint(x: finalRight, y: finalTop)
 
-        // Use centerD for all corners — avoids noisy mixed-depth readings at edges
+        // Use gradient-estimated depth at each corner — places corners on the
+        // actual angled face plane (not a virtual flat plane at centerD)
         guard
-            let p3BL = worldPointAtDepth(bl, depth: centerD, frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: centerD, frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: centerD, frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: centerD, frame: frame)
+            let p3BL = worldPointAtDepth(bl, depth: expD(finalLeft,  finalBottom), frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: expD(finalRight, finalBottom), frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: expD(finalLeft,  finalTop),    frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: expD(finalRight, finalTop),    frame: frame)
         else { return }
 
         // Reject horizontal surfaces (floor, table)
@@ -155,7 +170,6 @@ final class BoxDetectionCoordinator: NSObject {
 
         let c = Double(simd_distance(p3BL, p3BR)) * 100
         let a = Double(simd_distance(p3BL, p3TL)) * 100
-        // Estimate depth from the top face (if the user tilts slightly, the top is visible)
         let l = estimateDepthFromTopFace(frame: frame,
                                          depth: depth,
                                          topLeft: tl, topRight: tr,
@@ -164,7 +178,7 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard c > 5, c < 300, a > 5, a < 300, l > 2 else { return }
 
-        // Exponential moving average to smooth corner jitter
+        // EMA smoothing to suppress frame-to-frame jitter
         let α = smoothAlpha
         smoothBL = smoothBL.map { α * p3BL + (1-α) * $0 } ?? p3BL
         smoothBR = smoothBR.map { α * p3BR + (1-α) * $0 } ?? p3BR
