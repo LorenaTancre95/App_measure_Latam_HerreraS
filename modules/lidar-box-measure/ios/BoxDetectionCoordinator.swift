@@ -1,5 +1,4 @@
 import ARKit
-import Vision
 import SceneKit
 
 struct NativeMeasurement {
@@ -19,10 +18,9 @@ final class BoxDetectionCoordinator: NSObject {
     var onUpdate: (NativeMeasurement) -> Void
     var onPlaneFound: () -> Void
 
-    // MARK: - Vision
-    private var visionRequest: VNDetectRectanglesRequest!
-    private var lastVisionTime: TimeInterval = 0
-    private let visionInterval: TimeInterval = 0.15
+    // MARK: - Timing
+    private var lastScanTime: TimeInterval = 0
+    private let scanInterval: TimeInterval = 0.15
 
     // MARK: - Stability
     private var buffer: [NativeMeasurement] = []
@@ -43,46 +41,59 @@ final class BoxDetectionCoordinator: NSObject {
         self.onUpdate = onUpdate
         self.onPlaneFound = onPlaneFound
         super.init()
-        setupVision()
     }
 
-    // MARK: - Vision setup
-    private func setupVision() {
-        visionRequest = VNDetectRectanglesRequest()
-        visionRequest.minimumAspectRatio = 0.15
-        visionRequest.maximumAspectRatio = 1.0
-        visionRequest.minimumSize        = 0.15
-        visionRequest.maximumObservations = 3
-        visionRequest.minimumConfidence  = 0.65
-    }
-
-    // MARK: - Frame processing (background-thread safe)
-    // (processing moved to ARSessionDelegate extension below)
-
-    // MARK: - LiDAR measurement (must run on main thread)
-    private func measureOnMain(snapshot: ARFrameSnapshot) {
-        measure(rectangle: snapshot.observation, frame: snapshot.frame, depth: snapshot.depth)
-    }
-
-    private func measure(rectangle obs: VNRectangleObservation,
-                         frame: ARFrame, depth: ARDepthData) {
+    // MARK: - Depth-scan measurement (replaces Vision rectangle detection)
+    // Scans outward from the screen center (reticle) to find LiDAR depth
+    // discontinuities that mark the physical edges of the box.
+    // Works regardless of the box's visual appearance.
+    private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
-        let size = sv.bounds.size
+        let vp = sv.bounds.size
+        let cx = vp.width / 2
+        let cy = vp.height / 2
+        let center = CGPoint(x: cx, y: cy)
 
-        func toScreen(_ p: CGPoint) -> CGPoint {
-            CGPoint(x: p.x * size.width, y: (1 - p.y) * size.height)
+        guard let centerD = sampleDepth(at: center, frame: frame, depth: depth),
+              centerD > 0.15, centerD < 4.0
+        else { return }
+
+        let edgeThreshold: Float = 0.10  // 10 cm depth jump = box edge
+        let step: CGFloat = 5
+
+        func scanEdge(dx: CGFloat, dy: CGFloat) -> CGPoint {
+            var x = cx + dx, y = cy + dy
+            while x >= 2, x < vp.width - 2, y >= 2, y < vp.height - 2 {
+                if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
+                    if abs(d - centerD) > edgeThreshold {
+                        return CGPoint(x: x - dx, y: y - dy)
+                    }
+                } else {
+                    return CGPoint(x: x - dx, y: y - dy)
+                }
+                x += dx; y += dy
+            }
+            return CGPoint(x: x - dx, y: y - dy)
         }
 
-        let sBL = toScreen(obs.bottomLeft)
-        let sBR = toScreen(obs.bottomRight)
-        let sTL = toScreen(obs.topLeft)
-        let sTR = toScreen(obs.topRight)
+        let lPt = scanEdge(dx: -step, dy: 0)
+        let rPt = scanEdge(dx: +step, dy: 0)
+        let tPt = scanEdge(dx: 0, dy: -step)
+        let bPt = scanEdge(dx: 0, dy: +step)
+
+        // Require a minimum face size on screen
+        guard rPt.x - lPt.x > 50, bPt.y - tPt.y > 50 else { return }
+
+        let bl = CGPoint(x: lPt.x, y: bPt.y)
+        let br = CGPoint(x: rPt.x, y: bPt.y)
+        let tl = CGPoint(x: lPt.x, y: tPt.y)
+        let tr = CGPoint(x: rPt.x, y: tPt.y)
 
         guard
-            let p3BL = worldPoint(sBL, frame: frame, depth: depth),
-            let p3BR = worldPoint(sBR, frame: frame, depth: depth),
-            let p3TL = worldPoint(sTL, frame: frame, depth: depth),
-            let p3TR = worldPoint(sTR, frame: frame, depth: depth)
+            let p3BL = worldPoint(bl, frame: frame, depth: depth),
+            let p3BR = worldPoint(br, frame: frame, depth: depth),
+            let p3TL = worldPoint(tl, frame: frame, depth: depth),
+            let p3TR = worldPoint(tr, frame: frame, depth: depth)
         else { return }
 
         let c = Double(simd_distance(p3BL, p3BR)) * 100
@@ -99,6 +110,27 @@ final class BoxDetectionCoordinator: NSObject {
         updateOverlay(bl: p3BL, br: p3BR, tl: p3TL, tr: p3TR, measurement: m)
     }
 
+    // Reads a single depth sample from the LiDAR depth map at a screen point.
+    private func sampleDepth(at screenPt: CGPoint,
+                             frame: ARFrame,
+                             depth: ARDepthData) -> Float? {
+        guard let sv = sceneView else { return nil }
+        let vp = sv.bounds.size
+        let invDisplay = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let normCam = CGPoint(x: screenPt.x / vp.width,
+                              y: screenPt.y / vp.height).applying(invDisplay)
+        let dm = depth.depthMap
+        let dW = CVPixelBufferGetWidth(dm)
+        let dH = CVPixelBufferGetHeight(dm)
+        let sx = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
+        let sy = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dm, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(dm) else { return nil }
+        let v = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
+        return v > 0.02 && v < 8 ? v : nil
+    }
+
     // MARK: - LiDAR unproject
     private func worldPoint(_ screenPt: CGPoint,
                             frame: ARFrame,
@@ -106,13 +138,11 @@ final class BoxDetectionCoordinator: NSObject {
         guard let sv = sceneView else { return nil }
         let viewportSize = sv.bounds.size
 
-        // Use ARKit's displayTransform to correctly map portrait viewport → landscape camera image.
-        // Without this the manual rotation math produces out-of-bounds depth lookups.
         let invDisplay = frame.displayTransform(for: .portrait,
                                                viewportSize: viewportSize).inverted()
         let normVP  = CGPoint(x: screenPt.x / viewportSize.width,
                               y: screenPt.y / viewportSize.height)
-        let normCam = normVP.applying(invDisplay)           // in [0,1] camera image space
+        let normCam = normVP.applying(invDisplay)
 
         let depthMap = depth.depthMap
         let dW = CVPixelBufferGetWidth(depthMap)
@@ -136,15 +166,13 @@ final class BoxDetectionCoordinator: NSObject {
 
         let xCam = (imgX - intr[2][0]) / intr[0][0] * depthVal
         let yCam = (imgY - intr[2][1]) / intr[1][1] * depthVal
-        let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, depthVal, 1)
+        // ARKit camera looks in -Z; LiDAR depth is a positive distance → negate Z
+        let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, -depthVal, 1)
 
         return SIMD3<Float>(pt.x, pt.y, pt.z)
     }
 
     // MARK: - Depth estimation via LiDAR depth map
-    // Samples the depth map at the left and right midpoints of the visible face,
-    // then reads a second depth value offset inward along the face normal to get
-    // the box thickness. Falls back to nil so the caller can use a safe default.
     private func estimateDepth(frame: ARFrame,
                                p3BL: SIMD3<Float>,
                                p3BR: SIMD3<Float>,
@@ -158,33 +186,27 @@ final class BoxDetectionCoordinator: NSObject {
         let up         = simd_normalize(p3TL - p3BL)
         let faceNormal = simd_normalize(simd_cross(right, up))
 
-        // Sample depth at several points stepped inward along the face normal
-        // (0.05 m, 0.15 m, 0.30 m, 0.50 m) and pick the first one that differs
-        // meaningfully from the front-face depth — that gap is the box depth.
         let frontCenter = (p3BL + p3BR + p3TL + p3TR) / 4
         guard let frontDepth = depthAtWorldPoint(frontCenter,
                                                   frame: frame,
                                                   depthData: depth,
-                                                  viewportSize: viewportSize) else { return nil }
+                                                  viewportSize: viewportSize)
+        else { return nil }
 
         let probeOffsets: [Float] = [0.05, 0.10, 0.20, 0.35, 0.55]
         for offset in probeOffsets {
-            let probe = frontCenter - faceNormal * offset   // step behind the face
+            let probe = frontCenter - faceNormal * offset
             guard let probeDepth = depthAtWorldPoint(probe,
                                                       frame: frame,
                                                       depthData: depth,
                                                       viewportSize: viewportSize)
             else { continue }
-
-            let gap = probeDepth - frontDepth               // positive = further away
-            if gap > 0.02 {                                 // at least 2 cm gap found
-                return Double(gap) * 100
-            }
+            let gap = probeDepth - frontDepth
+            if gap > 0.02 { return Double(gap) * 100 }
         }
         return nil
     }
 
-    // Projects a world-space point back to the depth map and returns its depth value.
     private func depthAtWorldPoint(_ worldPt: SIMD3<Float>,
                                    frame: ARFrame,
                                    depthData: ARDepthData,
@@ -200,9 +222,8 @@ final class BoxDetectionCoordinator: NSObject {
 
         let invDisplay = frame.displayTransform(for: .portrait,
                                                viewportSize: viewportSize).inverted()
-        let normVP  = CGPoint(x: screenPt.x / viewportSize.width,
-                              y: screenPt.y / viewportSize.height)
-        let normCam = normVP.applying(invDisplay)
+        let normCam = CGPoint(x: screenPt.x / viewportSize.width,
+                              y: screenPt.y / viewportSize.height).applying(invDisplay)
 
         let depthMap = depthData.depthMap
         let dW = CVPixelBufferGetWidth(depthMap)
@@ -229,8 +250,8 @@ final class BoxDetectionCoordinator: NSObject {
             return (vals.max() ?? 0) - (vals.min() ?? 0)
         }
 
-        // comprimento and altura come from direct LiDAR corner reads → must stabilize.
-        // largura comes from the noisier depth-probe, so we only take its median.
+        // comprimento and altura are measured directly from LiDAR edge scans → stable.
+        // largura comes from the noisier depth probe → just take its median.
         guard range(\.comprimento) < thresholdCm,
               range(\.altura)      < thresholdCm else { return }
 
@@ -250,7 +271,7 @@ final class BoxDetectionCoordinator: NSObject {
         return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
     }
 
-    // MARK: - Manual points
+    // MARK: - Manual points (4-tap: base-left, base-right, base-back, top)
     func addManualPoint(_ p: SIMD3<Float>) {
         manualPoints.append(p)
 
@@ -263,16 +284,13 @@ final class BoxDetectionCoordinator: NSObject {
         overlayNodes.append(node)
 
         if manualPoints.count == 3 {
-            // p0=base-left, p1=base-right (comprimento), p2=base-back (largura)
             let p0 = manualPoints[0], p1 = manualPoints[1], p2 = manualPoints[2]
             let c = Double(simd_distance(p0, p1)) * 100
             let l = Double(simd_distance(p0, p2)) * 100
-            let a = Double(simd_distance(p0, p2)) * 100   // height needs a 4th tap; use depth as placeholder
-            let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
+            let m = NativeMeasurement(comprimento: c, largura: l, altura: l)
             lastMeasurement = m
             DispatchQueue.main.async { [weak self] in self?.onUpdate(m) }
         } else if manualPoints.count == 4 {
-            // p3 = top point → real height
             let p0 = manualPoints[0], p1 = manualPoints[1]
             let p2 = manualPoints[2], p3 = manualPoints[3]
             let c = Double(simd_distance(p0, p1)) * 100
@@ -298,23 +316,21 @@ final class BoxDetectionCoordinator: NSObject {
 
             let yellow = UIColor(red: 1.0, green: 0.82, blue: 0.0, alpha: 1)
 
-            // Extrude front face backward to form the full 3-D box
             let right      = simd_normalize(br - bl)
             let up         = simd_normalize(tl - bl)
             let faceNormal = simd_normalize(simd_cross(right, up))
             let depthM     = Float(max(measurement.largura, 2) / 100.0)
-            let extrudeDir = -faceNormal   // into the scene
+            let extrudeDir = -faceNormal
 
             let bbl = bl + extrudeDir * depthM
             let bbr = br + extrudeDir * depthM
             let btl = tl + extrudeDir * depthM
             let btr = tr + extrudeDir * depthM
 
-            // 12 edges of the wireframe box
             let edges: [(SIMD3<Float>, SIMD3<Float>)] = [
-                (bl, br), (br, tr), (tr, tl), (tl, bl),          // front face
-                (bbl, bbr), (bbr, btr), (btr, btl), (btl, bbl),  // back face
-                (bl, bbl), (br, bbr), (tl, btl), (tr, btr),      // depth edges
+                (bl, br), (br, tr), (tr, tl), (tl, bl),
+                (bbl, bbr), (bbr, btr), (btr, btl), (btl, bbl),
+                (bl, bbl), (br, bbr), (tl, btl), (tr, btr),
             ]
             for (s, e) in edges {
                 let node = self.makeLine(from: s, to: e, color: yellow)
@@ -322,7 +338,6 @@ final class BoxDetectionCoordinator: NSObject {
                 self.overlayNodes.append(node)
             }
 
-            // Dimension labels (billboard — always face camera)
             let labelData: [(String, SIMD3<Float>)] = [
                 ("\(Int(measurement.comprimento.rounded())) cm", (bl + br) / 2 + up * (-0.055)),
                 ("\(Int(measurement.altura.rounded())) cm",      (bl + tl) / 2 + right * (-0.065)),
@@ -349,7 +364,6 @@ final class BoxDetectionCoordinator: NSObject {
         let scale: Float = 0.001
         node.scale = SCNVector3(scale, scale, scale)
 
-        // Center pivot on text bounds
         let (minB, maxB) = node.boundingBox
         node.pivot = SCNMatrix4MakeTranslation(
             (maxB.x - minB.x) / 2 + minB.x,
@@ -392,10 +406,7 @@ final class BoxDetectionCoordinator: NSObject {
         let dot  = simd_dot(up, dir)
 
         if abs(dot) > 0.9999 {
-            // Edge is (nearly) vertical — no rotation needed, or flip 180° if downward
-            if dot < 0 {
-                node.rotation = SCNVector4(1, 0, 0, Float.pi)
-            }
+            if dot < 0 { node.rotation = SCNVector4(1, 0, 0, Float.pi) }
         } else {
             let axis  = simd_normalize(simd_cross(up, dir))
             let angle = acos(max(-1, min(1, dot)))
@@ -415,30 +426,17 @@ extension BoxDetectionCoordinator: ARSCNViewDelegate {
 
 extension BoxDetectionCoordinator: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // Vision runs on ARKit background thread — UIKit calls dispatched to main
         guard
             mode == .auto,
-            frame.timestamp - lastVisionTime > visionInterval,
+            frame.timestamp - lastScanTime > scanInterval,
             let depthData = frame.sceneDepth
         else { return }
-        lastVisionTime = frame.timestamp
+        lastScanTime = frame.timestamp
 
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: frame.capturedImage,
-            orientation: .right,
-            options: [:]
-        )
-        try? handler.perform([visionRequest])
-
-        guard
-            let results = visionRequest.results as? [VNRectangleObservation],
-            let best = results.max(by: { $0.boundingBox.area < $1.boundingBox.area }),
-            best.boundingBox.area > 0.04
-        else { return }
-
-        let snapshot = ARFrameSnapshot(frame: frame, depth: depthData, observation: best)
+        let capturedFrame = frame
+        let capturedDepth = depthData
         DispatchQueue.main.async { [weak self] in
-            self?.measureOnMain(snapshot: snapshot)
+            self?.measureFromCenter(frame: capturedFrame, depth: capturedDepth)
         }
     }
 
@@ -453,14 +451,4 @@ extension BoxDetectionCoordinator: ARSessionDelegate {
     func sessionInterruptionEnded(_ session: ARSession) {
         print("[ARKit] interruption ended")
     }
-}
-
-private extension CGRect {
-    var area: CGFloat { width * height }
-}
-
-private struct ARFrameSnapshot {
-    let frame: ARFrame
-    let depth: ARDepthData
-    let observation: VNRectangleObservation
 }
