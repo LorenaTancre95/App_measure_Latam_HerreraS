@@ -74,9 +74,16 @@ final class BoxDetectionCoordinator: NSObject {
         let cDX        = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
         let cDY        = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
 
-        guard let region = growRegion(depthMap: dm, cx: cDX, cy: cDY,
+        guard var region = growRegion(depthMap: dm, cx: cDX, cy: cDY,
                                        centerD: centerD, dW: dW, dH: dH)
         else { return }
+
+        // Inset 2 px from each edge: removes noisy mixed-depth border pixels so
+        // the bounding box corners don't jitter when a single outlier pixel moves.
+        let inset = 2
+        region = (minX: region.minX + inset, maxX: region.maxX - inset,
+                  minY: region.minY + inset, maxY: region.maxY - inset)
+        guard region.maxX > region.minX + 4, region.maxY > region.minY + 4 else { return }
 
         // Depth map bounding box → screen coordinates.
         // The displayTransform includes a 90° rotation (landscape camera → portrait screen),
