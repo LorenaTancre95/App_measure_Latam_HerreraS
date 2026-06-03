@@ -389,6 +389,11 @@ jobs:
           /usr/libexec/PlistBuddy -c "Print :NSCameraUsageDescription" "$FINAL_PLIST"
           /usr/libexec/PlistBuddy -c "Print :NSMotionUsageDescription" "$FINAL_PLIST"
 
+          echo "=== Tamanho do .app antes de zipar ==="
+          du -sh "$APP_PATH"
+          echo "=== Conteúdo completo do .app ==="
+          find "$APP_PATH" -maxdepth 3 | xargs ls -lh 2>/dev/null | head -60
+
           mkdir -p "$RUNNER_TEMP/Payload"
           cp -r "$APP_PATH" "$RUNNER_TEMP/Payload/MedidorCaixas.app"
           cd "$RUNNER_TEMP"
