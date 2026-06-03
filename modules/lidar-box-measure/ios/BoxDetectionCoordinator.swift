@@ -69,7 +69,7 @@ final class BoxDetectionCoordinator: NSObject {
         }
         do {
             let cfg = MLModelConfiguration()
-            cfg.computeUnits = .cpuAndNeuralEngine
+            cfg.computeUnits = .all
             let ml = try MLModel(contentsOf: modelURL, configuration: cfg)
             yoloModel = try VNCoreMLModel(for: ml)
             print("[YOLO] modelo cargado OK")
