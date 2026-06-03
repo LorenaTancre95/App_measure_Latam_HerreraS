@@ -1,5 +1,7 @@
 import ARKit
 import SceneKit
+import Vision
+import CoreML
 
 struct NativeMeasurement {
     var comprimento: Double
@@ -20,7 +22,7 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Timing
     private var lastScanTime: TimeInterval = 0
-    private let scanInterval: TimeInterval = 0.15
+    private let scanInterval: TimeInterval = 0.20
 
     // MARK: - Stability
     private var buffer: [NativeMeasurement] = []
@@ -32,13 +34,14 @@ final class BoxDetectionCoordinator: NSObject {
     private var smoothBR: SIMD3<Float>?
     private var smoothTL: SIMD3<Float>?
     private var smoothTR: SIMD3<Float>?
-    private let smoothAlpha: Float = 0.20
+    private let smoothAlpha: Float = 0.25
 
     // MARK: - Overlay
     private var overlayNodes: [SCNNode] = []
 
-    // MARK: - Scene reconstruction mesh anchors (all updates dispatched to main queue)
-    private var meshAnchors: [UUID: ARMeshAnchor] = [:]
+    // MARK: - CoreML / YOLO
+    private var yoloModel: VNCoreMLModel?
+    private var mlInFlight = false
 
     // MARK: - Manual
     private var manualPoints: [SIMD3<Float>] = []
@@ -51,101 +54,205 @@ final class BoxDetectionCoordinator: NSObject {
         self.onUpdate = onUpdate
         self.onPlaneFound = onPlaneFound
         super.init()
+        loadYOLOModel()
     }
 
-    // MARK: - Mesh-based 3D bounding box measurement
-    //
-    // Uses ARMeshAnchor (scene reconstruction) instead of scan-lines:
-    // 1. LiDAR depth at reticle center → 3D hit point on the box surface.
-    // 2. Collect all mesh vertices within a 70 cm sphere of the hit point,
-    //    discarding anything below the hit point (floor / table).
-    // 3. Project each vertex onto camera-aligned axes (right, up, forward).
-    // 4. 5th/95th percentile of those projections → robust to stray vertices.
-    // 5. Width = right extent, Height = up extent, Depth = forward extent.
-    // 6. Front-face corners from minimum-depth plane → EMA-smoothed wireframe.
-    //
-    // Robust against cluttered scenes because only vertices near the reticle
-    // surface are used; scan-lines have no role and cannot bleed into the floor.
+    // MARK: - Model loading
+    private func loadYOLOModel() {
+        // Xcode compila .mlmodel → .mlmodelc durante el build; va al main bundle (static framework)
+        let url = Bundle.main.url(forResource: "model_core", withExtension: "mlmodelc")
+               ?? Bundle(for: BoxDetectionCoordinator.self).url(forResource: "model_core", withExtension: "mlmodelc")
+        guard let modelURL = url else {
+            print("[YOLO] model_core.mlmodelc no encontrado en bundle")
+            return
+        }
+        do {
+            let cfg = MLModelConfiguration()
+            cfg.computeUnits = .cpuAndNeuralEngine
+            let ml = try MLModel(contentsOf: modelURL, configuration: cfg)
+            yoloModel = try VNCoreMLModel(for: ml)
+            print("[YOLO] modelo cargado OK")
+        } catch {
+            print("[YOLO] error al cargar: \(error)")
+        }
+    }
+
+    // MARK: - Pipeline principal (ejecutado en main queue desde ARSessionDelegate)
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
         let cx = vp.width / 2, cy = vp.height / 2
 
-        // 3D hit point from LiDAR depth at reticle center
-        guard let centerD = sampleDepth(at: CGPoint(x: cx, y: cy),
-                                        frame: frame, depth: depth),
-              centerD > 0.15, centerD < 4.0,
-              let hitPt = worldPointAtDepth(CGPoint(x: cx, y: cy),
-                                            depth: centerD, frame: frame)
+        guard let centerD = sampleDepth(at: CGPoint(x: cx, y: cy), frame: frame, depth: depth),
+              centerD > 0.15, centerD < 4.0
         else { return }
 
-        // Camera-aligned axes
-        let camT       = frame.camera.transform
-        let camForward = SIMD3<Float>(-camT.columns.2.x, -camT.columns.2.y, -camT.columns.2.z)
-        let camRight   = SIMD3<Float>( camT.columns.0.x,  camT.columns.0.y,  camT.columns.0.z)
-        let worldUp    = SIMD3<Float>(0, 1, 0)
+        if let model = yoloModel, !mlInFlight {
+            runYOLO(model: model, frame: frame, depth: depth,
+                    centerD: centerD, vp: vp, cx: cx, cy: cy)
+        } else {
+            // Sin modelo: región central fija como fallback
+            measureInRegion(box: nil, frame: frame, depth: depth,
+                             centerD: centerD, vp: vp, cx: cx, cy: cy)
+        }
+    }
 
-        let searchR: Float = 0.70   // 70 cm sphere around hit point
-        let floorY         = hitPt.y - 0.04  // 4 cm below hit = floor cutoff
+    // MARK: - YOLO inference
+    private func runYOLO(model: VNCoreMLModel, frame: ARFrame, depth: ARDepthData,
+                          centerD: Float, vp: CGSize, cx: CGFloat, cy: CGFloat) {
+        mlInFlight = true
+        let pb = frame.capturedImage
+        let capturedFrame = frame
+        let capturedDepth = depth
 
-        var projRight = [Float]()
-        var projUp    = [Float]()
-        var projDepth = [Float]()
-        projRight.reserveCapacity(512)
-        projUp.reserveCapacity(512)
-        projDepth.reserveCapacity(512)
-
-        for (_, anchor) in meshAnchors {
-            // Anchor-level sphere cull before touching any vertex data
-            let aPos = SIMD3<Float>(anchor.transform.columns.3.x,
-                                    anchor.transform.columns.3.y,
-                                    anchor.transform.columns.3.z)
-            guard simd_distance(aPos, hitPt) < searchR + 1.5 else { continue }
-
-            let t      = anchor.transform
-            let vSrc   = anchor.geometry.vertices
-            let buf    = vSrc.buffer.contents()
-            let stride = vSrc.stride
-            let off    = vSrc.offset
-
-            for i in 0..<vSrc.count {
-                let raw = buf.advanced(by: off + i * stride)
-                            .assumingMemoryBound(to: SIMD3<Float>.self).pointee
-                let w4 = t * SIMD4<Float>(raw.x, raw.y, raw.z, 1)
-                let w  = SIMD3<Float>(w4.x, w4.y, w4.z)
-
-                guard simd_distance(w, hitPt) < searchR, w.y > floorY else { continue }
-
-                let rel = w - hitPt
-                projRight.append(simd_dot(rel, camRight))
-                projUp.append(simd_dot(rel, worldUp))
-                projDepth.append(simd_dot(rel, camForward))
+        let request = VNCoreMLRequest(model: model) { [weak self] req, err in
+            guard let self = self else { return }
+            if let err = err { print("[YOLO] inferencia error: \(err)") }
+            let box = self.parseBestDetection(req.results)
+            DispatchQueue.main.async {
+                self.mlInFlight = false
+                self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
+                                      centerD: centerD, vp: vp, cx: cx, cy: cy)
             }
         }
+        request.imageCropAndScaleOption = .scaleFill
 
-        guard projRight.count >= 30 else { return }  // wait for mesh to populate
+        DispatchQueue.global(qos: .userInteractive).async {
+            // .right = el pixelBuffer de ARKit está en landscape, lo rotamos a portrait
+            let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .right)
+            try? handler.perform([request])
+        }
+    }
 
-        // 5th/95th percentile — eliminates stray vertices without sorting all data
-        let minR = percentile(projRight, 0.05), maxR = percentile(projRight, 0.95)
-        let minU = percentile(projUp,    0.05), maxU = percentile(projUp,    0.95)
-        let minD = percentile(projDepth, 0.05), maxD = percentile(projDepth, 0.95)
+    // MARK: - Parseo de salida YOLO
+    // Soporta VNRecognizedObjectObservation (si CoreML wrappea) o MLMultiArray cruda
+    private func parseBestDetection(_ results: [VNObservation]?) -> CGRect? {
+        guard let results = results else { return nil }
 
-        let c = Double(maxR - minR) * 100
-        let a = Double(maxU - minU) * 100
-        let l = Double(maxD - minD) * 100
+        // Caso fácil: Vision produce observaciones de objetos directamente
+        let objObs = results.compactMap { $0 as? VNRecognizedObjectObservation }
+        if !objObs.isEmpty {
+            guard let best = objObs.max(by: { $0.confidence < $1.confidence }),
+                  best.confidence > 0.25 else { return nil }
+            // VNRecognizedObjectObservation.boundingBox: origin bottom-left → convertir a top-left
+            let b = best.boundingBox
+            return CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
+        }
 
-        guard c > 5, c < 300, a > 5, a < 300, l > 2, l < 200 else { return }
+        // Caso raw: MLMultiArray
+        let feats = results.compactMap { $0 as? VNCoreMLFeatureValueObservation }
+        for f in feats {
+            guard let arr = f.featureValue.multiArrayValue else { continue }
+            let shape = arr.shape.map { $0.intValue }
+            print("[YOLO] output '\(f.featureName)' shape: \(shape)")
+            if let box = extractBestBox(from: arr, shape: shape) { return box }
+        }
+        return nil
+    }
 
-        // Front-face corners at minimum depth (closest plane to camera)
-        let p3BL = hitPt + minR * camRight + minU * worldUp + minD * camForward
-        let p3BR = hitPt + maxR * camRight + minU * worldUp + minD * camForward
-        let p3TL = hitPt + minR * camRight + maxU * worldUp + minD * camForward
-        let p3TR = hitPt + maxR * camRight + maxU * worldUp + minD * camForward
+    // Extrae el box de mayor confianza de un MLMultiArray con shape [1,N,C] o [N,C], C>=5
+    // Layout esperado: x1, y1, x2, y2, conf, [class, mask_coeffs...]
+    private func extractBestBox(from arr: MLMultiArray, shape: [Int]) -> CGRect? {
+        let N: Int, C: Int
+        switch shape.count {
+        case 3 where shape[0] >= 1 && shape[2] >= 5:
+            N = shape[1]; C = shape[2]
+        case 2 where shape[1] >= 5:
+            N = shape[0]; C = shape[1]
+        default:
+            return nil
+        }
 
-        // Reject if face is mostly horizontal (measuring floor or table top)
-        let faceNormal = simd_normalize(simd_cross(simd_normalize(p3BR - p3BL),
-                                                    simd_normalize(p3TL - p3BL)))
+        guard arr.dataType == .float32 else { return nil }
+        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+
+        var bestConf: Float = 0.25
+        var bestBox: CGRect? = nil
+
+        for i in 0..<N {
+            let base = i * C
+            let x1 = ptr[base + 0], y1 = ptr[base + 1]
+            let x2 = ptr[base + 2], y2 = ptr[base + 3]
+            let conf = ptr[base + 4]
+
+            guard conf > bestConf, x2 > x1, y2 > y1 else { continue }
+            bestConf = conf
+
+            // Detectar si las coords están en píxeles [0..640] o normalizadas [0..1]
+            let scale: CGFloat = (x2 > 2.0) ? (1.0 / 640.0) : 1.0
+            bestBox = CGRect(
+                x: CGFloat(x1) * scale,
+                y: CGFloat(y1) * scale,
+                width:  CGFloat(x2 - x1) * scale,
+                height: CGFloat(y2 - y1) * scale
+            )
+        }
+        return bestBox
+    }
+
+    // MARK: - Medición dentro de la región detectada (o fallback central)
+    private func measureInRegion(box: CGRect?, frame: ARFrame, depth: ARDepthData,
+                                  centerD: Float, vp: CGSize, cx: CGFloat, cy: CGFloat) {
+        // box en coordenadas [0,1] top-left origin (portrait) → puntos de pantalla UIKit
+        let screenBox: CGRect
+        if let b = box, b.width > 0.05, b.height > 0.05 {
+            screenBox = CGRect(
+                x: b.minX * vp.width,
+                y: b.minY * vp.height,
+                width:  b.width  * vp.width,
+                height: b.height * vp.height
+            )
+        } else {
+            let hw = vp.width * 0.38, hh = vp.height * 0.32
+            screenBox = CGRect(x: cx - hw, y: cy - hh, width: hw * 2, height: hh * 2)
+        }
+
+        guard screenBox.width > 30, screenBox.height > 30 else { return }
+
+        // Esquinas de la cara frontal en pantalla
+        let bl = CGPoint(x: screenBox.minX, y: screenBox.maxY)
+        let br = CGPoint(x: screenBox.maxX, y: screenBox.maxY)
+        let tl = CGPoint(x: screenBox.minX, y: screenBox.minY)
+        let tr = CGPoint(x: screenBox.maxX, y: screenBox.minY)
+
+        // Gradiente de profundidad en el centro (para cajas en ángulo)
+        let gs: CGFloat = 30
+        let dxL = sampleDepth(at: CGPoint(x: cx - gs, y: cy), frame: frame, depth: depth)
+        let dxR = sampleDepth(at: CGPoint(x: cx + gs, y: cy), frame: frame, depth: depth)
+        let dyT = sampleDepth(at: CGPoint(x: cx, y: cy - gs), frame: frame, depth: depth)
+        let dyB = sampleDepth(at: CGPoint(x: cx, y: cy + gs), frame: frame, depth: depth)
+
+        let gx: Float = (dxL != nil && dxR != nil && abs(dxR! - dxL!) < 0.20)
+                        ? (dxR! - dxL!) / Float(2 * gs) : 0
+        let gy: Float = (dyT != nil && dyB != nil && abs(dyB! - dyT!) < 0.20)
+                        ? (dyB! - dyT!) / Float(2 * gs) : 0
+
+        func expDepth(_ p: CGPoint) -> Float {
+            centerD + gx * Float(p.x - cx) + gy * Float(p.y - cy)
+        }
+
+        guard
+            let p3BL = worldPointAtDepth(bl, depth: expDepth(bl), frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: expDepth(br), frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: expDepth(tl), frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: expDepth(tr), frame: frame)
+        else { return }
+
+        // Rechazar si la cara es mayormente horizontal (piso / tapa de mesa)
+        let fRight     = simd_normalize(p3BR - p3BL)
+        let fUp        = simd_normalize(p3TL - p3BL)
+        let faceNormal = simd_normalize(simd_cross(fRight, fUp))
         guard abs(faceNormal.y) < 0.65 else { return }
+
+        let c = Double(simd_distance(p3BL, p3BR)) * 100   // comprimento (ancho)
+        let a = Double(simd_distance(p3BL, p3TL)) * 100   // altura
+
+        // Profundidad: escanear hacia arriba sobre la cara superior de la caja
+        let l = estimateDepthFromTopFace(frame: frame, depth: depth,
+                                          topLeft: tl, topRight: tr,
+                                          centerD: centerD) ?? (min(c, a) * 0.65)
+
+        guard c > 5, c < 300, a > 5, a < 300, l > 2 else { return }
 
         let α = smoothAlpha
         smoothBL = smoothBL.map { α * p3BL + (1-α) * $0 } ?? p3BL
@@ -158,13 +265,40 @@ final class BoxDetectionCoordinator: NSObject {
         updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!, measurement: m)
     }
 
-    // Robust percentile over a Float array (partial sort up to idx).
-    private func percentile(_ arr: [Float], _ p: Float) -> Float {
-        var s = arr
-        let idx = max(0, min(s.count - 1, Int(Float(s.count - 1) * p)))
-        // nth_element equivalent: partial sort only up to idx
-        s.sort()
-        return s[idx]
+    // MARK: - Estimación de profundidad (largura) escaneando la cara superior
+    // Escanea hacia arriba desde el borde superior del bounding box detectado.
+    // Cuando world.y cae más de 7 cm → cruzamos el borde trasero de la caja.
+    private func estimateDepthFromTopFace(frame: ARFrame, depth: ARDepthData,
+                                           topLeft: CGPoint, topRight: CGPoint,
+                                           centerD: Float) -> Double? {
+        var estimates = [Double]()
+
+        for frac in [0.25, 0.50, 0.75] as [CGFloat] {
+            let sx = topLeft.x + frac * (topRight.x - topLeft.x)
+            var sy = topLeft.y   // empieza en el borde superior de la caja
+
+            guard let startD = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
+                  let topPt  = worldPointAtDepth(CGPoint(x: sx, y: sy), depth: startD, frame: frame)
+            else { continue }
+
+            let topFaceY = topPt.y
+            var prevPt   = topPt
+
+            while sy > 8 {
+                sy -= 5
+                guard let d   = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
+                      let wPt = worldPointAtDepth(CGPoint(x: sx, y: sy), depth: d, frame: frame)
+                else { break }
+                if wPt.y < topFaceY - 0.07 { break }  // cruzó el borde trasero → suelo/fondo
+                if d - startD > 0.22         { break }  // salto grande de profundidad → fondo
+                prevPt = wPt
+            }
+
+            let boxDepth = Double(simd_distance(topPt, prevPt)) * 100
+            if boxDepth > 3, boxDepth < 200 { estimates.append(boxDepth) }
+        }
+
+        return estimates.isEmpty ? nil : median(estimates)
     }
 
     // MARK: - LiDAR helpers
@@ -239,13 +373,13 @@ final class BoxDetectionCoordinator: NSObject {
         return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
     }
 
-    // MARK: - Manual points (4-tap: base-left, base-right, base-back, top)
+    // MARK: - Manual points (3-4 toques)
     func addManualPoint(_ p: SIMD3<Float>) {
         manualPoints.append(p)
 
         let sphere = SCNSphere(radius: 0.01)
-        sphere.firstMaterial?.diffuse.contents  = UIColor.yellow
-        sphere.firstMaterial?.lightingModel     = .constant
+        sphere.firstMaterial?.diffuse.contents = UIColor.yellow
+        sphere.firstMaterial?.lightingModel    = .constant
         let node = SCNNode(geometry: sphere)
         node.position = SCNVector3(p.x, p.y, p.z)
         sceneView?.scene.rootNode.addChildNode(node)
@@ -273,7 +407,7 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Overlay (12-edge wireframe + 3 dimension labels)
+    // MARK: - Overlay (12 aristas + 3 etiquetas)
     func updateOverlay(bl: SIMD3<Float>, br: SIMD3<Float>,
                        tl: SIMD3<Float>, tr: SIMD3<Float>,
                        measurement: NativeMeasurement) {
@@ -324,9 +458,9 @@ final class BoxDetectionCoordinator: NSObject {
         let geo = SCNText(string: text, extrusionDepth: 0)
         geo.font = UIFont.boldSystemFont(ofSize: 48)
         geo.flatness = 0.1
-        geo.firstMaterial?.diffuse.contents  = color
-        geo.firstMaterial?.lightingModel     = .constant
-        geo.firstMaterial?.isDoubleSided     = true
+        geo.firstMaterial?.diffuse.contents = color
+        geo.firstMaterial?.lightingModel    = .constant
+        geo.firstMaterial?.isDoubleSided    = true
 
         let node  = SCNNode(geometry: geo)
         let scale: Float = 0.001
@@ -370,9 +504,9 @@ final class BoxDetectionCoordinator: NSObject {
         let mid  = (s + e) / 2
         node.position = SCNVector3(mid.x, mid.y, mid.z)
 
-        let dir  = simd_normalize(v)
-        let up   = SIMD3<Float>(0, 1, 0)
-        let dot  = simd_dot(up, dir)
+        let dir = simd_normalize(v)
+        let up  = SIMD3<Float>(0, 1, 0)
+        let dot = simd_dot(up, dir)
 
         if abs(dot) > 0.9999 {
             if dot < 0 { node.rotation = SCNVector4(1, 0, 0, Float.pi) }
@@ -387,32 +521,9 @@ final class BoxDetectionCoordinator: NSObject {
 
 // MARK: - Delegates
 extension BoxDetectionCoordinator: ARSCNViewDelegate {
-
-    // All mesh anchor mutations dispatched to main queue so measureFromCenter
-    // (also on main) reads a consistent snapshot without locks.
     func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-        if let meshAnchor = anchor as? ARMeshAnchor {
-            let id = anchor.identifier
-            DispatchQueue.main.async { [weak self] in
-                self?.meshAnchors[id] = meshAnchor
-            }
-        } else if anchor is ARPlaneAnchor {
+        if anchor is ARPlaneAnchor {
             DispatchQueue.main.async { [weak self] in self?.onPlaneFound() }
-        }
-    }
-
-    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-        guard let meshAnchor = anchor as? ARMeshAnchor else { return }
-        let id = anchor.identifier
-        DispatchQueue.main.async { [weak self] in
-            self?.meshAnchors[id] = meshAnchor
-        }
-    }
-
-    func renderer(_ renderer: SCNSceneRenderer, didRemove node: SCNNode, for anchor: ARAnchor) {
-        let id = anchor.identifier
-        DispatchQueue.main.async { [weak self] in
-            self?.meshAnchors.removeValue(forKey: id)
         }
     }
 }
@@ -436,12 +547,6 @@ extension BoxDetectionCoordinator: ARSessionDelegate {
     func session(_ session: ARSession, didFailWithError error: Error) {
         print("[ARKit] session failed: \(error.localizedDescription)")
     }
-
-    func sessionWasInterrupted(_ session: ARSession) {
-        print("[ARKit] session interrupted")
-    }
-
-    func sessionInterruptionEnded(_ session: ARSession) {
-        print("[ARKit] interruption ended")
-    }
+    func sessionWasInterrupted(_ session: ARSession)    { print("[ARKit] interrupted") }
+    func sessionInterruptionEnded(_ session: ARSession) { print("[ARKit] resumido") }
 }
