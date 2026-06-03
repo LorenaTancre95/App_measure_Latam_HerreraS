@@ -93,7 +93,7 @@ final class BoxDetectionCoordinator: NSObject {
 
         let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
         addToBuffer(m)
-        updateOverlay(bl: p3BL, br: p3BR, tl: p3TL, tr: p3TR)
+        updateOverlay(bl: p3BL, br: p3BR, tl: p3TL, tr: p3TR, measurement: m)
     }
 
     // MARK: - LiDAR unproject
@@ -209,22 +209,77 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Overlay
     func updateOverlay(bl: SIMD3<Float>, br: SIMD3<Float>,
-                       tl: SIMD3<Float>, tr: SIMD3<Float>) {
+                       tl: SIMD3<Float>, tr: SIMD3<Float>,
+                       measurement: NativeMeasurement) {
         guard let sv = sceneView else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.clearOverlay()
 
-            let color = UIColor(red: 0, green: 0.85, blue: 0.95, alpha: 1)
+            let yellow = UIColor(red: 1.0, green: 0.82, blue: 0.0, alpha: 1)
+
+            // Extrude front face backward to form the full 3-D box
+            let right      = simd_normalize(br - bl)
+            let up         = simd_normalize(tl - bl)
+            let faceNormal = simd_normalize(simd_cross(right, up))
+            let depthM     = Float(max(measurement.largura, 2) / 100.0)
+            let extrudeDir = -faceNormal   // into the scene
+
+            let bbl = bl + extrudeDir * depthM
+            let bbr = br + extrudeDir * depthM
+            let btl = tl + extrudeDir * depthM
+            let btr = tr + extrudeDir * depthM
+
+            // 12 edges of the wireframe box
             let edges: [(SIMD3<Float>, SIMD3<Float>)] = [
-                (bl, br), (br, tr), (tr, tl), (tl, bl)
+                (bl, br), (br, tr), (tr, tl), (tl, bl),          // front face
+                (bbl, bbr), (bbr, btr), (btr, btl), (btl, bbl),  // back face
+                (bl, bbl), (br, bbr), (tl, btl), (tr, btr),      // depth edges
             ]
             for (s, e) in edges {
-                let node = self.makeLine(from: s, to: e, color: color)
+                let node = self.makeLine(from: s, to: e, color: yellow)
+                sv.scene.rootNode.addChildNode(node)
+                self.overlayNodes.append(node)
+            }
+
+            // Dimension labels (billboard — always face camera)
+            let labelData: [(String, SIMD3<Float>)] = [
+                ("\(Int(measurement.comprimento.rounded())) cm", (bl + br) / 2 + up * (-0.055)),
+                ("\(Int(measurement.altura.rounded())) cm",      (bl + tl) / 2 + right * (-0.065)),
+                ("\(Int(measurement.largura.rounded())) cm",     (br + bbr) / 2 + right * 0.065),
+            ]
+            for (text, pos) in labelData {
+                let node = self.makeTextNode(text, color: yellow)
+                node.position = SCNVector3(pos.x, pos.y, pos.z)
                 sv.scene.rootNode.addChildNode(node)
                 self.overlayNodes.append(node)
             }
         }
+    }
+
+    private func makeTextNode(_ text: String, color: UIColor) -> SCNNode {
+        let geo = SCNText(string: text, extrusionDepth: 0)
+        geo.font = UIFont.boldSystemFont(ofSize: 48)
+        geo.flatness = 0.1
+        geo.firstMaterial?.diffuse.contents  = color
+        geo.firstMaterial?.lightingModel     = .constant
+        geo.firstMaterial?.isDoubleSided     = true
+
+        let node  = SCNNode(geometry: geo)
+        let scale: Float = 0.001
+        node.scale = SCNVector3(scale, scale, scale)
+
+        // Center pivot on text bounds
+        let (minB, maxB) = node.boundingBox
+        node.pivot = SCNMatrix4MakeTranslation(
+            (maxB.x - minB.x) / 2 + minB.x,
+            (maxB.y - minB.y) / 2 + minB.y,
+            0
+        )
+        let constraint = SCNBillboardConstraint()
+        constraint.freeAxes = .all
+        node.constraints = [constraint]
+        return node
     }
 
     func clearOverlay() {
