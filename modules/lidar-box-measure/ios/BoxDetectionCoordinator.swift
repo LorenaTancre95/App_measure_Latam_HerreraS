@@ -27,6 +27,13 @@ final class BoxDetectionCoordinator: NSObject {
     private let stabilityWindow = 5
     private let thresholdCm = 3.0
 
+    // MARK: - Overlay smoothing (exponential moving average on corner positions)
+    private var smoothBL: SIMD3<Float>?
+    private var smoothBR: SIMD3<Float>?
+    private var smoothTL: SIMD3<Float>?
+    private var smoothTR: SIMD3<Float>?
+    private let smoothAlpha: Float = 0.25
+
     // MARK: - Overlay
     private var overlayNodes: [SCNNode] = []
 
@@ -43,86 +50,130 @@ final class BoxDetectionCoordinator: NSObject {
         super.init()
     }
 
-    // MARK: - Depth-scan measurement (replaces Vision rectangle detection)
-    // Scans outward from the screen center (reticle) to find LiDAR depth
-    // discontinuities that mark the physical edges of the box.
-    // Works regardless of the box's visual appearance.
+    // MARK: - Depth-scan measurement
+    // Scans 5 horizontal + 5 vertical lines from the reticle center.
+    // Uses median edge positions (robust to outlier scan lines).
+    // Unprojects corners using the known face depth (centerD) so edge-pixel depth
+    // noise doesn't corrupt the 3D corner positions.
+    // Applies exponential smoothing to corner positions to reduce wireframe jitter.
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
-        let cx = vp.width / 2
-        let cy = vp.height / 2
+        let cx = vp.width / 2, cy = vp.height / 2
 
         guard let centerD = sampleDepth(at: CGPoint(x: cx, y: cy), frame: frame, depth: depth),
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        let edgeThreshold: Float = 0.10  // 10 cm depth jump = box edge
-        let step: CGFloat = 5
-        // Scan stops at 88% of screen to avoid picking up walls/floor beyond a box
-        let limL = vp.width  * 0.12, limR = vp.width  * 0.88
-        let limT = vp.height * 0.12, limB = vp.height * 0.88
+        let threshold: Float = 0.05   // 5 cm depth jump = box edge
+        let step: CGFloat    = 4
+        let limL = vp.width  * 0.08, limR = vp.width  * 0.92
+        let limT = vp.height * 0.06, limB = vp.height * 0.94
 
-        func scanEdge(dx: CGFloat, dy: CGFloat) -> CGPoint {
-            var x = cx + dx, y = cy + dy
-            while x >= limL, x <= limR, y >= limT, y <= limB {
+        func edgeX(fromX: CGFloat, y: CGFloat, dx: CGFloat) -> CGFloat? {
+            var x = fromX + dx
+            while (dx < 0 ? x >= limL : x <= limR) {
                 if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
-                    if abs(d - centerD) > edgeThreshold {
-                        return CGPoint(x: x - dx, y: y - dy)
-                    }
+                    if abs(d - centerD) > threshold { return x - dx }
                 } else {
-                    return CGPoint(x: x - dx, y: y - dy)
+                    return x - dx
                 }
-                x += dx; y += dy
+                x += dx
             }
-            return CGPoint(x: x - dx, y: y - dy)
+            return nil
         }
 
-        let lPt = scanEdge(dx: -step, dy: 0)
-        let rPt = scanEdge(dx: +step, dy: 0)
-        let tPt = scanEdge(dx: 0, dy: -step)
-        let bPt = scanEdge(dx: 0, dy: +step)
+        func edgeY(x: CGFloat, fromY: CGFloat, dy: CGFloat) -> CGFloat? {
+            var y = fromY + dy
+            while (dy < 0 ? y >= limT : y <= limB) {
+                if let d = sampleDepth(at: CGPoint(x: x, y: y), frame: frame, depth: depth) {
+                    if abs(d - centerD) > threshold { return y - dy }
+                } else {
+                    return y - dy
+                }
+                y += dy
+            }
+            return nil
+        }
 
-        let spanX = rPt.x - lPt.x
-        let spanY = bPt.y - tPt.y
+        // 5 horizontal lines: validate each starts on the same surface as center
+        let yOffs: [CGFloat] = [-0.15, -0.07, 0, 0.07, 0.15].map { $0 * vp.height }
+        var lefts: [CGFloat] = [], rights: [CGFloat] = []
+        for yOff in yOffs {
+            let scanY = cy + yOff
+            guard scanY >= limT, scanY <= limB,
+                  let d = sampleDepth(at: CGPoint(x: cx, y: scanY), frame: frame, depth: depth),
+                  abs(d - centerD) < threshold
+            else { continue }
+            if let lx = edgeX(fromX: cx, y: scanY, dx: -step) { lefts.append(lx) }
+            if let rx = edgeX(fromX: cx, y: scanY, dx: +step) { rights.append(rx) }
+        }
 
-        // Require minimum face size; reject regions that hit the scan limit on ALL sides
-        // (that means we're measuring the floor/wall, not a box face)
-        guard spanX > 50, spanY > 50 else { return }
-        let hitLimitX = lPt.x <= limL + step && rPt.x >= limR - step
-        let hitLimitY = tPt.y <= limT + step && bPt.y >= limB - step
-        guard !(hitLimitX && hitLimitY) else { return }
+        // 5 vertical lines
+        let xOffs: [CGFloat] = [-0.15, -0.07, 0, 0.07, 0.15].map { $0 * vp.width }
+        var tops: [CGFloat] = [], bottoms: [CGFloat] = []
+        for xOff in xOffs {
+            let scanX = cx + xOff
+            guard scanX >= limL, scanX <= limR,
+                  let d = sampleDepth(at: CGPoint(x: scanX, y: cy), frame: frame, depth: depth),
+                  abs(d - centerD) < threshold
+            else { continue }
+            if let ty = edgeY(x: scanX, fromY: cy, dy: -step) { tops.append(ty) }
+            if let by = edgeY(x: scanX, fromY: cy, dy: +step) { bottoms.append(by) }
+        }
 
-        let bl = CGPoint(x: lPt.x, y: bPt.y)
-        let br = CGPoint(x: rPt.x, y: bPt.y)
-        let tl = CGPoint(x: lPt.x, y: tPt.y)
-        let tr = CGPoint(x: rPt.x, y: tPt.y)
+        // Need at least 2 valid readings per direction
+        guard lefts.count >= 2, rights.count >= 2,
+              tops.count  >= 2, bottoms.count >= 2 else { return }
 
+        // Median edge positions — robust to outlier scan lines
+        let finalLeft   = medianCG(lefts)
+        let finalRight  = medianCG(rights)
+        let finalTop    = medianCG(tops)
+        let finalBottom = medianCG(bottoms)
+
+        guard finalRight - finalLeft > 30, finalBottom - finalTop > 30 else { return }
+
+        let bl = CGPoint(x: finalLeft,  y: finalBottom)
+        let br = CGPoint(x: finalRight, y: finalBottom)
+        let tl = CGPoint(x: finalLeft,  y: finalTop)
+        let tr = CGPoint(x: finalRight, y: finalTop)
+
+        // Use centerD for all corners — avoids noisy mixed-depth readings at edges
         guard
-            let p3BL = worldPoint(bl, frame: frame, depth: depth),
-            let p3BR = worldPoint(br, frame: frame, depth: depth),
-            let p3TL = worldPoint(tl, frame: frame, depth: depth),
-            let p3TR = worldPoint(tr, frame: frame, depth: depth)
+            let p3BL = worldPointAtDepth(bl, depth: centerD, frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: centerD, frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: centerD, frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: centerD, frame: frame)
         else { return }
 
-        // Reject horizontal surfaces (floor, table-top): their face normal points up (Y ≈ 1)
-        let right      = simd_normalize(p3BR - p3BL)
-        let up         = simd_normalize(p3TL - p3BL)
-        let faceNormal = simd_normalize(simd_cross(right, up))
+        // Reject horizontal surfaces (floor, table)
+        let fRight     = simd_normalize(p3BR - p3BL)
+        let fUp        = simd_normalize(p3TL - p3BL)
+        let faceNormal = simd_normalize(simd_cross(fRight, fUp))
         guard abs(faceNormal.y) < 0.65 else { return }
 
         let c = Double(simd_distance(p3BL, p3BR)) * 100
         let a = Double(simd_distance(p3BL, p3TL)) * 100
-        let l = estimateDepth(frame: frame,
-                              p3BL: p3BL, p3BR: p3BR,
-                              p3TL: p3TL, p3TR: p3TR,
-                              depth: depth) ?? min(c, a) * 0.6
+        // Estimate depth from the top face (if the user tilts slightly, the top is visible)
+        let l = estimateDepthFromTopFace(frame: frame,
+                                         depth: depth,
+                                         topLeft: tl, topRight: tr,
+                                         centerD: centerD,
+                                         faceNormal: faceNormal) ?? min(c, a) * 0.6
 
         guard c > 5, c < 300, a > 5, a < 300, l > 2 else { return }
 
+        // Exponential moving average to smooth corner jitter
+        let α = smoothAlpha
+        smoothBL = smoothBL.map { α * p3BL + (1-α) * $0 } ?? p3BL
+        smoothBR = smoothBR.map { α * p3BR + (1-α) * $0 } ?? p3BR
+        smoothTL = smoothTL.map { α * p3TL + (1-α) * $0 } ?? p3TL
+        smoothTR = smoothTR.map { α * p3TR + (1-α) * $0 } ?? p3TR
+
         let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
         addToBuffer(m)
-        updateOverlay(bl: p3BL, br: p3BR, tl: p3TL, tr: p3TR, measurement: m)
+        updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!, measurement: m)
     }
 
     // Reads a single depth sample from the LiDAR depth map at a screen point.
@@ -146,112 +197,75 @@ final class BoxDetectionCoordinator: NSObject {
         return v > 0.02 && v < 8 ? v : nil
     }
 
-    // MARK: - LiDAR unproject
-    private func worldPoint(_ screenPt: CGPoint,
-                            frame: ARFrame,
-                            depth: ARDepthData) -> SIMD3<Float>? {
+    // MARK: - LiDAR unproject (using provided depth — avoids noisy edge-pixel readings)
+    private func worldPointAtDepth(_ screenPt: CGPoint,
+                                   depth depthVal: Float,
+                                   frame: ARFrame) -> SIMD3<Float>? {
         guard let sv = sceneView else { return nil }
-        let viewportSize = sv.bounds.size
-
-        let invDisplay = frame.displayTransform(for: .portrait,
-                                               viewportSize: viewportSize).inverted()
-        let normVP  = CGPoint(x: screenPt.x / viewportSize.width,
-                              y: screenPt.y / viewportSize.height)
-        let normCam = normVP.applying(invDisplay)
-
-        let depthMap = depth.depthMap
-        let dW = CVPixelBufferGetWidth(depthMap)
-        let dH = CVPixelBufferGetHeight(depthMap)
-        let sx = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
-        let sy = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
-
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
-
-        let depthVal = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
-        guard depthVal > 0.05, depthVal < 8 else { return nil }
-
+        let vp = sv.bounds.size
+        let invDisplay = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let normCam = CGPoint(x: screenPt.x / vp.width,
+                              y: screenPt.y / vp.height).applying(invDisplay)
         let intr = frame.camera.intrinsics
         let iW   = Float(frame.camera.imageResolution.width)
         let iH   = Float(frame.camera.imageResolution.height)
-
         let imgX = Float(normCam.x) * iW
         let imgY = Float(normCam.y) * iH
-
         let xCam = (imgX - intr[2][0]) / intr[0][0] * depthVal
         let yCam = (imgY - intr[2][1]) / intr[1][1] * depthVal
-        // ARKit camera looks in -Z; LiDAR depth is a positive distance → negate Z
         let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, -depthVal, 1)
-
         return SIMD3<Float>(pt.x, pt.y, pt.z)
     }
 
-    // MARK: - Depth estimation via LiDAR depth map
-    private func estimateDepth(frame: ARFrame,
-                               p3BL: SIMD3<Float>,
-                               p3BR: SIMD3<Float>,
-                               p3TL: SIMD3<Float>,
-                               p3TR: SIMD3<Float>,
-                               depth: ARDepthData) -> Double? {
+    // MARK: - Depth estimation via top-face scan
+    // Scans upward from the top edge of the detected front face.
+    // If the top face of the box is visible (camera tilted slightly down), its extent
+    // from the front-top edge to the back-top edge gives the box depth (largura).
+    private func estimateDepthFromTopFace(frame: ARFrame,
+                                           depth: ARDepthData,
+                                           topLeft: CGPoint,
+                                           topRight: CGPoint,
+                                           centerD: Float,
+                                           faceNormal: SIMD3<Float>) -> Double? {
         guard let sv = sceneView else { return nil }
-        let viewportSize = sv.bounds.size
+        let vp   = sv.bounds.size
+        let topX = (topLeft.x + topRight.x) / 2
+        let topY = topLeft.y
+        let step: CGFloat = 4
+        let limT = vp.height * 0.03
 
-        let right      = simd_normalize(p3BR - p3BL)
-        let up         = simd_normalize(p3TL - p3BL)
-        let faceNormal = simd_normalize(simd_cross(right, up))
+        // Walk upward from top edge; collect depth samples on the top face
+        var y = topY - step
+        var backY: CGFloat? = nil
+        var lastD: Float = centerD
 
-        let frontCenter = (p3BL + p3BR + p3TL + p3TR) / 4
-        guard let frontDepth = depthAtWorldPoint(frontCenter,
-                                                  frame: frame,
-                                                  depthData: depth,
-                                                  viewportSize: viewportSize)
-        else { return nil }
-
-        let probeOffsets: [Float] = [0.05, 0.10, 0.20, 0.35, 0.55]
-        for offset in probeOffsets {
-            let probe = frontCenter - faceNormal * offset
-            guard let probeDepth = depthAtWorldPoint(probe,
-                                                      frame: frame,
-                                                      depthData: depth,
-                                                      viewportSize: viewportSize)
-            else { continue }
-            let gap = probeDepth - frontDepth
-            if gap > 0.02 { return Double(gap) * 100 }
+        while y >= limT {
+            guard let d = sampleDepth(at: CGPoint(x: topX, y: y),
+                                      frame: frame, depth: depth) else {
+                backY = y + step; break
+            }
+            // Top face depth is usually similar to or slightly larger than centerD.
+            // A jump > 12 cm indicates we left the box.
+            if abs(d - centerD) > 0.12 {
+                backY = y + step; break
+            }
+            lastD = d
+            y -= step
         }
-        return nil
-    }
 
-    private func depthAtWorldPoint(_ worldPt: SIMD3<Float>,
-                                   frame: ARFrame,
-                                   depthData: ARDepthData,
-                                   viewportSize: CGSize) -> Float? {
-        guard let sv = sceneView else { return nil }
+        guard let beY = backY else { return nil }
 
-        let projected = sv.projectPoint(SCNVector3(worldPt.x, worldPt.y, worldPt.z))
-        let screenPt  = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
-
-        guard screenPt.x >= 0, screenPt.x < viewportSize.width,
-              screenPt.y >= 0, screenPt.y < viewportSize.height
+        let frontPt3 = worldPointAtDepth(CGPoint(x: topX, y: topY),
+                                          depth: centerD, frame: frame)
+        guard let backD = sampleDepth(at: CGPoint(x: topX, y: beY),
+                                      frame: frame, depth: depth),
+              let backPt3 = worldPointAtDepth(CGPoint(x: topX, y: beY),
+                                               depth: backD, frame: frame),
+              let fp3 = frontPt3
         else { return nil }
 
-        let invDisplay = frame.displayTransform(for: .portrait,
-                                               viewportSize: viewportSize).inverted()
-        let normCam = CGPoint(x: screenPt.x / viewportSize.width,
-                              y: screenPt.y / viewportSize.height).applying(invDisplay)
-
-        let depthMap = depthData.depthMap
-        let dW = CVPixelBufferGetWidth(depthMap)
-        let dH = CVPixelBufferGetHeight(depthMap)
-        let sx = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
-        let sy = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
-
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
-
-        let val = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
-        return val > 0.02 && val < 8 ? val : nil
+        let dist = Double(simd_distance(fp3, backPt3)) * 100
+        return dist > 2 && dist < 200 ? dist : nil
     }
 
     // MARK: - Stability buffer
@@ -282,6 +296,11 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     private func median(_ arr: [Double]) -> Double {
+        let s = arr.sorted(); let m = s.count / 2
+        return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
+    }
+
+    private func medianCG(_ arr: [CGFloat]) -> CGFloat {
         let s = arr.sorted(); let m = s.count / 2
         return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
     }
@@ -401,6 +420,7 @@ final class BoxDetectionCoordinator: NSObject {
         buffer.removeAll()
         manualPoints.removeAll()
         lastMeasurement = nil
+        smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
     }
 
     private func makeLine(from s: SIMD3<Float>,
