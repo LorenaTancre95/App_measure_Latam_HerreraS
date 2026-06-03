@@ -14,11 +14,15 @@ final class ARCameraViewController: UIViewController {
     private var didStartSession = false
 
     // MARK: - UI
-    private let statusLabel = UILabel()
-    private let confirmBtn  = UIButton(type: .custom)
-    private let modeControl = UISegmentedControl(items: ["AUTO", "MANUAL"])
-    private let frameView   = CornerFrameView()
-    private let bottomPanel = UIView()
+    private let statusLabel    = UILabel()
+    private let confirmedLabel = UILabel()
+    private let volumeLabel    = UILabel()
+    private let confirmBtn     = UIButton(type: .custom)
+    private let remeasureBtn   = UIButton(type: .custom)
+    private let modeControl    = UISegmentedControl(items: ["AUTO", "MANUAL"])
+    private let frameView      = CornerFrameView()
+    private let bottomPanel    = UIView()
+    private let reticleView    = ReticleView()
 
     // MARK: - Lifecycle
     override func viewDidLoad() {
@@ -62,10 +66,15 @@ final class ARCameraViewController: UIViewController {
 
     // MARK: - UI
     private func buildUI() {
-        // Scan-frame overlay (UIView, no CALayer override needed)
+        // Scan-frame overlay
         frameView.translatesAutoresizingMaskIntoConstraints = false
         frameView.isUserInteractionEnabled = false
         view.addSubview(frameView)
+
+        // Reticle (green circle, always centered in camera area)
+        reticleView.translatesAutoresizingMaskIntoConstraints = false
+        reticleView.isUserInteractionEnabled = false
+        view.addSubview(reticleView)
 
         // X close button
         let closeBtn = UIButton(type: .custom)
@@ -82,23 +91,20 @@ final class ARCameraViewController: UIViewController {
         modeControl.selectedSegmentIndex     = 0
         modeControl.backgroundColor          = UIColor.black.withAlphaComponent(0.6)
         modeControl.selectedSegmentTintColor = .white
+        modeControl.setTitleTextAttributes([.foregroundColor: UIColor.white], for: .normal)
         modeControl.setTitleTextAttributes(
-            [.foregroundColor: UIColor.white],
-            for: .normal)
-        modeControl.setTitleTextAttributes(
-            [.foregroundColor: UIColor.black,
-             .font: UIFont.boldSystemFont(ofSize: 13)],
+            [.foregroundColor: UIColor.black, .font: UIFont.boldSystemFont(ofSize: 13)],
             for: .selected)
         modeControl.addTarget(self, action: #selector(modeChanged), for: .valueChanged)
         modeControl.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(modeControl)
 
         // Bottom panel
-        bottomPanel.backgroundColor = UIColor.black.withAlphaComponent(0.78)
+        bottomPanel.backgroundColor = UIColor(red: 0.07, green: 0.10, blue: 0.18, alpha: 0.95)
         bottomPanel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bottomPanel)
 
-        // Status label
+        // Status label — scanning state
         statusLabel.text          = "Aponte para a caixa"
         statusLabel.textColor     = .white
         statusLabel.font          = UIFont.systemFont(ofSize: 17, weight: .semibold)
@@ -106,14 +112,45 @@ final class ARCameraViewController: UIViewController {
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         bottomPanel.addSubview(statusLabel)
 
-        // Confirm button
-        confirmBtn.setTitle("Confirmar medição", for: .normal)
+        // Confirmed label — shown after measurement locks
+        confirmedLabel.text          = "✅  Medição confirmada"
+        confirmedLabel.textColor     = UIColor(red: 0.2, green: 0.85, blue: 0.4, alpha: 1)
+        confirmedLabel.font          = UIFont.boldSystemFont(ofSize: 17)
+        confirmedLabel.textAlignment = .center
+        confirmedLabel.isHidden      = true
+        confirmedLabel.translatesAutoresizingMaskIntoConstraints = false
+        bottomPanel.addSubview(confirmedLabel)
+
+        // Volume / cubic weight label
+        volumeLabel.textColor     = UIColor.white.withAlphaComponent(0.85)
+        volumeLabel.font          = UIFont.systemFont(ofSize: 14)
+        volumeLabel.textAlignment = .center
+        volumeLabel.isHidden      = true
+        volumeLabel.translatesAutoresizingMaskIntoConstraints = false
+        bottomPanel.addSubview(volumeLabel)
+
+        // Remedir button
+        remeasureBtn.setTitle("↺  Remedir", for: .normal)
+        remeasureBtn.setTitleColor(.white, for: .normal)
+        remeasureBtn.titleLabel?.font   = UIFont.boldSystemFont(ofSize: 15)
+        remeasureBtn.backgroundColor    = UIColor.white.withAlphaComponent(0.15)
+        remeasureBtn.layer.cornerRadius = 22
+        remeasureBtn.layer.borderWidth  = 1
+        remeasureBtn.layer.borderColor  = UIColor.white.withAlphaComponent(0.3).cgColor
+        remeasureBtn.clipsToBounds      = true
+        remeasureBtn.isHidden           = true
+        remeasureBtn.addTarget(self, action: #selector(didTapRemeasure), for: .touchUpInside)
+        remeasureBtn.translatesAutoresizingMaskIntoConstraints = false
+        bottomPanel.addSubview(remeasureBtn)
+
+        // Usar button (green)
+        confirmBtn.setTitle("✓  Usar", for: .normal)
         confirmBtn.setTitleColor(.black, for: .normal)
-        confirmBtn.titleLabel?.font = UIFont.boldSystemFont(ofSize: 15)
-        confirmBtn.backgroundColor  = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1)
+        confirmBtn.titleLabel?.font   = UIFont.boldSystemFont(ofSize: 15)
+        confirmBtn.backgroundColor    = UIColor(red: 0.2, green: 0.85, blue: 0.4, alpha: 1)
         confirmBtn.layer.cornerRadius = 22
-        confirmBtn.clipsToBounds = true
-        confirmBtn.isHidden = true
+        confirmBtn.clipsToBounds      = true
+        confirmBtn.isHidden           = true
         confirmBtn.addTarget(self, action: #selector(didTapConfirm), for: .touchUpInside)
         confirmBtn.translatesAutoresizingMaskIntoConstraints = false
         bottomPanel.addSubview(confirmBtn)
@@ -133,21 +170,41 @@ final class ARCameraViewController: UIViewController {
             bottomPanel.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             bottomPanel.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             bottomPanel.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomPanel.heightAnchor.constraint(equalToConstant: 160),
 
             frameView.topAnchor.constraint(equalTo: closeBtn.bottomAnchor, constant: 16),
             frameView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 40),
             frameView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -40),
             frameView.bottomAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: -16),
 
-            statusLabel.topAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: 14),
+            reticleView.centerXAnchor.constraint(equalTo: frameView.centerXAnchor),
+            reticleView.centerYAnchor.constraint(equalTo: frameView.centerYAnchor),
+            reticleView.widthAnchor.constraint(equalToConstant: 44),
+            reticleView.heightAnchor.constraint(equalToConstant: 44),
+
+            // Scanning state: statusLabel near top, vertically centered in usable panel space
+            statusLabel.centerYAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: 50),
             statusLabel.leadingAnchor.constraint(equalTo: bottomPanel.leadingAnchor, constant: 16),
             statusLabel.trailingAnchor.constraint(equalTo: bottomPanel.trailingAnchor, constant: -16),
 
-            confirmBtn.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
-            confirmBtn.centerXAnchor.constraint(equalTo: bottomPanel.centerXAnchor),
-            confirmBtn.widthAnchor.constraint(greaterThanOrEqualToConstant: 200),
-            confirmBtn.heightAnchor.constraint(equalToConstant: 44),
+            // Confirmed state
+            confirmedLabel.topAnchor.constraint(equalTo: bottomPanel.topAnchor, constant: 14),
+            confirmedLabel.leadingAnchor.constraint(equalTo: bottomPanel.leadingAnchor, constant: 16),
+            confirmedLabel.trailingAnchor.constraint(equalTo: bottomPanel.trailingAnchor, constant: -16),
+
+            volumeLabel.topAnchor.constraint(equalTo: confirmedLabel.bottomAnchor, constant: 5),
+            volumeLabel.leadingAnchor.constraint(equalTo: bottomPanel.leadingAnchor, constant: 16),
+            volumeLabel.trailingAnchor.constraint(equalTo: bottomPanel.trailingAnchor, constant: -16),
+
+            remeasureBtn.leadingAnchor.constraint(equalTo: bottomPanel.leadingAnchor, constant: 16),
+            remeasureBtn.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -14),
+            remeasureBtn.heightAnchor.constraint(equalToConstant: 44),
+
+            confirmBtn.leadingAnchor.constraint(equalTo: remeasureBtn.trailingAnchor, constant: 12),
+            confirmBtn.trailingAnchor.constraint(equalTo: bottomPanel.trailingAnchor, constant: -16),
             confirmBtn.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -14),
+            confirmBtn.heightAnchor.constraint(equalToConstant: 44),
+            confirmBtn.widthAnchor.constraint(equalTo: remeasureBtn.widthAnchor, multiplier: 1.6),
         ])
     }
 
@@ -175,20 +232,40 @@ final class ARCameraViewController: UIViewController {
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             cfg.frameSemantics = [.sceneDepth, .smoothedSceneDepth]
         }
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            cfg.sceneReconstruction = .mesh
+        }
         sceneView.session.run(cfg, options: [.resetTracking, .removeExistingAnchors])
     }
 
     // MARK: - Measurement callback
     private func handleMeasurement(_ m: NativeMeasurement) {
-        let c = Int(m.comprimento.rounded())
-        let l = Int(m.largura.rounded())
-        let a = Int(m.altura.rounded())
-        statusLabel.text = "C: \(c)  ×  L: \(l)  ×  A: \(a) cm"
-        confirmBtn.isHidden = false
+        let volM3      = (m.comprimento / 100) * (m.largura / 100) * (m.altura / 100)
+        let pesoCubado = volM3 * 167   // standard road-freight factor kg/m³
+
+        let volStr  = String(format: "%.4f", volM3).replacingOccurrences(of: ".", with: ",")
+        let pesoStr = String(format: "%.1f", pesoCubado).replacingOccurrences(of: ".", with: ",")
+        volumeLabel.text = "Vol: \(volStr) m³  ·  Peso Cubado: \(pesoStr) kg"
+
+        statusLabel.isHidden    = true
+        confirmedLabel.isHidden = false
+        volumeLabel.isHidden    = false
+        remeasureBtn.isHidden   = false
+        confirmBtn.isHidden     = false
         frameView.setGreen()
     }
 
     // MARK: - Actions
+    @objc private func didTapRemeasure() {
+        coordinator.reset()
+        statusLabel.isHidden    = false
+        confirmedLabel.isHidden = true
+        volumeLabel.isHidden    = true
+        remeasureBtn.isHidden   = true
+        confirmBtn.isHidden     = true
+        frameView.resetColor()
+    }
+
     @objc private func didTapCancel() {
         sceneView.session.pause()
         dismiss(animated: true) { [weak self] in self?.onCancel?() }
@@ -237,6 +314,13 @@ private final class CornerFrameView: UIView {
         setNeedsDisplay()
     }
 
+    func resetColor() {
+        guard isGreen else { return }
+        isGreen     = false
+        strokeColor = UIColor(red: 1, green: 0.8, blue: 0, alpha: 1)
+        setNeedsDisplay()
+    }
+
     override func draw(_ rect: CGRect) {
         guard let ctx = UIGraphicsGetCurrentContext() else { return }
         ctx.setStrokeColor(strokeColor.cgColor)
@@ -267,5 +351,30 @@ private final class CornerFrameView: UIView {
         ctx.addLine(to: CGPoint(x: b.maxX, y: b.maxY - len))
 
         ctx.strokePath()
+    }
+}
+
+// MARK: - Reticle overlay (green circle + center dot)
+private final class ReticleView: UIView {
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque        = false
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+        let green = UIColor(red: 0.2, green: 0.85, blue: 0.2, alpha: 1)
+
+        ctx.setStrokeColor(green.cgColor)
+        ctx.setLineWidth(2.5)
+        ctx.strokeEllipse(in: rect.insetBy(dx: 2, dy: 2))
+
+        ctx.setFillColor(green.cgColor)
+        let d: CGFloat = 6
+        ctx.fillEllipse(in: CGRect(x: rect.midX - d / 2,
+                                   y: rect.midY - d / 2,
+                                   width: d, height: d))
     }
 }

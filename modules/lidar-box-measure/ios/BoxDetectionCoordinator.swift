@@ -87,7 +87,10 @@ final class BoxDetectionCoordinator: NSObject {
 
         let c = Double(simd_distance(p3BL, p3BR)) * 100
         let a = Double(simd_distance(p3BL, p3TL)) * 100
-        let l = estimateDepth(frame: frame, p3BL: p3BL, p3BR: p3BR) ?? (c * 0.5)
+        let l = estimateDepth(frame: frame,
+                              p3BL: p3BL, p3BR: p3BR,
+                              p3TL: p3TL, p3TR: p3TR,
+                              depth: depth) ?? min(c, a) * 0.6
 
         guard c > 5, c < 300, a > 5, a < 300, l > 2 else { return }
 
@@ -138,26 +141,81 @@ final class BoxDetectionCoordinator: NSObject {
         return SIMD3<Float>(pt.x, pt.y, pt.z)
     }
 
-    // MARK: - Depth estimation
+    // MARK: - Depth estimation via LiDAR depth map
+    // Samples the depth map at the left and right midpoints of the visible face,
+    // then reads a second depth value offset inward along the face normal to get
+    // the box thickness. Falls back to nil so the caller can use a safe default.
     private func estimateDepth(frame: ARFrame,
                                p3BL: SIMD3<Float>,
-                               p3BR: SIMD3<Float>) -> Double? {
+                               p3BR: SIMD3<Float>,
+                               p3TL: SIMD3<Float>,
+                               p3TR: SIMD3<Float>,
+                               depth: ARDepthData) -> Double? {
+        guard let sv = sceneView else { return nil }
+        let viewportSize = sv.bounds.size
+
+        let right      = simd_normalize(p3BR - p3BL)
+        let up         = simd_normalize(p3TL - p3BL)
+        let faceNormal = simd_normalize(simd_cross(right, up))
+
+        // Sample depth at several points stepped inward along the face normal
+        // (0.05 m, 0.15 m, 0.30 m, 0.50 m) and pick the first one that differs
+        // meaningfully from the front-face depth — that gap is the box depth.
+        let frontCenter = (p3BL + p3BR + p3TL + p3TR) / 4
+        guard let frontDepth = depthAtWorldPoint(frontCenter,
+                                                  frame: frame,
+                                                  depthData: depth,
+                                                  viewportSize: viewportSize) else { return nil }
+
+        let probeOffsets: [Float] = [0.05, 0.10, 0.20, 0.35, 0.55]
+        for offset in probeOffsets {
+            let probe = frontCenter - faceNormal * offset   // step behind the face
+            guard let probeDepth = depthAtWorldPoint(probe,
+                                                      frame: frame,
+                                                      depthData: depth,
+                                                      viewportSize: viewportSize)
+            else { continue }
+
+            let gap = probeDepth - frontDepth               // positive = further away
+            if gap > 0.02 {                                 // at least 2 cm gap found
+                return Double(gap) * 100
+            }
+        }
+        return nil
+    }
+
+    // Projects a world-space point back to the depth map and returns its depth value.
+    private func depthAtWorldPoint(_ worldPt: SIMD3<Float>,
+                                   frame: ARFrame,
+                                   depthData: ARDepthData,
+                                   viewportSize: CGSize) -> Float? {
         guard let sv = sceneView else { return nil }
 
-        let center = (p3BL + p3BR) / 2
-        let projected = sv.projectPoint(SCNVector3(center.x, center.y, center.z))
-        let screenPt = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
+        let projected = sv.projectPoint(SCNVector3(worldPt.x, worldPt.y, worldPt.z))
+        let screenPt  = CGPoint(x: CGFloat(projected.x), y: CGFloat(projected.y))
 
-        guard
-            let query = sv.raycastQuery(from: screenPt,
-                                        allowing: .existingPlaneGeometry,
-                                        alignment: .horizontal),
-            let result = sv.session.raycast(query).first
+        guard screenPt.x >= 0, screenPt.x < viewportSize.width,
+              screenPt.y >= 0, screenPt.y < viewportSize.height
         else { return nil }
 
-        let back = result.worldTransform.columns.3
-        return Double(simd_distance(center,
-                                    SIMD3<Float>(back.x, back.y, back.z))) * 100
+        let invDisplay = frame.displayTransform(for: .portrait,
+                                               viewportSize: viewportSize).inverted()
+        let normVP  = CGPoint(x: screenPt.x / viewportSize.width,
+                              y: screenPt.y / viewportSize.height)
+        let normCam = normVP.applying(invDisplay)
+
+        let depthMap = depthData.depthMap
+        let dW = CVPixelBufferGetWidth(depthMap)
+        let dH = CVPixelBufferGetHeight(depthMap)
+        let sx = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
+        let sy = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
+
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+
+        let val = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
+        return val > 0.02 && val < 8 ? val : nil
     }
 
     // MARK: - Stability buffer
@@ -204,11 +262,26 @@ final class BoxDetectionCoordinator: NSObject {
         overlayNodes.append(node)
 
         if manualPoints.count == 3 {
+            // p0=base-left, p1=base-right (comprimento), p2=base-back (largura)
             let p0 = manualPoints[0], p1 = manualPoints[1], p2 = manualPoints[2]
             let c = Double(simd_distance(p0, p1)) * 100
-            let a = Double(simd_distance(p0, p2)) * 100
-            let m = NativeMeasurement(comprimento: c, largura: c * 0.5, altura: a)
+            let l = Double(simd_distance(p0, p2)) * 100
+            let a = Double(simd_distance(p0, p2)) * 100   // height needs a 4th tap; use depth as placeholder
+            let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
             lastMeasurement = m
+            DispatchQueue.main.async { [weak self] in self?.onUpdate(m) }
+        } else if manualPoints.count == 4 {
+            // p3 = top point → real height
+            let p0 = manualPoints[0], p1 = manualPoints[1]
+            let p2 = manualPoints[2], p3 = manualPoints[3]
+            let c = Double(simd_distance(p0, p1)) * 100
+            let l = Double(simd_distance(p0, p2)) * 100
+            let a = Double(simd_distance(p0, p3)) * 100
+            let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
+            lastMeasurement = m
+            manualPoints.removeAll()
+            overlayNodes.forEach { $0.removeFromParentNode() }
+            overlayNodes.removeAll()
             DispatchQueue.main.async { [weak self] in self?.onUpdate(m) }
         }
     }
@@ -303,7 +376,7 @@ final class BoxDetectionCoordinator: NSObject {
     private func makeLine(from s: SIMD3<Float>,
                           to e: SIMD3<Float>,
                           color: UIColor) -> SCNNode {
-        let v = e - s
+        let v   = e - s
         let len = simd_length(v)
         let cyl = SCNCylinder(radius: 0.002, height: CGFloat(len))
         cyl.firstMaterial?.diffuse.contents = color
@@ -315,8 +388,18 @@ final class BoxDetectionCoordinator: NSObject {
 
         let dir  = simd_normalize(v)
         let up   = SIMD3<Float>(0, 1, 0)
-        let axis = simd_cross(up, dir)
-        node.rotation = SCNVector4(axis.x, axis.y, axis.z, acos(simd_dot(up, dir)))
+        let dot  = simd_dot(up, dir)
+
+        if abs(dot) > 0.9999 {
+            // Edge is (nearly) vertical — no rotation needed, or flip 180° if downward
+            if dot < 0 {
+                node.rotation = SCNVector4(1, 0, 0, Float.pi)
+            }
+        } else {
+            let axis  = simd_normalize(simd_cross(up, dir))
+            let angle = acos(max(-1, min(1, dot)))
+            node.rotation = SCNVector4(axis.x, axis.y, axis.z, angle)
+        }
         return node
     }
 }
