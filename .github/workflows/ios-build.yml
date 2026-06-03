@@ -22,6 +22,16 @@ jobs:
       - name: Instalar dependências
         run: npm install
 
+      - name: Garantir expo-module.config.json em node_modules antes do prebuild
+        run: |
+          echo "=== node_modules/lidar-box-measure ==="
+          ls -la node_modules/lidar-box-measure/ || echo "DIR NAO ENCONTRADO"
+          if [ ! -f "node_modules/lidar-box-measure/expo-module.config.json" ]; then
+            echo "COPIANDO expo-module.config.json para node_modules..."
+            cp modules/lidar-box-measure/expo-module.config.json node_modules/lidar-box-measure/
+          fi
+          cat node_modules/lidar-box-measure/expo-module.config.json
+
       - name: Instalar Expo CLI
         run: npm install -g expo-cli @expo/cli
 
@@ -170,6 +180,60 @@ jobs:
           pod install --repo-update
         env:
           NO_FLIPPER: 1
+
+      - name: Patch final — ExpoModulesProvider + desabilitar run script Xcode
+        run: |
+          python3 - << 'PYEOF'
+          import glob, re
+
+          # ── 1. ExpoModulesProvider.swift ─────────────────────────────────────
+          providers = glob.glob('ios/**/ExpoModulesProvider.swift', recursive=True)
+          if not providers:
+              raise RuntimeError('ExpoModulesProvider.swift nao encontrado!')
+
+          path = providers[0]
+          with open(path) as f:
+              content = f.read()
+          print(f'=== {path} (ANTES) ===\n{content}\n=== FIM ===')
+
+          if 'LidarBoxMeasureModule' not in content:
+              print('PATCH: adicionando LidarBoxMeasureModule...')
+              if '@_implementationOnly import LidarBoxMeasure' not in content:
+                  content = content.replace(
+                      'import ExpoModulesCore',
+                      'import ExpoModulesCore\n@_implementationOnly import LidarBoxMeasure'
+                  )
+              content = re.sub(
+                  r'(func getModuleClasses.*?return \[)',
+                  r'\1\n      LidarBoxMeasureModule.self,',
+                  content, count=1, flags=re.DOTALL
+              )
+              with open(path, 'w') as f:
+                  f.write(content)
+              print('PATCH ExpoModulesProvider.swift OK')
+          else:
+              print('LidarBoxMeasureModule ja esta no provider')
+
+          # ── 2. Desabilitar run script que regenera ExpoModulesProvider ───────
+          pbx_path = 'ios/MedidorCaixas.xcodeproj/project.pbxproj'
+          with open(pbx_path) as f:
+              pbx = f.read()
+
+          original = pbx
+          # Encontrar shellScript que contém 'generate' ou 'ExpoModulesProvider'
+          # No .pbxproj o conteúdo usa \" e \n como escape
+          pbx = re.sub(
+              r'shellScript = "((?:[^"\\]|\\.)*(?:generate|ExpoModulesProvider)(?:[^"\\]|\\.)*)"',
+              r'shellScript = "echo \\"provider pre-patched, skipping generate\\""',
+              pbx
+          )
+          if pbx != original:
+              with open(pbx_path, 'w') as f:
+                  f.write(pbx)
+              print('Run script generator desabilitado no project.pbxproj OK')
+          else:
+              print('AVISO: run script generator nao encontrado no pbxproj')
+          PYEOF
 
       - name: Compilar app (sem assinatura)
         run: |
