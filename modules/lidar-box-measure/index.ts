@@ -21,5 +21,5 @@ export function isLidarSupported(): boolean {
  */
 export async function openARCamera(): Promise<MeasurementResult> {
   if (!Mod) throw new Error('LiDAR module not available');
-  return Mod.openARCamera();
+  return Mod.openARCamera() as Promise<MeasurementResult>;
 }
