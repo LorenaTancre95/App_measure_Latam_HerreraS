@@ -252,7 +252,15 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             INFOPLIST_KEY_NSCameraUsageDescription="Necessário para medir caixas com LiDAR" \
             INFOPLIST_KEY_NSMotionUsageDescription="Necessário para rastreamento e medição 3D" \
-            2>&1 | tee /tmp/build.log
+            2>&1 | tee /tmp/build.log || {
+            echo ""
+            echo "=========================================="
+            echo "ERROS SWIFT:"
+            echo "=========================================="
+            grep -E '\.swift:[0-9]+:[0-9]+: error:' /tmp/build.log | head -30 || true
+            echo "=========================================="
+            exit 1
+          }
 
       - name: Mostrar erros reais se falhou
         if: failure()

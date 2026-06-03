@@ -153,43 +153,32 @@ final class BoxDetectionCoordinator: NSObject {
 
     // Extrae el box de mayor confianza de un MLMultiArray con shape [1,N,C] o [N,C], C>=5
     // Layout esperado: x1, y1, x2, y2, conf, [class, mask_coeffs...]
+    // Usa subscript Int (más simple y compatible con WMO): índice lineal i*C+j
     private func extractBestBox(from arr: MLMultiArray, shape: [Int]) -> CGRect? {
-        let N: Int
-        let is3D: Bool
-        if shape.count == 3, shape[0] >= 1, shape[2] >= 5 {
-            N = shape[1]; is3D = true
-        } else if shape.count == 2, shape[1] >= 5 {
-            N = shape[0]; is3D = false
-        } else {
-            return nil
-        }
-
-        // Acceso seguro por subscript (evita raw pointer que Xcode 15 puede rechazar)
-        func v(_ i: Int, _ j: Int) -> Float {
-            let key: [NSNumber] = is3D
-                ? [NSNumber(value: 0), NSNumber(value: i), NSNumber(value: j)]
-                : [NSNumber(value: i), NSNumber(value: j)]
-            return arr[key].floatValue
-        }
+        guard shape.count >= 2, shape[shape.count - 1] >= 5 else { return nil }
+        let C = shape[shape.count - 1]
+        let N = shape.count == 3 ? shape[1] : shape[0]
+        guard N > 0 else { return nil }
 
         var bestConf: Float = 0.25
         var bestBox: CGRect? = nil
 
         for i in 0..<N {
-            let x1 = v(i, 0), y1 = v(i, 1)
-            let x2 = v(i, 2), y2 = v(i, 3)
-            let conf = v(i, 4)
+            // Para [1,N,C] y [N,C] el índice lineal de [_,i,j] es i*C+j (batch=0)
+            let base = i * C
+            let x1   = arr[base + 0].floatValue
+            let y1   = arr[base + 1].floatValue
+            let x2   = arr[base + 2].floatValue
+            let y2   = arr[base + 3].floatValue
+            let conf = arr[base + 4].floatValue
 
             guard conf > bestConf, x2 > x1, y2 > y1 else { continue }
             bestConf = conf
 
-            // Detectar si las coords están en píxeles [0..640] o normalizadas [0..1]
-            let scale: CGFloat = (x2 > 2.0) ? (1.0 / 640.0) : 1.0
+            let scale: CGFloat = x2 > 2.0 ? 1.0 / 640.0 : 1.0
             bestBox = CGRect(
-                x: CGFloat(x1) * scale,
-                y: CGFloat(y1) * scale,
-                width:  CGFloat(x2 - x1) * scale,
-                height: CGFloat(y2 - y1) * scale
+                x: CGFloat(x1) * scale, y: CGFloat(y1) * scale,
+                width: CGFloat(x2 - x1) * scale, height: CGFloat(y2 - y1) * scale
             )
         }
         return bestBox
