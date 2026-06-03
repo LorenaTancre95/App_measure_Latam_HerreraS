@@ -231,13 +231,14 @@ final class BoxDetectionCoordinator: NSObject {
         return SIMD3<Float>(pt.x, pt.y, pt.z)
     }
 
-    // MARK: - Depth estimation via top-face scan (LiDAR direct measurement)
-    // Scans upward in screen space from the top edge of the detected front face.
-    // The top face of the box appears above the front face in screen space and is at
-    // GREATER depth (farther from camera) than the front face when camera tilts down.
-    // Key fix: check for ABRUPT jumps from the PREVIOUS sample (not from centerD).
-    // The top face is a smooth surface → gradual depth increase as we scan away.
-    // The background (floor/wall) behind the box causes a sudden large jump.
+    // MARK: - Depth estimation via top-face scan (world-Y plane anchor)
+    // The box top face is a horizontal plane in world space — all points on it share
+    // approximately the same world Y. Scanning upward in screen space follows that plane.
+    // When we cross the back edge the depth map hits the floor or background, whose
+    // world Y drops clearly below the top-face plane. That drop is the stopping criterion.
+    // This replaces the previous heuristic (jump from previous sample) which failed when
+    // the floor behind the box had a gradual depth gradient matching the top face.
+    // Three columns (25 / 50 / 75 % across the top edge) are scanned; median is returned.
     private func estimateDepthFromTopFace(frame: ARFrame,
                                            depth: ARDepthData,
                                            topLeft: CGPoint,
@@ -245,65 +246,70 @@ final class BoxDetectionCoordinator: NSObject {
                                            centerD: Float,
                                            faceNormal: SIMD3<Float>) -> Double? {
         guard let sv = sceneView else { return nil }
-        let vp   = sv.bounds.size
-        let topX = (topLeft.x + topRight.x) / 2
-        let topY = topLeft.y
+        let vp         = sv.bounds.size
         let step: CGFloat = 3
-        let limT = vp.height * 0.03
+        let limT       = vp.height * 0.03
+        let topCenterX = (topLeft.x + topRight.x) / 2
+        let topY       = topLeft.y
 
-        // Walk upward; track last valid depth to detect the abrupt jump at the
-        // back edge of the top face (transition to background).
-        var y        = topY - step
-        var lastD    = centerD
-        var lastGoodY = topY          // last screen-y that was still on the top face
-
-        while y >= limT {
-            guard let d = sampleDepth(at: CGPoint(x: topX, y: y),
-                                      frame: frame, depth: depth)
-            else { break }                                // depth map gap → stop
-
-            let jumpFromPrev = abs(d - lastD)
-            if jumpFromPrev > 0.18 {
-                // Sudden depth jump → we crossed the far edge of the top face.
-                break
-            }
-            // Also stop if depth unexpectedly goes much closer (back on front face
-            // or some artifact).
-            if d < centerD - 0.10 { break }
-
-            lastGoodY = y
-            lastD = d
-            y -= step
-        }
-
-        // Need at least some travel above the top edge
-        guard topY - lastGoodY > step else { return nil }
-
-        // 3D position of front-face top-edge center
-        guard let frontPt3 = worldPointAtDepth(CGPoint(x: topX, y: topY),
-                                                depth: centerD,
+        // Anchor: actual LiDAR depth at the top-edge center (more accurate than centerD).
+        let topEdgeD = sampleDepth(at: CGPoint(x: topCenterX, y: topY),
+                                   frame: frame, depth: depth) ?? centerD
+        guard let frontPt3 = worldPointAtDepth(CGPoint(x: topCenterX, y: topY),
+                                                depth: topEdgeD,
                                                 frame: frame)
         else { return nil }
 
-        // 3D position of the farthest point we found on the top face
-        guard let backD   = sampleDepth(at: CGPoint(x: topX, y: lastGoodY),
-                                        frame: frame, depth: depth),
-              let backPt3 = worldPointAtDepth(CGPoint(x: topX, y: lastGoodY),
-                                              depth: backD, frame: frame)
-        else { return nil }
+        let topFaceY: Float   = frontPt3.y
+        let yTolerance: Float = 0.07   // 7 cm allows LiDAR noise + slight box flex
 
-        // Project the displacement onto the face normal direction (into the box)
-        // to get the true box depth even if the camera is not perfectly level.
-        let vec = backPt3 - frontPt3
-        let depthAlongNormal = abs(simd_dot(vec, faceNormal))
-        let distDirect       = Double(simd_length(vec)) * 100
+        // Three columns across the top edge for robustness against one bad column.
+        let scanXs: [CGFloat] = [
+            topLeft.x + (topRight.x - topLeft.x) * 0.25,
+            topCenterX,
+            topLeft.x + (topRight.x - topLeft.x) * 0.75,
+        ]
 
-        // Use the projection if the face is roughly vertical; otherwise raw distance.
-        let result = depthAlongNormal > 0.01
-                     ? Double(depthAlongNormal) * 100
-                     : distDirect
+        var depthResults: [Double] = []
 
-        return result > 2 && result < 200 ? result : nil
+        for scanX in scanXs {
+            var y         = topY - step
+            var lastGoodY = topY
+            var lastD     = topEdgeD
+
+            while y >= limT {
+                guard let d = sampleDepth(at: CGPoint(x: scanX, y: y),
+                                          frame: frame, depth: depth),
+                      let wPt = worldPointAtDepth(CGPoint(x: scanX, y: y),
+                                                  depth: d, frame: frame)
+                else { break }
+
+                // Still on the top face if world Y stays within tolerance of the anchor.
+                // Floor/background behind the box sits lower → wPt.y drops below threshold.
+                if wPt.y < topFaceY - yTolerance { break }
+                if wPt.y > topFaceY + yTolerance { break }
+
+                lastGoodY = y
+                lastD     = d
+                y        -= step
+            }
+
+            guard topY - lastGoodY > step,
+                  let backPt3 = worldPointAtDepth(CGPoint(x: scanX, y: lastGoodY),
+                                                  depth: lastD, frame: frame)
+            else { continue }
+
+            let vec              = backPt3 - frontPt3
+            let depthAlongNormal = abs(simd_dot(vec, faceNormal))
+            let distDirect       = Double(simd_length(vec)) * 100
+            let result           = depthAlongNormal > 0.01
+                                   ? Double(depthAlongNormal) * 100
+                                   : distDirect
+            if result > 2 && result < 200 { depthResults.append(result) }
+        }
+
+        guard depthResults.count >= 2 else { return nil }
+        return median(depthResults)
     }
 
     // MARK: - Stability buffer
