@@ -2,6 +2,7 @@ import ARKit
 import SceneKit
 import Vision
 import CoreML
+import ImageIO
 
 struct NativeMeasurement {
     var comprimento: Double
