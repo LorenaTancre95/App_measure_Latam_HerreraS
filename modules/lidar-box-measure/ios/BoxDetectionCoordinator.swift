@@ -231,10 +231,13 @@ final class BoxDetectionCoordinator: NSObject {
         return SIMD3<Float>(pt.x, pt.y, pt.z)
     }
 
-    // MARK: - Depth estimation via top-face scan
-    // Scans upward from the top edge of the detected front face.
-    // If the top face of the box is visible (camera tilted slightly down), its extent
-    // from the front-top edge to the back-top edge gives the box depth (largura).
+    // MARK: - Depth estimation via top-face scan (LiDAR direct measurement)
+    // Scans upward in screen space from the top edge of the detected front face.
+    // The top face of the box appears above the front face in screen space and is at
+    // GREATER depth (farther from camera) than the front face when camera tilts down.
+    // Key fix: check for ABRUPT jumps from the PREVIOUS sample (not from centerD).
+    // The top face is a smooth surface → gradual depth increase as we scan away.
+    // The background (floor/wall) behind the box causes a sudden large jump.
     private func estimateDepthFromTopFace(frame: ARFrame,
                                            depth: ARDepthData,
                                            topLeft: CGPoint,
@@ -245,41 +248,62 @@ final class BoxDetectionCoordinator: NSObject {
         let vp   = sv.bounds.size
         let topX = (topLeft.x + topRight.x) / 2
         let topY = topLeft.y
-        let step: CGFloat = 4
+        let step: CGFloat = 3
         let limT = vp.height * 0.03
 
-        // Walk upward from top edge; collect depth samples on the top face
-        var y = topY - step
-        var backY: CGFloat? = nil
-        var lastD: Float = centerD
+        // Walk upward; track last valid depth to detect the abrupt jump at the
+        // back edge of the top face (transition to background).
+        var y        = topY - step
+        var lastD    = centerD
+        var lastGoodY = topY          // last screen-y that was still on the top face
 
         while y >= limT {
             guard let d = sampleDepth(at: CGPoint(x: topX, y: y),
-                                      frame: frame, depth: depth) else {
-                backY = y + step; break
+                                      frame: frame, depth: depth)
+            else { break }                                // depth map gap → stop
+
+            let jumpFromPrev = abs(d - lastD)
+            if jumpFromPrev > 0.18 {
+                // Sudden depth jump → we crossed the far edge of the top face.
+                break
             }
-            // Top face depth is usually similar to or slightly larger than centerD.
-            // A jump > 12 cm indicates we left the box.
-            if abs(d - centerD) > 0.12 {
-                backY = y + step; break
-            }
+            // Also stop if depth unexpectedly goes much closer (back on front face
+            // or some artifact).
+            if d < centerD - 0.10 { break }
+
+            lastGoodY = y
             lastD = d
             y -= step
         }
 
-        guard let beY = backY else { return nil }
+        // Need at least some travel above the top edge
+        guard topY - lastGoodY > step else { return nil }
 
-        let frontPt3 = worldPointAtDepth(CGPoint(x: topX, y: topY),
-                                          depth: centerD, frame: frame)
-        guard let backD = sampleDepth(at: CGPoint(x: topX, y: beY),
-                                      frame: frame, depth: depth),
-              let backPt3 = worldPointAtDepth(CGPoint(x: topX, y: beY),
-                                               depth: backD, frame: frame),
-              let fp3 = frontPt3
+        // 3D position of front-face top-edge center
+        guard let frontPt3 = worldPointAtDepth(CGPoint(x: topX, y: topY),
+                                                depth: centerD,
+                                                frame: frame)
         else { return nil }
 
-        let dist = Double(simd_distance(fp3, backPt3)) * 100
-        return dist > 2 && dist < 200 ? dist : nil
+        // 3D position of the farthest point we found on the top face
+        guard let backD   = sampleDepth(at: CGPoint(x: topX, y: lastGoodY),
+                                        frame: frame, depth: depth),
+              let backPt3 = worldPointAtDepth(CGPoint(x: topX, y: lastGoodY),
+                                              depth: backD, frame: frame)
+        else { return nil }
+
+        // Project the displacement onto the face normal direction (into the box)
+        // to get the true box depth even if the camera is not perfectly level.
+        let vec = backPt3 - frontPt3
+        let depthAlongNormal = abs(simd_dot(vec, faceNormal))
+        let distDirect       = Double(simd_length(vec)) * 100
+
+        // Use the projection if the face is roughly vertical; otherwise raw distance.
+        let result = depthAlongNormal > 0.01
+                     ? Double(depthAlongNormal) * 100
+                     : distDirect
+
+        return result > 2 && result < 200 ? result : nil
     }
 
     // MARK: - Stability buffer
