@@ -101,29 +101,35 @@ final class BoxDetectionCoordinator: NSObject {
                             frame: ARFrame,
                             depth: ARDepthData) -> SIMD3<Float>? {
         guard let sv = sceneView else { return nil }
+        let viewportSize = sv.bounds.size
+
+        // Use ARKit's displayTransform to correctly map portrait viewport → landscape camera image.
+        // Without this the manual rotation math produces out-of-bounds depth lookups.
+        let invDisplay = frame.displayTransform(for: .portrait,
+                                               viewportSize: viewportSize).inverted()
+        let normVP  = CGPoint(x: screenPt.x / viewportSize.width,
+                              y: screenPt.y / viewportSize.height)
+        let normCam = normVP.applying(invDisplay)           // in [0,1] camera image space
 
         let depthMap = depth.depthMap
         let dW = CVPixelBufferGetWidth(depthMap)
         let dH = CVPixelBufferGetHeight(depthMap)
-
-        let dx = Int((screenPt.y / sv.bounds.height) * CGFloat(dW))
-        let dy = Int((1 - screenPt.x / sv.bounds.width) * CGFloat(dH))
-        let sx = max(0, min(dW - 1, dx))
-        let sy = max(0, min(dH - 1, dy))
+        let sx = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
+        let sy = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
 
         CVPixelBufferLockBaseAddress(depthMap, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
 
         let depthVal = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
-        guard depthVal > 0.1, depthVal < 10 else { return nil }
+        guard depthVal > 0.05, depthVal < 8 else { return nil }
 
         let intr = frame.camera.intrinsics
-        let iW   = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let iH   = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let iW   = Float(frame.camera.imageResolution.width)
+        let iH   = Float(frame.camera.imageResolution.height)
 
-        let imgX = Float(screenPt.y / sv.bounds.height) * iW
-        let imgY = Float(1 - screenPt.x / sv.bounds.width) * iH
+        let imgX = Float(normCam.x) * iW
+        let imgY = Float(normCam.y) * iH
 
         let xCam = (imgX - intr[2][0]) / intr[0][0] * depthVal
         let yCam = (imgY - intr[2][1]) / intr[1][1] * depthVal
