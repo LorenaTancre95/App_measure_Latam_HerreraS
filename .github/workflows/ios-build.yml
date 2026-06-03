@@ -59,6 +59,63 @@ jobs:
         env:
           EXPO_NO_TELEMETRY: 1
 
+      - name: Diagnosticar e forçar registro do LidarBoxMeasureModule
+        run: |
+          python3 - << 'PYEOF'
+          import glob, re, os
+
+          # ── 1. ExpoModulesProvider.swift ──────────────────────────────────────
+          providers = glob.glob('ios/**/ExpoModulesProvider.swift', recursive=True)
+          if not providers:
+              print('ERROR: ExpoModulesProvider.swift nao encontrado!')
+          else:
+              path = providers[0]
+              with open(path) as f:
+                  content = f.read()
+              print(f'=== {path} ===')
+              print(content)
+              print('=== FIM ===')
+
+              if 'LidarBoxMeasureModule' not in content:
+                  print('PATCH: LidarBoxMeasureModule ausente — adicionando...')
+                  # Add import after ExpoModulesCore
+                  if '@_implementationOnly import LidarBoxMeasure' not in content:
+                      content = content.replace(
+                          'import ExpoModulesCore',
+                          'import ExpoModulesCore\n@_implementationOnly import LidarBoxMeasure'
+                      )
+                  # Add to getModuleClasses return list
+                  content = re.sub(
+                      r'(func getModuleClasses.*?return \[)',
+                      r'\1\n      LidarBoxMeasureModule.self,',
+                      content, count=1, flags=re.DOTALL
+                  )
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  print('PATCH ExpoModulesProvider.swift OK')
+              else:
+                  print('LidarBoxMeasureModule ja esta no provider OK')
+
+          # ── 2. Podfile ────────────────────────────────────────────────────────
+          with open('ios/Podfile') as f:
+              podfile = f.read()
+          lidar_lines = [l for l in podfile.splitlines() if 'lidar' in l.lower() or 'LidarBox' in l]
+          print(f'Linhas LiDAR no Podfile: {lidar_lines}')
+
+          if 'LidarBoxMeasure' not in podfile:
+              print('PATCH Podfile: pod LidarBoxMeasure ausente — adicionando...')
+              podfile = re.sub(
+                  r'(use_expo_modules!)',
+                  r"\1\n  pod 'LidarBoxMeasure', :path => '../modules/lidar-box-measure'",
+                  podfile, count=1
+              )
+              with open('ios/Podfile', 'w') as f:
+                  f.write(podfile)
+              print('PATCH Podfile OK')
+          else:
+              print('LidarBoxMeasure ja esta no Podfile OK')
+          PYEOF
+
       - name: Garantir permissões de câmera no Info.plist
         run: |
           PLIST="ios/MedidorCaixas/Info.plist"
