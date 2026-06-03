@@ -241,11 +241,17 @@ final class ARCameraViewController: UIViewController {
     // MARK: - Measurement callback
     private func handleMeasurement(_ m: NativeMeasurement) {
         let volM3      = (m.comprimento / 100) * (m.largura / 100) * (m.altura / 100)
-        let pesoCubado = volM3 * 167   // standard road-freight factor kg/m³
+        let pesoCubado = volM3 * 167
 
+        // Formato estilo GPC: "80,6 × 116,5 × 86,4 cm"
+        let dimStr = String(format: "%.1f × %.1f × %.1f cm",
+                            m.comprimento, m.largura, m.altura)
+                      .replacingOccurrences(of: ".", with: ",")
         let volStr  = String(format: "%.4f", volM3).replacingOccurrences(of: ".", with: ",")
         let pesoStr = String(format: "%.1f", pesoCubado).replacingOccurrences(of: ".", with: ",")
-        volumeLabel.text = "Vol: \(volStr) m³  ·  Peso Cubado: \(pesoStr) kg"
+
+        confirmedLabel.text = "✅  \(dimStr)"
+        volumeLabel.text    = "Vol: \(volStr) m³  ·  Peso Cubado: \(pesoStr) kg"
 
         statusLabel.isHidden    = true
         confirmedLabel.isHidden = false

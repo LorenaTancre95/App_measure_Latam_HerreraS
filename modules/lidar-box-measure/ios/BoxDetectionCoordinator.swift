@@ -153,27 +153,31 @@ final class BoxDetectionCoordinator: NSObject {
     // Extrae el box de mayor confianza de un MLMultiArray con shape [1,N,C] o [N,C], C>=5
     // Layout esperado: x1, y1, x2, y2, conf, [class, mask_coeffs...]
     private func extractBestBox(from arr: MLMultiArray, shape: [Int]) -> CGRect? {
-        let N: Int, C: Int
-        switch shape.count {
-        case 3 where shape[0] >= 1 && shape[2] >= 5:
-            N = shape[1]; C = shape[2]
-        case 2 where shape[1] >= 5:
-            N = shape[0]; C = shape[1]
-        default:
+        let N: Int
+        let is3D: Bool
+        if shape.count == 3, shape[0] >= 1, shape[2] >= 5 {
+            N = shape[1]; is3D = true
+        } else if shape.count == 2, shape[1] >= 5 {
+            N = shape[0]; is3D = false
+        } else {
             return nil
         }
 
-        guard arr.dataType == .float32 else { return nil }
-        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        // Acceso seguro por subscript (evita raw pointer que Xcode 15 puede rechazar)
+        func v(_ i: Int, _ j: Int) -> Float {
+            let key: [NSNumber] = is3D
+                ? [NSNumber(value: 0), NSNumber(value: i), NSNumber(value: j)]
+                : [NSNumber(value: i), NSNumber(value: j)]
+            return arr[key].floatValue
+        }
 
         var bestConf: Float = 0.25
         var bestBox: CGRect? = nil
 
         for i in 0..<N {
-            let base = i * C
-            let x1 = ptr[base + 0], y1 = ptr[base + 1]
-            let x2 = ptr[base + 2], y2 = ptr[base + 3]
-            let conf = ptr[base + 4]
+            let x1 = v(i, 0), y1 = v(i, 1)
+            let x2 = v(i, 2), y2 = v(i, 3)
+            let conf = v(i, 4)
 
             guard conf > bestConf, x2 > x1, y2 > y1 else { continue }
             bestConf = conf
@@ -416,7 +420,7 @@ final class BoxDetectionCoordinator: NSObject {
             guard let self = self else { return }
             self.clearOverlay()
 
-            let yellow = UIColor(red: 1.0, green: 0.82, blue: 0.0, alpha: 1)
+            let yellow = UIColor(red: 0.0, green: 0.90, blue: 0.3, alpha: 1)
 
             let right      = simd_normalize(br - bl)
             let up         = simd_normalize(tl - bl)
