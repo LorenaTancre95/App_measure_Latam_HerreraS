@@ -24,8 +24,9 @@ private struct YOLOPrediction {
 private extension ARMeshGeometry {
     /// ARMeshClassification por índice de cara (UInt8 per face)
     func classificationAt(faceIndex i: Int) -> ARMeshClassification {
-        let ptr = classification.buffer.contents()
-            .advanced(by: classification.offset + i * classification.stride)
+        guard let cls = classification else { return .none }
+        let ptr = cls.buffer.contents()
+            .advanced(by: cls.offset + i * cls.stride)
         return ARMeshClassification(rawValue: ptr.load(as: UInt8.self)) ?? .none
     }
 }
