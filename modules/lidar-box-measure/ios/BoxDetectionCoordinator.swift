@@ -88,14 +88,9 @@ final class BoxDetectionCoordinator: NSObject {
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        if let model = yoloModel, !mlInFlight {
-            runYOLO(model: model, frame: frame, depth: depth,
-                    centerD: centerD, vp: vp, cx: cx, cy: cy)
-        } else {
-            // Sin modelo: región central fija como fallback
-            measureInRegion(box: nil, frame: frame, depth: depth,
-                             centerD: centerD, vp: vp, cx: cx, cy: cy)
-        }
+        guard let model = yoloModel, !mlInFlight else { return }
+        runYOLO(model: model, frame: frame, depth: depth,
+                centerD: centerD, vp: vp, cx: cx, cy: cy)
     }
 
     // MARK: - YOLO inference
@@ -112,8 +107,13 @@ final class BoxDetectionCoordinator: NSObject {
             let box = self.parseBestDetection(req.results)
             DispatchQueue.main.async {
                 self.mlInFlight = false
-                self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
-                                      centerD: centerD, vp: vp, cx: cx, cy: cy)
+                if let box = box {
+                    self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
+                                          centerD: centerD, vp: vp, cx: cx, cy: cy)
+                } else {
+                    // Sin detección: limpiar overlay para no dejar cuadros fantasma
+                    self.clearOverlay()
+                }
             }
         }
         request.imageCropAndScaleOption = .scaleFill
@@ -184,23 +184,17 @@ final class BoxDetectionCoordinator: NSObject {
         return bestBox
     }
 
-    // MARK: - Medición dentro de la región detectada (o fallback central)
-    private func measureInRegion(box: CGRect?, frame: ARFrame, depth: ARDepthData,
+    // MARK: - Medición dentro del bounding box detectado por YOLO
+    private func measureInRegion(box: CGRect, frame: ARFrame, depth: ARDepthData,
                                   centerD: Float, vp: CGSize, cx: CGFloat, cy: CGFloat) {
         // box en coordenadas [0,1] top-left origin (portrait) → puntos de pantalla UIKit
-        let screenBox: CGRect
-        if let b = box, b.width > 0.05, b.height > 0.05 {
-            screenBox = CGRect(
-                x: b.minX * vp.width,
-                y: b.minY * vp.height,
-                width:  b.width  * vp.width,
-                height: b.height * vp.height
-            )
-        } else {
-            let hw = vp.width * 0.38, hh = vp.height * 0.32
-            screenBox = CGRect(x: cx - hw, y: cy - hh, width: hw * 2, height: hh * 2)
-        }
-
+        guard box.width > 0.04, box.height > 0.04 else { return }
+        let screenBox = CGRect(
+            x: box.minX * vp.width,
+            y: box.minY * vp.height,
+            width:  box.width  * vp.width,
+            height: box.height * vp.height
+        )
         guard screenBox.width > 30, screenBox.height > 30 else { return }
 
         // Esquinas de la cara frontal en pantalla
