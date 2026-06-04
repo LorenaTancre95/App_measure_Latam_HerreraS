@@ -101,8 +101,8 @@ class DecoderWrapper(nn.Module):
     def forward(self, embedding: torch.Tensor,
                 point_x: torch.Tensor,
                 point_y: torch.Tensor) -> torch.Tensor:
-        coords = torch.stack([point_x, point_y], dim=-1).float()   # [1, 1, 2]
-        coords = coords.unsqueeze(0).unsqueeze(0)                   # [1, 1, 1, 2]
+        # point_x/y shape: (1,) → stack → (1,2) → unsqueeze(0) → (1,1,2) = (B,N,2)
+        coords = torch.stack([point_x, point_y], dim=-1).float().unsqueeze(0)
         labels = torch.ones(1, 1, dtype=torch.int)                  # foreground
 
         sparse_emb, dense_emb = self.prompt_encoder(
