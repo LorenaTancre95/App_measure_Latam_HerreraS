@@ -1,7 +1,6 @@
 import ARKit
 import SceneKit
 import CoreML
-import Accelerate
 
 struct NativeMeasurement {
     var comprimento: Double
@@ -39,14 +38,6 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: - Overlay
     private var overlayNodes: [SCNNode] = []
 
-    // MARK: - MobileSAM
-    private var samEncoder: MLModel?
-    private var samDecoder: MLModel?
-    private var cachedEmbedding: MLMultiArray?
-    private var encoderTickCount = 0
-    private let encoderInterval = 4          // re-encode every 4 frames
-    private var mlInFlight = false
-
     // MARK: - Manual
     private var manualPoints: [SIMD3<Float>] = []
 
@@ -58,37 +49,9 @@ final class BoxDetectionCoordinator: NSObject {
         self.onUpdate = onUpdate
         self.onPlaneFound = onPlaneFound
         super.init()
-        loadSAMModels()
     }
 
-    // MARK: - SAM model loading
-    // Xcode compila .mlmodel → .mlmodelc; buscamos en main bundle y en el bundle del pod
-    private func loadSAMModels() {
-        let bundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
-        var encURL: URL?, decURL: URL?
-        for b in bundles {
-            // mlpackage = formato compilado de MLProgram (convert_to="mlprogram")
-            encURL = encURL ?? b.url(forResource: "sam_encoder", withExtension: "mlpackage")
-                            ?? b.url(forResource: "sam_encoder", withExtension: "mlmodelc")
-            decURL = decURL ?? b.url(forResource: "sam_decoder", withExtension: "mlpackage")
-                            ?? b.url(forResource: "sam_decoder", withExtension: "mlmodelc")
-        }
-        guard let eu = encURL, let du = decURL else {
-            print("[SAM] sam_encoder/sam_decoder.mlmodelc no encontrados en bundle")
-            return
-        }
-        do {
-            let cfg = MLModelConfiguration()
-            cfg.computeUnits = .all
-            samEncoder = try MLModel(contentsOf: eu, configuration: cfg)
-            samDecoder = try MLModel(contentsOf: du, configuration: cfg)
-            print("[SAM] encoder + decoder cargados OK")
-        } catch {
-            print("[SAM] error al cargar: \(error)")
-        }
-    }
-
-    // MARK: - Pipeline principal
+    // MARK: - BFS depth-map region growing measurement
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
@@ -98,316 +61,66 @@ final class BoxDetectionCoordinator: NSObject {
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        guard let encoder = samEncoder, let decoder = samDecoder, !mlInFlight else { return }
+        let dm = depth.depthMap
+        let dW = CVPixelBufferGetWidth(dm)
+        let dH = CVPixelBufferGetHeight(dm)
 
-        mlInFlight = true
-        encoderTickCount += 1
-        let needsEncode = encoderTickCount % encoderInterval == 1 || cachedEmbedding == nil
+        // Centro pantalla → coordenadas depth map (landscape)
+        let invDisplay = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let normCam    = CGPoint(x: cx / vp.width, y: cy / vp.height).applying(invDisplay)
+        let cDX        = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
+        let cDY        = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
 
-        let pb = frame.capturedImage
-        let capturedFrame = frame
-        let capturedDepth = depth
+        guard let region = growRegion(depthMap: dm, cx: cDX, cy: cDY,
+                                      centerD: centerD, dW: dW, dH: dH)
+        else { return }
 
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
-            guard let self = self else { return }
-
-            // ── Paso 1: encoder (costoso, cada encoderInterval frames) ──────────
-            if needsEncode {
-                guard let emb = self.runEncoder(pixelBuffer: pb, model: encoder) else {
-                    DispatchQueue.main.async { self.mlInFlight = false }
-                    return
-                }
-                self.cachedEmbedding = emb
-            }
-            guard let embedding = self.cachedEmbedding else {
-                DispatchQueue.main.async { self.mlInFlight = false }
-                return
-            }
-
-            // ── Paso 2: decoder con punto = centro (barato, cada frame) ─────────
-            // Punto en espacio 1024×1024 (SAM canonical)
-            // El pixelBuffer ARKit está en landscape; mapeamos centro portrait → SAM
-            let samPx = Float(cy / vp.height) * 1024   // portrait Y → SAM X (landscape)
-            let samPy = Float(cx / vp.width)  * 1024   // portrait X → SAM Y
-
-            guard let maskArr = self.runDecoder(
-                embedding: embedding, px: samPx, py: samPy, model: decoder
-            ) else {
-                DispatchQueue.main.async { self.mlInFlight = false; self.clearOverlay() }
-                return
-            }
-
-            // ── Paso 3: máscara → bounding box normalizado ──────────────────────
-            guard let box = self.maskToBoundingBox(
-                mask: maskArr,
-                centerNX: Float(cx / vp.width),
-                centerNY: Float(cy / vp.height)
-            ) else {
-                DispatchQueue.main.async { self.mlInFlight = false; self.clearOverlay() }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.mlInFlight = false
-                self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
-                                     centerD: centerD, vp: vp, cx: cx, cy: cy)
-            }
-        }
-    }
-
-    // MARK: - SAM Encoder
-    // Redimensiona el pixelBuffer a 1024×1024, normaliza y corre el encoder TinyViT.
-    // Retorna el tensor de embeddings [1, 256, 64, 64].
-    private func runEncoder(pixelBuffer: CVPixelBuffer, model: MLModel) -> MLMultiArray? {
-        // Pixel mean / std de SAM (ImageNet)
-        let mean: [Float] = [123.675, 116.28, 103.53]
-        let std:  [Float] = [58.395,  57.12,  57.375]
-
-        // Escalar imagen a 1024×1024
-        guard let scaled = resizePixelBuffer(pixelBuffer, to: CGSize(width: 1024, height: 1024)),
-              let input  = pixelBufferToSAMTensor(scaled, mean: mean, std: std)
-        else { return nil }
-
-        do {
-            let feat   = try MLDictionaryFeatureProvider(dictionary: ["image": input])
-            let result = try model.prediction(from: feat)
-            return result.featureValue(for: "embedding")?.multiArrayValue
-        } catch {
-            print("[SAM encoder] error: \(error)")
-            return nil
-        }
-    }
-
-    // MARK: - SAM Decoder
-    private func runDecoder(embedding: MLMultiArray,
-                            px: Float, py: Float,
-                            model: MLModel) -> MLMultiArray? {
-        do {
-            let pxArr = try MLMultiArray(shape: [1], dataType: .float32)
-            let pyArr = try MLMultiArray(shape: [1], dataType: .float32)
-            pxArr[0] = NSNumber(value: px)
-            pyArr[0] = NSNumber(value: py)
-
-            let feat   = try MLDictionaryFeatureProvider(dictionary: [
-                "embedding": embedding,
-                "point_x":   pxArr,
-                "point_y":   pyArr,
-            ])
-            let result = try model.prediction(from: feat)
-            return result.featureValue(for: "mask_logits")?.multiArrayValue
-        } catch {
-            print("[SAM decoder] error: \(error)")
-            return nil
-        }
-    }
-
-    // MARK: - Mask → bounding box
-    // mask_logits tiene shape [1, 1, 256, 256]. Umbral en 0 (sigmoid > 0.5).
-    // Retorna el bounding box de la región foreground más cercana al centro,
-    // en coordenadas normalizadas [0,1] top-left origin.
-    private func maskToBoundingBox(mask: MLMultiArray,
-                                   centerNX: Float,
-                                   centerNY: Float) -> CGRect? {
-        let shape = mask.shape.map { $0.intValue }
-        guard shape.count == 4 else { return nil }
-        let H = shape[2], W = shape[3]           // 256 × 256
-
-        // Leer valores float del array lineal [1, 1, H, W]
-        let count = H * W
-        var logits = [Float](repeating: 0, count: count)
-        let ptr = mask.dataPointer.assumingMemoryBound(to: Float32.self)
-        for i in 0..<count { logits[i] = ptr[i] }
-
-        // Aplicar sigmoid y umbralizar
-        var binary = [Bool](repeating: false, count: count)
-        for i in 0..<count {
-            binary[i] = 1.0 / (1.0 + exp(-logits[i])) > 0.5
+        // Depth map coords → screen coords via displayTransform
+        let displayTx = frame.displayTransform(for: .portrait, viewportSize: vp)
+        func depthToScreen(_ dx: Int, _ dy: Int) -> CGPoint {
+            let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
+            let ns = nc.applying(displayTx)
+            return CGPoint(x: ns.x * vp.width, y: ns.y * vp.height)
         }
 
-        // BFS desde el pixel más cercano al centro que sea foreground
-        let cx = Int(centerNX * Float(W))
-        let cy = Int(centerNY * Float(H))
-        guard cx >= 0, cx < W, cy >= 0, cy < H else { return nil }
+        let bl = depthToScreen(region.minX, region.maxY)
+        let br = depthToScreen(region.maxX, region.maxY)
+        let tl = depthToScreen(region.minX, region.minY)
+        let tr = depthToScreen(region.maxX, region.minY)
 
-        // Encontrar punto de inicio foreground más cercano al centro
-        var startX = cx, startY = cy
-        if !binary[cy * W + cx] {
-            var found = false
-            outer: for r in 1..<min(W, H) / 2 {
-                for dy in -r...r {
-                    for dx in -r...r {
-                        let nx = cx + dx, ny = cy + dy
-                        guard nx >= 0, nx < W, ny >= 0, ny < H else { continue }
-                        if binary[ny * W + nx] { startX = nx; startY = ny; found = true; break outer }
-                    }
-                }
-            }
-            guard found else { return nil }
-        }
+        guard br.x - bl.x > 30, bl.y - tl.y > 30 else { return }
 
-        // BFS limitado para extraer la región conectada
-        var visited = [Bool](repeating: false, count: count)
-        var queue = [(Int, Int)](); queue.reserveCapacity(2048)
-        var minX = startX, maxX = startX, minY = startY, maxY = startY
-        queue.append((startX, startY))
-        visited[startY * W + startX] = true
-
-        var qi = 0
-        while qi < queue.count, qi < W * H / 2 {
-            let (x, y) = queue[qi]; qi += 1
-            for (dx, dy) in [(-1,0),(1,0),(0,-1),(0,1)] as [(Int,Int)] {
-                let nx = x+dx, ny = y+dy
-                guard nx >= 0, nx < W, ny >= 0, ny < H else { continue }
-                let idx = ny * W + nx
-                guard !visited[idx], binary[idx] else { continue }
-                visited[idx] = true
-                queue.append((nx, ny))
-                if nx < minX { minX = nx }; if nx > maxX { maxX = nx }
-                if ny < minY { minY = ny }; if ny > maxY { maxY = ny }
-            }
-        }
-
-        let boxW = CGFloat(maxX - minX + 1) / CGFloat(W)
-        let boxH = CGFloat(maxY - minY + 1) / CGFloat(H)
-        guard boxW > 0.05, boxH > 0.05 else { return nil }
-
-        return CGRect(
-            x:      CGFloat(minX) / CGFloat(W),
-            y:      CGFloat(minY) / CGFloat(H),
-            width:  boxW,
-            height: boxH
-        )
-    }
-
-    // MARK: - Pixel buffer helpers
-
-    private func resizePixelBuffer(_ input: CVPixelBuffer, to size: CGSize) -> CVPixelBuffer? {
-        let attrs: [String: Any] = [
-            kCVPixelBufferCGImageCompatibilityKey as String: true,
-            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
-        ]
-        var output: CVPixelBuffer?
-        CVPixelBufferCreate(nil,
-                            Int(size.width), Int(size.height),
-                            kCVPixelFormatType_32BGRA,
-                            attrs as CFDictionary, &output)
-        guard let dst = output else { return nil }
-
-        CVPixelBufferLockBaseAddress(input, .readOnly)
-        CVPixelBufferLockBaseAddress(dst, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(input, .readOnly)
-            CVPixelBufferUnlockBaseAddress(dst, [])
-        }
-
-        let srcW = CVPixelBufferGetWidth(input)
-        let srcH = CVPixelBufferGetHeight(input)
-        guard let srcBase = CVPixelBufferGetBaseAddress(input),
-              let dstBase = CVPixelBufferGetBaseAddress(dst)
-        else { return nil }
-
-        var srcBuf = vImage_Buffer(
-            data: srcBase,
-            height: vImagePixelCount(srcH),
-            width:  vImagePixelCount(srcW),
-            rowBytes: CVPixelBufferGetBytesPerRow(input))
-        var dstBuf = vImage_Buffer(
-            data: dstBase,
-            height: vImagePixelCount(Int(size.height)),
-            width:  vImagePixelCount(Int(size.width)),
-            rowBytes: CVPixelBufferGetBytesPerRow(dst))
-        vImageScale_ARGB8888(&srcBuf, &dstBuf, nil, vImage_Flags(0))
-        return dst
-    }
-
-    // Convierte CVPixelBuffer BGRA 1024×1024 → MLMultiArray [1,3,1024,1024] Float32
-    // con la normalización pixel_mean/pixel_std de SAM.
-    private func pixelBufferToSAMTensor(_ pb: CVPixelBuffer,
-                                        mean: [Float], std: [Float]) -> MLMultiArray? {
-        let W = CVPixelBufferGetWidth(pb)
-        let H = CVPixelBufferGetHeight(pb)
-        guard let arr = try? MLMultiArray(shape: [1, 3, H as NSNumber, W as NSNumber],
-                                          dataType: .float32)
-        else { return nil }
-
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-        let src = base.assumingMemoryBound(to: UInt8.self)
-        let dst = arr.dataPointer.assumingMemoryBound(to: Float32.self)
-        let stride = CVPixelBufferGetBytesPerRow(pb)
-        let planeSize = H * W
-
-        for y in 0..<H {
-            for x in 0..<W {
-                let bgraOff = y * stride + x * 4
-                let b = Float(src[bgraOff + 0])
-                let g = Float(src[bgraOff + 1])
-                let r = Float(src[bgraOff + 2])
-                let pix = y * W + x
-                dst[0 * planeSize + pix] = (r - mean[0]) / std[0]
-                dst[1 * planeSize + pix] = (g - mean[1]) / std[1]
-                dst[2 * planeSize + pix] = (b - mean[2]) / std[2]
-            }
-        }
-        return arr
-    }
-
-    // MARK: - Medición dentro del bounding box detectado por YOLO
-    private func measureInRegion(box: CGRect, frame: ARFrame, depth: ARDepthData,
-                                  centerD: Float, vp: CGSize, cx: CGFloat, cy: CGFloat) {
-        // box en coordenadas [0,1] top-left origin (portrait) → puntos de pantalla UIKit
-        guard box.width > 0.04, box.height > 0.04 else { return }
-        let screenBox = CGRect(
-            x: box.minX * vp.width,
-            y: box.minY * vp.height,
-            width:  box.width  * vp.width,
-            height: box.height * vp.height
-        )
-        guard screenBox.width > 30, screenBox.height > 30 else { return }
-
-        // Esquinas de la cara frontal en pantalla
-        let bl = CGPoint(x: screenBox.minX, y: screenBox.maxY)
-        let br = CGPoint(x: screenBox.maxX, y: screenBox.maxY)
-        let tl = CGPoint(x: screenBox.minX, y: screenBox.minY)
-        let tr = CGPoint(x: screenBox.maxX, y: screenBox.minY)
-
-        // Gradiente de profundidad en el centro (para cajas en ángulo)
+        // Gradiente de profundidad en el centro (corrige caras inclinadas)
         let gs: CGFloat = 30
         let dxL = sampleDepth(at: CGPoint(x: cx - gs, y: cy), frame: frame, depth: depth)
         let dxR = sampleDepth(at: CGPoint(x: cx + gs, y: cy), frame: frame, depth: depth)
         let dyT = sampleDepth(at: CGPoint(x: cx, y: cy - gs), frame: frame, depth: depth)
         let dyB = sampleDepth(at: CGPoint(x: cx, y: cy + gs), frame: frame, depth: depth)
-
         let gx: Float = (dxL != nil && dxR != nil && abs(dxR! - dxL!) < 0.20)
                         ? (dxR! - dxL!) / Float(2 * gs) : 0
         let gy: Float = (dyT != nil && dyB != nil && abs(dyB! - dyT!) < 0.20)
                         ? (dyB! - dyT!) / Float(2 * gs) : 0
-
-        func expDepth(_ p: CGPoint) -> Float {
-            centerD + gx * Float(p.x - cx) + gy * Float(p.y - cy)
+        func expD(_ px: CGFloat, _ py: CGFloat) -> Float {
+            centerD + gx * Float(px - cx) + gy * Float(py - cy)
         }
 
         guard
-            let p3BL = worldPointAtDepth(bl, depth: expDepth(bl), frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: expDepth(br), frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: expDepth(tl), frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: expDepth(tr), frame: frame)
+            let p3BL = worldPointAtDepth(bl, depth: expD(bl.x, bl.y), frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: expD(br.x, br.y), frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: expD(tl.x, tl.y), frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: expD(tr.x, tr.y), frame: frame)
         else { return }
 
-        // Rechazar si la cara es mayormente horizontal (piso / tapa de mesa)
         let fRight     = simd_normalize(p3BR - p3BL)
         let fUp        = simd_normalize(p3TL - p3BL)
         let faceNormal = simd_normalize(simd_cross(fRight, fUp))
         guard abs(faceNormal.y) < 0.65 else { return }
 
-        let c = Double(simd_distance(p3BL, p3BR)) * 100   // comprimento (ancho)
-        let a = Double(simd_distance(p3BL, p3TL)) * 100   // altura
-
-        // Profundidad: escanear hacia arriba sobre la cara superior de la caja
+        let c = Double(simd_distance(p3BL, p3BR)) * 100
+        let a = Double(simd_distance(p3BL, p3TL)) * 100
         let l = estimateDepthFromTopFace(frame: frame, depth: depth,
-                                          topLeft: tl, topRight: tr,
-                                          centerD: centerD) ?? (min(c, a) * 0.65)
+                                         topLeft: tl, topRight: tr,
+                                         centerD: centerD) ?? min(c, a) * 0.6
 
         guard c > 5, c < 300, a > 5, a < 300, l > 2 else { return }
 
@@ -422,17 +135,65 @@ final class BoxDetectionCoordinator: NSObject {
         updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!, measurement: m)
     }
 
+    // MARK: - BFS flood-fill sobre depth map
+    // Expande desde el píxel central hasta todos los píxeles conectados cuya profundidad
+    // esté dentro de ±threshold de centerD. Cap de 40% del mapa evita que piso/paredes
+    // al mismo depth llenen toda la imagen.
+    private func growRegion(depthMap: CVPixelBuffer, cx: Int, cy: Int,
+                            centerD: Float, dW: Int, dH: Int)
+        -> (minX: Int, maxX: Int, minY: Int, maxY: Int)?
+    {
+        let threshold: Float = 0.06
+        let maxPixels        = dW * dH * 2 / 5
+
+        // Inset 2px para ignorar píxeles de borde ruidosos
+        let x0 = 2, x1 = dW - 3, y0 = 2, y1 = dH - 3
+        guard cx >= x0, cx <= x1, cy >= y0, cy <= y1 else { return nil }
+
+        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
+        let ptr = base.assumingMemoryBound(to: Float32.self)
+
+        var visited = [Bool](repeating: false, count: dW * dH)
+        var queue   = [(Int, Int)]()
+        queue.reserveCapacity(min(dW * dH / 4, 8192))
+
+        visited[cy * dW + cx] = true
+        queue.append((cx, cy))
+
+        var minX = cx, maxX = cx, minY = cy, maxY = cy
+        var count = 0, qi = 0
+
+        while qi < queue.count, count < maxPixels {
+            let (x, y) = queue[qi]; qi += 1; count += 1
+            for (dx, dy) in [(-1,0),(1,0),(0,-1),(0,1)] as [(Int,Int)] {
+                let nx = x+dx, ny = y+dy
+                guard nx >= x0, nx <= x1, ny >= y0, ny <= y1 else { continue }
+                let idx = ny * dW + nx
+                guard !visited[idx] else { continue }
+                visited[idx] = true
+                let v = ptr[idx]
+                guard v > 0.02, v < 8.0, abs(v - centerD) < threshold else { continue }
+                queue.append((nx, ny))
+                if nx < minX { minX = nx }; if nx > maxX { maxX = nx }
+                if ny < minY { minY = ny }; if ny > maxY { maxY = ny }
+            }
+        }
+
+        guard (maxX - minX) > 5, (maxY - minY) > 5, count > 50 else { return nil }
+        return (minX, maxX, minY, maxY)
+    }
+
     // MARK: - Estimación de profundidad (largura) escaneando la cara superior
-    // Escanea hacia arriba desde el borde superior del bounding box detectado.
-    // Cuando world.y cae más de 7 cm → cruzamos el borde trasero de la caja.
     private func estimateDepthFromTopFace(frame: ARFrame, depth: ARDepthData,
-                                           topLeft: CGPoint, topRight: CGPoint,
-                                           centerD: Float) -> Double? {
+                                          topLeft: CGPoint, topRight: CGPoint,
+                                          centerD: Float) -> Double? {
         var estimates = [Double]()
 
         for frac in [0.25, 0.50, 0.75] as [CGFloat] {
             let sx = topLeft.x + frac * (topRight.x - topLeft.x)
-            var sy = topLeft.y   // empieza en el borde superior de la caja
+            var sy = topLeft.y
 
             guard let startD = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
                   let topPt  = worldPointAtDepth(CGPoint(x: sx, y: sy), depth: startD, frame: frame)
@@ -446,8 +207,8 @@ final class BoxDetectionCoordinator: NSObject {
                 guard let d   = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
                       let wPt = worldPointAtDepth(CGPoint(x: sx, y: sy), depth: d, frame: frame)
                 else { break }
-                if wPt.y < topFaceY - 0.07 { break }  // cruzó el borde trasero → suelo/fondo
-                if d - startD > 0.22         { break }  // salto grande de profundidad → fondo
+                if wPt.y < topFaceY - 0.07 { break }
+                if d - startD > 0.22        { break }
                 prevPt = wPt
             }
 

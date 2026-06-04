@@ -7,84 +7,13 @@ on:
 
 jobs:
 
-  # ── Convertir MobileSAM → CoreML (cacheado, solo re-corre si cambia el script) ──
-  convert-models:
-    runs-on: macos-14
-    outputs:
-      cache-hit: ${{ steps.cache-sam.outputs.cache-hit }}
-    steps:
-      - name: Checkout código
-        uses: actions/checkout@v4
-
-      - name: Cache modelos SAM CoreML
-        id: cache-sam
-        uses: actions/cache@v4
-        with:
-          path: |
-            modules/lidar-box-measure/ios/sam_encoder.mlpackage
-            modules/lidar-box-measure/ios/sam_decoder.mlpackage
-          key: mobilesam-coreml-${{ hashFiles('scripts/convert_mobilesam.py') }}
-
-      - name: Setup Python 3.11 para conversión
-        if: steps.cache-sam.outputs.cache-hit != 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Instalar dependências Python para conversión
-        if: steps.cache-sam.outputs.cache-hit != 'true'
-        run: |
-          python3 -m venv /tmp/sam-venv
-          # torch 2.5.x es la ultima version bien testeada con coremltools 8
-          /tmp/sam-venv/bin/pip install --quiet \
-            "torch==2.5.1" \
-            "torchvision==0.20.1" \
-            "coremltools>=8.0,<9.0" \
-            "huggingface_hub>=0.23" \
-            "numpy<2.0" pillow timm
-          # Clonar MobileSAM directamente (pip install git+ falla en CI)
-          git clone --depth 1 https://github.com/ChaoningZhang/MobileSAM.git /tmp/MobileSAM
-
-      - name: Converter MobileSAM → CoreML
-        if: steps.cache-sam.outputs.cache-hit != 'true'
-        env:
-          PYTHONPATH: /tmp/MobileSAM
-        run: /tmp/sam-venv/bin/python scripts/convert_mobilesam.py
-        timeout-minutes: 20
-
-      - name: Verificar modelos
-        run: |
-          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlpackage || echo "FALTA encoder"
-          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlpackage || echo "FALTA decoder"
-
-      - name: Subir modelos SAM como artefato
-        uses: actions/upload-artifact@v4
-        with:
-          name: sam-coreml-models
-          path: |
-            modules/lidar-box-measure/ios/sam_encoder.mlpackage
-            modules/lidar-box-measure/ios/sam_decoder.mlpackage
-          retention-days: 7
-
   # ── Build completo Xcode ──────────────────────────────────────────────────
   build-ios:
     runs-on: macos-14
-    needs: convert-models
 
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
-
-      - name: Descargar modelos SAM CoreML del job anterior
-        uses: actions/download-artifact@v4
-        with:
-          name: sam-coreml-models
-          path: modules/lidar-box-measure/ios/
-
-      - name: Verificar modelos SAM presentes
-        run: |
-          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlpackage
-          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlpackage
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

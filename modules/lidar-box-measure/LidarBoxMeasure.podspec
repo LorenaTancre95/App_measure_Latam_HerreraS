@@ -16,14 +16,9 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
 
   s.source_files = 'ios/**/*.{swift,m,mm}'
-  s.resources    = [
-    'ios/sam_encoder.mlpackage',
-    'ios/sam_decoder.mlpackage',
-  ]
-  s.frameworks = ['ARKit', 'SceneKit', 'AVFoundation', 'CoreML', 'Accelerate']
+  s.frameworks = ['ARKit', 'SceneKit', 'AVFoundation', 'CoreML']
 
   s.pod_target_xcconfig = {
-    'SWIFT_VERSION'             => '5.0',
-    'COREML_CODEGEN_LANGUAGE'   => 'None',
+    'SWIFT_VERSION' => '5.0',
   }
 end
