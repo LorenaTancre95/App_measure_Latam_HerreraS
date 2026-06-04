@@ -394,47 +394,60 @@ final class BoxDetectionCoordinator: NSObject {
         CATransaction.commit()
     }
 
-    // MARK: - FASE 2: medición 3D con LiDAR
+    // MARK: - ARKit raycast (más estable que depth map manual)
+    // ARKit combina LiDAR + IMU + cámara para dar coordenadas 3D reales.
+    // Debe llamarse desde el main thread.
+    private func raycast(from screenPt: CGPoint, expectedDepth: Float) -> SIMD3<Float>? {
+        guard let sv = sceneView else { return nil }
+
+        // Intentar con geometría existente de planos (más preciso con mesh)
+        let targets: [ARRaycastQuery.Target] = [.existingPlaneGeometry, .estimatedPlane]
+        for target in targets {
+            guard let query = sv.raycastQuery(from: screenPt,
+                                              allowing: target,
+                                              alignment: .any)
+            else { continue }
+            if let result = sv.session.raycast(query).first {
+                let col = result.worldTransform.columns.3
+                return SIMD3<Float>(col.x, col.y, col.z)
+            }
+        }
+
+        // Fallback: depth map crudo
+        guard let currentFrame = sv.session.currentFrame else { return nil }
+        return worldPointAtDepth(screenPt, depth: expectedDepth, frame: currentFrame)
+    }
+
+    // MARK: - FASE 2: medición 3D
     private func measure3D(box: CGRect, cx: CGFloat, cy: CGFloat,
                            centerD: Float, frame: ARFrame,
                            depth: ARDepthData, vp: CGSize) {
-        // Si está bloqueado, solo desbloquear si la cámara se movió >8cm
+        // Lock: si está congelado, solo desbloquear si la cámara se movió >8cm
         if isLocked {
             if let lt = lockedTransform {
                 let cur = frame.camera.transform.columns.3
                 let prv = lt.columns.3
-                let moved = simd_length(SIMD3<Float>(cur.x - prv.x, cur.y - prv.y, cur.z - prv.z))
+                let moved = simd_length(SIMD3<Float>(cur.x-prv.x, cur.y-prv.y, cur.z-prv.z))
                 if moved < lockMovementThreshold { return }
             }
-            // Cámara se movió → desbloquear y reiniciar
-            isLocked = false
-            lockedTransform = nil
-            buffer.removeAll()
+            isLocked = false; lockedTransform = nil; buffer.removeAll()
             smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
         }
         lockedTransform = frame.camera.transform
 
         guard box.width > 30, box.height > 30 else { return }
 
-        // Usar directamente los 4 corners del bbox YOLO.
-        // Para cada corner se samplea la profundidad real; si está muy lejos del centro
-        // (fondo o piso), se usa centerD como fallback.
-        func cornerDepth(_ pt: CGPoint) -> Float {
-            guard let d = sampleDepth(at: pt, frame: frame, depth: depth),
-                  abs(d - centerD) < 0.25 else { return centerD }
-            return d
-        }
-
         let tl = CGPoint(x: box.minX, y: box.minY)
         let tr = CGPoint(x: box.maxX, y: box.minY)
         let bl = CGPoint(x: box.minX, y: box.maxY)
         let br = CGPoint(x: box.maxX, y: box.maxY)
 
+        // Usar ARKit raycast para cada corner; fallback a depth map si no hay hit
         guard
-            let p3BL = worldPointAtDepth(bl, depth: cornerDepth(bl), frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: cornerDepth(br), frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: cornerDepth(tl), frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: cornerDepth(tr), frame: frame)
+            let p3BL = raycast(from: bl, expectedDepth: centerD),
+            let p3BR = raycast(from: br, expectedDepth: centerD),
+            let p3TL = raycast(from: tl, expectedDepth: centerD),
+            let p3TR = raycast(from: tr, expectedDepth: centerD)
         else { return }
 
         let fRight     = simd_normalize(p3BR - p3BL)
