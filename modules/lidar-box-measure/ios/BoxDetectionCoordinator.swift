@@ -37,10 +37,12 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: - YOLO model
     private var yoloModel: VNCoreMLModel?
     private let modelInputSize: CGFloat = 640
+    private var modelStatusText = "YOLO: loading..."
 
     // MARK: - 2D detection overlay
     private let detectionLayer = CAShapeLayer()
     private let labelLayer     = CATextLayer()
+    private let debugLayer     = CATextLayer()
 
     // MARK: - 3D overlay (SceneKit)
     private var overlayNodes: [SCNNode] = []
@@ -91,16 +93,16 @@ final class BoxDetectionCoordinator: NSObject {
                             }
                             let ml = try MLModel(contentsOf: url, configuration: cfg)
                             yoloModel = try VNCoreMLModel(for: ml)
-                            print("[YOLO] modelo cargado: \(url.lastPathComponent)")
+                            modelStatusText = "YOLO: \(url.lastPathComponent)"
                             return
                         } catch {
-                            print("[YOLO] error al cargar \(name).\(ext): \(error)")
+                            modelStatusText = "YOLO ERR: \(name).\(ext)"
                         }
                     }
                 }
             }
         }
-        print("[YOLO] ningún modelo encontrado en el bundle")
+        modelStatusText = "YOLO: NOT LOADED"
     }
 
     // MARK: - Setup layers
@@ -115,14 +117,33 @@ final class BoxDetectionCoordinator: NSObject {
         labelLayer.backgroundColor = UIColor(red: 0, green: 0.7, blue: 0.2, alpha: 0.8).cgColor
         labelLayer.alignmentMode   = .center
         labelLayer.contentsScale   = UIScreen.main.scale
+
+        debugLayer.fontSize        = 13
+        debugLayer.foregroundColor = UIColor.yellow.cgColor
+        debugLayer.backgroundColor = UIColor.black.withAlphaComponent(0.6).cgColor
+        debugLayer.alignmentMode   = .left
+        debugLayer.contentsScale   = UIScreen.main.scale
+        debugLayer.isWrapped       = true
     }
 
     private func attachLayersIfNeeded() {
         guard let sv = sceneView, detectionLayer.superlayer == nil else { return }
         detectionLayer.frame = sv.bounds
         labelLayer.frame     = CGRect(x: 0, y: 0, width: 120, height: 22)
+        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 60)
         sv.layer.addSublayer(detectionLayer)
         sv.layer.addSublayer(labelLayer)
+        sv.layer.addSublayer(debugLayer)
+        debugLayer.string = modelStatusText
+    }
+
+    private func updateDebug(_ text: String) {
+        DispatchQueue.main.async {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            self.debugLayer.string = text
+            CATransaction.commit()
+        }
     }
 
     // MARK: - Pipeline principal
@@ -172,27 +193,37 @@ final class BoxDetectionCoordinator: NSObject {
     private func detectClosestBox(in pixelBuffer: CVPixelBuffer,
                                   viewportSize vp: CGSize,
                                   cx: CGFloat, cy: CGFloat) -> YOLOPrediction? {
-        guard let model = yoloModel else { return nil }
+        guard let model = yoloModel else {
+            updateDebug("\(modelStatusText)\nNO MODEL")
+            return nil
+        }
 
         var boxesOutput: MLMultiArray?
-        let confidenceThreshold: Float = 0.30
+        var allObservationTypes = [String]()
+        let confidenceThreshold: Float = 0.15
         let iouThreshold:        Float = 0.60
 
-        let request = VNCoreMLRequest(model: model) { req, _ in
-            let observations = req.results?.compactMap { $0 as? VNCoreMLFeatureValueObservation } ?? []
-            // Output con 3 dimensiones = caja de predicciones [1, C, N]
+        let request = VNCoreMLRequest(model: model) { req, err in
+            if let err = err { allObservationTypes.append("ERR:\(err.localizedDescription)") }
+            let obs = req.results ?? []
+            allObservationTypes.append(contentsOf: obs.map { String(describing: type(of: $0)) })
+            let observations = obs.compactMap { $0 as? VNCoreMLFeatureValueObservation }
             boxesOutput = observations
                 .first { $0.featureValue.multiArrayValue?.shape.count == 3 }?
                 .featureValue.multiArrayValue
         }
         request.imageCropAndScaleOption = .scaleFill
 
-        // orientation .right → cámara landscape tratada como portrait
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer,
                                             orientation: .right, options: [:])
-        try? handler.perform([request])
+        do { try handler.perform([request]) }
+        catch { updateDebug("\(modelStatusText)\nperform ERR: \(error)"); return nil }
 
-        guard let boxes = boxesOutput else { return nil }
+        guard let boxes = boxesOutput else {
+            let types = allObservationTypes.prefix(3).joined(separator: ", ")
+            updateDebug("\(modelStatusText)\noutput=nil obs=[\(types)]")
+            return nil
+        }
 
         // Parse [1, C, N] con strides (exactamente como MaciDE)
         let shape   = boxes.shape.map { $0.intValue }
@@ -240,7 +271,10 @@ final class BoxDetectionCoordinator: NSObject {
                                                x1: x1, y1: y1, x2: x2, y2: y2,
                                                maskCoefficients: coefs))
         }
-        guard !predictions.isEmpty else { return nil }
+        guard !predictions.isEmpty else {
+            updateDebug("\(modelStatusText)\nC=\(C) N=\(N) cls=\(numClasses)\nno preds >thr=\(confidenceThreshold)")
+            return nil
+        }
 
         // NMS por clase
         let grouped = Dictionary(grouping: predictions) { $0.classIndex }
@@ -248,16 +282,19 @@ final class BoxDetectionCoordinator: NSObject {
         for (_, group) in grouped {
             nms.append(contentsOf: nonMaxSuppression(group, iou: iouThreshold))
         }
-        guard !nms.isEmpty else { return nil }
+        guard !nms.isEmpty else {
+            updateDebug("\(modelStatusText)\n\(predictions.count) preds, all NMS-filtered")
+            return nil
+        }
 
-        // Elegir el más cercano al centro de pantalla
-        return nms.min(by: { a, b in
+        let best = nms.min(by: { a, b in
             let ra = a.screenRect(viewportSize: vp, modelSize: modelInputSize)
             let rb = b.screenRect(viewportSize: vp, modelSize: modelInputSize)
-            let da = hypot(ra.midX - cx, ra.midY - cy)
-            let db = hypot(rb.midX - cx, rb.midY - cy)
-            return da < db
-        })
+            return hypot(ra.midX - cx, ra.midY - cy) < hypot(rb.midX - cx, rb.midY - cy)
+        })!
+        let topScore = String(format: "%.0f%%", best.score * 100)
+        updateDebug("\(modelStatusText)\n\(nms.count) det | cls=\(best.classIndex) \(topScore)")
+        return best
     }
 
     // MARK: - NMS
