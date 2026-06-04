@@ -15,7 +15,6 @@ Uso:
 
 import sys
 import os
-import urllib.request
 import torch
 import torch.nn as nn
 import coremltools as ct
@@ -23,8 +22,6 @@ import numpy as np
 
 OUT_DIR    = os.path.join(os.path.dirname(__file__),
                           "..", "modules", "lidar-box-measure", "ios")
-CKPT_URL   = ("https://huggingface.co/dhkim2810/MobileSAM/"
-              "resolve/main/mobile_sam.pt")
 CKPT_PATH  = "/tmp/mobile_sam.pt"
 IMAGE_SIZE = 1024  # MobileSAM canonical input
 
@@ -32,14 +29,26 @@ IMAGE_SIZE = 1024  # MobileSAM canonical input
 # ── Descargar checkpoint ──────────────────────────────────────────────────────
 
 def download_checkpoint():
-    if os.path.exists(CKPT_PATH):
-        print(f"Checkpoint ya existe: {CKPT_PATH}")
+    if os.path.exists(CKPT_PATH) and os.path.getsize(CKPT_PATH) > 1_000_000:
+        print(f"Checkpoint ya existe: {CKPT_PATH}  ({os.path.getsize(CKPT_PATH)//1_000_000} MB)")
         return
-    print(f"Descargando MobileSAM checkpoint…")
-    urllib.request.urlretrieve(CKPT_URL, CKPT_PATH,
-        reporthook=lambda b, bs, t: print(
-            f"  {min(b*bs, t) / 1e6:.1f}/{t/1e6:.1f} MB", end="\r"))
-    print(f"\nDescargado: {CKPT_PATH}")
+    try:
+        from huggingface_hub import hf_hub_download
+        print("Descargando mobile_sam.pt desde HuggingFace…")
+        path = hf_hub_download(
+            repo_id="dhkim2810/MobileSAM",
+            filename="mobile_sam.pt",
+            local_dir="/tmp",
+        )
+        print(f"Descargado: {path}  ({os.path.getsize(path)//1_000_000} MB)")
+    except Exception as e:
+        print(f"huggingface_hub falló ({e}), intentando wget…")
+        ret = os.system(
+            "wget -q --show-progress -O /tmp/mobile_sam.pt "
+            "https://huggingface.co/dhkim2810/MobileSAM/resolve/main/mobile_sam.pt"
+        )
+        if ret != 0:
+            sys.exit("ERROR: no se pudo descargar mobile_sam.pt")
 
 
 # ── Importar MobileSAM ────────────────────────────────────────────────────────
