@@ -25,9 +25,12 @@ private extension ARMeshGeometry {
     /// ARMeshClassification por índice de cara (UInt8 per face)
     func classificationAt(faceIndex i: Int) -> ARMeshClassification {
         guard let cls = classification else { return .none }
-        let ptr = cls.buffer.contents()
-            .advanced(by: cls.offset + i * cls.stride)
-        return ARMeshClassification(rawValue: Int(ptr.load(as: UInt8.self))) ?? .none
+        let byteOffset = cls.offset + i * cls.stride
+        let raw = cls.buffer.contents()
+            .advanced(by: byteOffset)
+            .assumingMemoryBound(to: UInt8.self)
+            .pointee
+        return ARMeshClassification(rawValue: Int(raw)) ?? .none
     }
 }
 
@@ -36,7 +39,8 @@ private extension ARGeometrySource {
     func vertex(at index: UInt32) -> SIMD3<Float> {
         buffer.contents()
             .advanced(by: offset + Int(index) * stride)
-            .load(as: SIMD3<Float>.self)
+            .assumingMemoryBound(to: SIMD3<Float>.self)
+            .pointee
     }
 }
 
@@ -46,8 +50,8 @@ private extension ARGeometryElement {
         let ptr = buffer.contents()
             .advanced(by: (faceIndex * 3 + v) * bytesPerIndex)
         return bytesPerIndex == 2
-            ? UInt32(ptr.load(as: UInt16.self))
-            : ptr.load(as: UInt32.self)
+            ? UInt32(ptr.assumingMemoryBound(to: UInt16.self).pointee)
+            : ptr.assumingMemoryBound(to: UInt32.self).pointee
     }
 }
 
