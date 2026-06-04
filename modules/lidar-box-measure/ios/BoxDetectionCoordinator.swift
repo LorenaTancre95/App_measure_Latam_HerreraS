@@ -74,7 +74,8 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Cargar coco128-yolo11n-seg
     private func loadModel() {
-        let names = ["coco128-yolo11n-seg", "coco128_yolo11n_seg",
+        let names = ["box_detector",
+                     "coco128-yolo11n-seg", "coco128_yolo11n_seg",
                      "coco128-yolov8n-seg", "coco128_yolov8n_seg",
                      "model_core"]
         let exts  = ["mlmodelc", "mlpackage", "mlmodel"]
@@ -257,9 +258,11 @@ final class BoxDetectionCoordinator: NSObject {
         // Parse [1, C, N] con strides (exactamente como MaciDE)
         let shape   = boxes.shape.map { $0.intValue }
         guard shape.count == 3 else { return nil }
-        let C = shape[1]   // canales: 4 + numClasses + 32
+        let C = shape[1]   // canales: 4 + numClasses (yolov8n) o 4 + numClasses + 32 (seg)
         let N = shape[2]   // anchors: 8400
-        let numSegMasks = 32
+        // Detectar automáticamente si es modelo seg (C >= 4+1+32=37) o detection puro (C=4+numCls)
+        // yolov8n-seg COCO: C=116 (4+80+32); yolov8n cardboard: C=5 (4+1)
+        let numSegMasks = C > 36 ? 32 : 0
         let numClasses  = C - 4 - numSegMasks
         guard numClasses > 0 else { return nil }
 
