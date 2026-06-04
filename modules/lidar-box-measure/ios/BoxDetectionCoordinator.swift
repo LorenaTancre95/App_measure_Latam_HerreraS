@@ -27,7 +27,7 @@ private extension ARMeshGeometry {
         guard let cls = classification else { return .none }
         let ptr = cls.buffer.contents()
             .advanced(by: cls.offset + i * cls.stride)
-        return ARMeshClassification(rawValue: ptr.load(as: UInt8.self)) ?? .none
+        return ARMeshClassification(rawValue: Int(ptr.load(as: UInt8.self))) ?? .none
     }
 }
 
