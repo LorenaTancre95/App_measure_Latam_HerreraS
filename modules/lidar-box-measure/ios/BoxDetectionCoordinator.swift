@@ -84,7 +84,11 @@ final class BoxDetectionCoordinator: NSObject {
                     if let url = b.url(forResource: name, withExtension: ext) {
                         do {
                             let cfg = MLModelConfiguration()
-                            cfg.computeUnits = .cpuAndNeuralEngine
+                            if #available(iOS 16.0, *) {
+                                cfg.computeUnits = .cpuAndNeuralEngine
+                            } else {
+                                cfg.computeUnits = .all
+                            }
                             let ml = try MLModel(contentsOf: url, configuration: cfg)
                             yoloModel = try VNCoreMLModel(for: ml)
                             print("[YOLO] modelo cargado: \(url.lastPathComponent)")
@@ -496,17 +500,29 @@ final class BoxDetectionCoordinator: NSObject {
             let ext   = -fN
             let bbl = bl + ext * dep, bbr = br + ext * dep
             let btl = tl + ext * dep, btr = tr + ext * dep
-            [(bl,br),(br,tr),(tr,tl),(tl,bl),(bbl,bbr),(bbr,btr),(btr,btl),(btl,bbl),
-             (bl,bbl),(br,bbr),(tl,btl),(tr,btr)].forEach { s, e in
+            let edges: [(SIMD3<Float>, SIMD3<Float>)] = [
+                (bl,br),(br,tr),(tr,tl),(tl,bl),
+                (bbl,bbr),(bbr,btr),(btr,btl),(btl,bbl),
+                (bl,bbl),(br,bbr),(tl,btl),(tr,btr)
+            ]
+            for (s, e) in edges {
                 let n = self.makeLine(from: s, to: e, color: green)
-                sv.scene.rootNode.addChildNode(n); self.overlayNodes.append(n)
+                sv.scene.rootNode.addChildNode(n)
+                self.overlayNodes.append(n)
             }
-            [("\(Int(measurement.comprimento.rounded())) cm", (bl+br)/2 + up * (-0.055)),
-             ("\(Int(measurement.altura.rounded())) cm",      (bl+tl)/2 + right * (-0.065)),
-             ("\(Int(measurement.largura.rounded())) cm",     (br+bbr)/2 + right * 0.065)].forEach { txt, pos in
+            let cStr = "\(Int(measurement.comprimento.rounded())) cm"
+            let aStr = "\(Int(measurement.altura.rounded())) cm"
+            let lStr = "\(Int(measurement.largura.rounded())) cm"
+            let labels: [(String, SIMD3<Float>)] = [
+                (cStr, (bl+br)/2 + up * (-0.055)),
+                (aStr, (bl+tl)/2 + right * (-0.065)),
+                (lStr, (br+bbr)/2 + right * 0.065)
+            ]
+            for (txt, pos) in labels {
                 let n = self.makeTextNode(txt, color: green)
                 n.position = SCNVector3(pos.x, pos.y, pos.z)
-                sv.scene.rootNode.addChildNode(n); self.overlayNodes.append(n)
+                sv.scene.rootNode.addChildNode(n)
+                self.overlayNodes.append(n)
             }
         }
     }
