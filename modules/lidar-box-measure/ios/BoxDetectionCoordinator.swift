@@ -399,53 +399,9 @@ final class BoxDetectionCoordinator: NSObject {
         return nil
     }
 
-    // MARK: - ARMesh bounding box
-    // Extrae los vértices de malla clasificados como objetos genéricos (.none)
-    // dentro de `searchRadius` del hit point. Retorna el AABB en world space.
-    private func findBoxBounds(near hitPoint: SIMD3<Float>,
-                                frame: ARFrame) -> (min: SIMD3<Float>, max: SIMD3<Float>)? {
-        let searchRadius: Float = 1.0
-        var pts = [SIMD3<Float>]()
-        pts.reserveCapacity(512)
-
-        for anchor in frame.anchors.compactMap({ $0 as? ARMeshAnchor }) {
-            // Descartar anchors muy lejos del hit point
-            let anchorPos = SIMD3<Float>(anchor.transform.columns.3.x,
-                                         anchor.transform.columns.3.y,
-                                         anchor.transform.columns.3.z)
-            guard simd_distance(anchorPos, hitPoint) < searchRadius * 2 else { continue }
-
-            let geo = anchor.geometry
-            let t   = anchor.transform
-
-            for fi in 0..<geo.faces.count {
-                // Solo objetos genéricos (cajas = .none); excluir piso, paredes, techo
-                guard geo.classificationAt(faceIndex: fi) == .none else { continue }
-
-                for vi in 0..<3 {
-                    let vIdx   = geo.faces.vertexIndex(at: fi, vertex: vi)
-                    let local  = geo.vertices.vertex(at: vIdx)
-                    let world4 = t * SIMD4<Float>(local.x, local.y, local.z, 1)
-                    let world  = SIMD3<Float>(world4.x, world4.y, world4.z)
-                    if simd_distance(world, hitPoint) < searchRadius { pts.append(world) }
-                }
-            }
-        }
-
-        guard pts.count >= 30 else { return nil }
-
-        let minX = pts.map(\.x).min()!, maxX = pts.map(\.x).max()!
-        let minY = pts.map(\.y).min()!, maxY = pts.map(\.y).max()!
-        let minZ = pts.map(\.z).min()!, maxZ = pts.map(\.z).max()!
-
-        let w = maxX-minX, h = maxY-minY, d = maxZ-minZ
-        guard w > 0.03, h > 0.03, d > 0.03, w < 3, h < 3, d < 3 else { return nil }
-
-        return (SIMD3(minX, minY, minZ), SIMD3(maxX, maxY, maxZ))
-    }
-
-    // MARK: - Fase 2: ARMesh measure
-    // Se llama desde main thread.
+    // MARK: - Medición: YOLO bbox + LiDAR depth map
+    // Proyecta los 4 corners del bbox a 3D usando la profundidad real del mapa LiDAR.
+    // No depende de ARMeshAnchor (que capturaba 1 m de sala y daba resultados erróneos).
     private func measure3D(box: CGRect, frame: ARFrame,
                             depth: ARDepthData, vp: CGSize) {
         // Lock mode
@@ -464,68 +420,69 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard box.width > 20, box.height > 20 else { return }
 
-        // 1. Raycast desde el centro del bbox YOLO
-        let bboxCenter = CGPoint(x: box.midX, y: box.midY)
-        guard let hitPoint = raycast(from: bboxCenter) else { return }
-
-        // 2. Buscar bounding box de la malla ARKit en ese punto
-        guard let bounds = findBoxBounds(near: hitPoint, frame: frame) else {
-            // Fallback: depth map si la malla no tiene suficientes vértices
-            fallbackDepthMeasure(box: box, hitPoint: hitPoint, frame: frame, depth: depth)
-            return
+        // 1. Muestrear grilla 10×10 dentro del bbox para encontrar la profundidad del frente
+        let G = 10
+        var allDepths: [Float] = []
+        allDepths.reserveCapacity(G * G)
+        for r in 0..<G {
+            for c in 0..<G {
+                let sx = box.minX + box.width  * CGFloat(c) / CGFloat(G - 1)
+                let sy = box.minY + box.height * CGFloat(r) / CGFloat(G - 1)
+                if let d = sampleDepth(at: CGPoint(x: sx, y: sy),
+                                       frame: frame, depth: depth, vp: vp) {
+                    allDepths.append(d)
+                }
+            }
         }
+        guard allDepths.count >= 15 else { return }
 
-        // 3. Dimensiones desde AABB
-        let dimX = bounds.max.x - bounds.min.x
-        let dimY = bounds.max.y - bounds.min.y  // altura (gravity-aligned)
-        let dimZ = bounds.max.z - bounds.min.z
+        // La cara frontal de la caja es el cluster de mínima profundidad
+        let minD = allDepths.min()!
+        let frontCluster = allDepths.filter { abs($0 - minD) < 0.15 }
+        let sorted = frontCluster.sorted()
+        let centerD = sorted[sorted.count / 2]  // mediana de la cara frontal
 
-        // 4. Determinar cara frontal (la más cercana a la cámara)
-        let boxCenter = (bounds.min + bounds.max) / 2
-        let camPos    = SIMD3<Float>(frame.camera.transform.columns.3.x,
-                                     frame.camera.transform.columns.3.y,
-                                     frame.camera.transform.columns.3.z)
-        let toCam = simd_normalize(camPos - boxCenter)
+        // 2. Proyectar los 4 corners del bbox YOLO a 3D usando centerD
+        func project(_ sx: CGFloat, _ sy: CGFloat) -> SIMD3<Float>? {
+            let d = sampleDepth(at: CGPoint(x: sx, y: sy),
+                                frame: frame, depth: depth, vp: vp) ?? centerD
+            let clamped = abs(d - centerD) < 0.25 ? d : centerD
+            return worldPointAtDepth(CGPoint(x: sx, y: sy), depth: clamped,
+                                     frame: frame, vp: vp)
+        }
+        guard
+            let bl = project(box.minX, box.maxY),
+            let br = project(box.maxX, box.maxY),
+            let tl = project(box.minX, box.minY),
+            let tr = project(box.maxX, box.minY)
+        else { return }
 
-        // La cara frontal es la que tiene normal más alineada con toCam
-        // Para un AABB world-aligned: ±X o ±Z (Y es vertical/arriba)
-        let frontInX = abs(toCam.x) >= abs(toCam.z)
-        let tl, tr, bl, br: SIMD3<Float>
-        let btl, btr, bbl, bbr: SIMD3<Float>
+        let fRight = simd_normalize(br - bl)
+        let fUp    = simd_normalize(tl - bl)
+        let faceN  = simd_normalize(simd_cross(fRight, fUp))
+        guard abs(faceN.y) < 0.70 else { return }  // cara demasiado horizontal → piso
 
-        if frontInX {
-            let fx = toCam.x > 0 ? bounds.max.x : bounds.min.x
-            let bx = toCam.x > 0 ? bounds.min.x : bounds.max.x
-            tl  = SIMD3(fx, bounds.max.y, bounds.min.z)
-            tr  = SIMD3(fx, bounds.max.y, bounds.max.z)
-            bl  = SIMD3(fx, bounds.min.y, bounds.min.z)
-            br  = SIMD3(fx, bounds.min.y, bounds.max.z)
-            btl = SIMD3(bx, bounds.max.y, bounds.min.z)
-            btr = SIMD3(bx, bounds.max.y, bounds.max.z)
-            bbl = SIMD3(bx, bounds.min.y, bounds.min.z)
-            bbr = SIMD3(bx, bounds.min.y, bounds.max.z)
+        let c = Double(simd_distance(bl, br)) * 100  // comprimento (ancho cara frontal)
+        let a = Double(simd_distance(tl, bl)) * 100  // altura
+        guard c > 3, c < 300, a > 3, a < 300 else { return }
+
+        // 3. Estimar profundidad de la caja
+        // Si la cámara está levemente ladeada, los píxeles de las caras laterales/superior
+        // tienen profundidad un poco mayor que la cara frontal.
+        let deeperSamples = allDepths.filter { $0 > centerD + 0.06 && $0 < centerD + 0.70 }
+        let depthEst: Float
+        if deeperSamples.count >= 6 {
+            let maxD = deeperSamples.max()!
+            depthEst = max(maxD - centerD, 0.03)
         } else {
-            let fz = toCam.z > 0 ? bounds.max.z : bounds.min.z
-            let bz = toCam.z > 0 ? bounds.min.z : bounds.max.z
-            tl  = SIMD3(bounds.min.x, bounds.max.y, fz)
-            tr  = SIMD3(bounds.max.x, bounds.max.y, fz)
-            bl  = SIMD3(bounds.min.x, bounds.min.y, fz)
-            br  = SIMD3(bounds.max.x, bounds.min.y, fz)
-            btl = SIMD3(bounds.min.x, bounds.max.y, bz)
-            btr = SIMD3(bounds.max.x, bounds.max.y, bz)
-            bbl = SIMD3(bounds.min.x, bounds.min.y, bz)
-            bbr = SIMD3(bounds.max.x, bounds.min.y, bz)
+            depthEst = Float(min(c, a) / 100.0) * 0.65  // fallback geométrico
         }
+        let l = max(Double(depthEst) * 100, 3.0)
 
-        // comprimento = ancho de la cara frontal visible
-        // altura      = alto (Y)
-        // largura     = profundidad de la caja
-        let frontWidth = frontInX ? dimZ : dimX
-        let c = Double(frontWidth) * 100
-        let a = Double(dimY) * 100
-        let l = frontInX ? Double(dimX)*100 : Double(dimZ)*100
-
-        guard c > 3, c < 300, a > 3, a < 300, l > 3 else { return }
+        // 4. Extruir cara trasera a lo largo de la normal
+        let ext = -faceN * Float(l / 100)
+        let bbl = bl + ext, bbr = br + ext
+        let btl = tl + ext, btr = tr + ext
 
         // 5. EMA smoothing
         let α = smoothAlpha
@@ -537,63 +494,6 @@ final class BoxDetectionCoordinator: NSObject {
         smoothBBR = smoothBBR.map { α*bbr + (1-α)*$0 } ?? bbr
         smoothBTL = smoothBTL.map { α*btl + (1-α)*$0 } ?? btl
         smoothBTR = smoothBTR.map { α*btr + (1-α)*$0 } ?? btr
-
-        let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
-        addToBuffer(m)
-        updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!,
-                      bbl: smoothBBL!, bbr: smoothBBR!, btl: smoothBTL!, btr: smoothBTR!,
-                      measurement: m)
-    }
-
-    // MARK: - Fallback: depth map (cuando la malla no tiene vértices suficientes)
-    private func fallbackDepthMeasure(box: CGRect, hitPoint: SIMD3<Float>,
-                                       frame: ARFrame, depth: ARDepthData) {
-        guard let sv = sceneView else { return }
-        let vp = sv.bounds.size
-
-        let tl = CGPoint(x: box.minX, y: box.minY)
-        let tr = CGPoint(x: box.maxX, y: box.minY)
-        let bl = CGPoint(x: box.minX, y: box.maxY)
-        let br = CGPoint(x: box.maxX, y: box.maxY)
-
-        let camPos = frame.camera.transform.columns.3
-        let centerD = simd_distance(hitPoint, SIMD3<Float>(camPos.x, camPos.y, camPos.z))
-
-        func depthedPoint(_ pt: CGPoint) -> SIMD3<Float>? {
-            let d = sampleDepth(at: pt, frame: frame, depth: depth, vp: vp) ?? centerD
-            let clamped = abs(d - centerD) < 0.3 ? d : centerD
-            return worldPointAtDepth(pt, depth: clamped, frame: frame, vp: vp)
-        }
-
-        guard
-            let p3BL = depthedPoint(bl), let p3BR = depthedPoint(br),
-            let p3TL = depthedPoint(tl), let p3TR = depthedPoint(tr)
-        else { return }
-
-        let fRight = simd_normalize(p3BR - p3BL)
-        let fUp    = simd_normalize(p3TL - p3BL)
-        let fN     = simd_normalize(simd_cross(fRight, fUp))
-        guard abs(fN.y) < 0.70 else { return }
-
-        let c = Double(simd_distance(p3BL, p3BR)) * 100
-        let a = Double(simd_distance(p3BL, p3TL)) * 100
-        let l = min(c, a) * 0.5
-        guard c > 3, c < 300, a > 3, a < 300 else { return }
-
-        let dep   = Float(max(l, 3) / 100.0)
-        let ext   = -fN
-        let bbl   = p3BL + ext*dep, bbr = p3BR + ext*dep
-        let fbtl  = p3TL + ext*dep, fbtr = p3TR + ext*dep
-
-        let α = smoothAlpha
-        smoothBL  = smoothBL.map  { α*p3BL + (1-α)*$0 } ?? p3BL
-        smoothBR  = smoothBR.map  { α*p3BR + (1-α)*$0 } ?? p3BR
-        smoothTL  = smoothTL.map  { α*p3TL + (1-α)*$0 } ?? p3TL
-        smoothTR  = smoothTR.map  { α*p3TR + (1-α)*$0 } ?? p3TR
-        smoothBBL = smoothBBL.map { α*bbl  + (1-α)*$0 } ?? bbl
-        smoothBBR = smoothBBR.map { α*bbr  + (1-α)*$0 } ?? bbr
-        smoothBTL = smoothBTL.map { α*fbtl + (1-α)*$0 } ?? fbtl
-        smoothBTR = smoothBTR.map { α*fbtr + (1-α)*$0 } ?? fbtr
 
         let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
         addToBuffer(m)
