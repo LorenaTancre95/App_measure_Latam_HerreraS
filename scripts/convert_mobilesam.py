@@ -54,11 +54,16 @@ def download_checkpoint():
 # ── Importar MobileSAM ────────────────────────────────────────────────────────
 
 def load_sam():
+    # Buscar MobileSAM en PYTHONPATH o en /tmp/MobileSAM (clonado en CI)
+    mobile_sam_path = "/tmp/MobileSAM"
+    if mobile_sam_path not in sys.path and os.path.isdir(mobile_sam_path):
+        sys.path.insert(0, mobile_sam_path)
     try:
         from mobile_sam import sam_model_registry
     except ImportError:
         sys.exit(
-            "ERROR: pip install git+https://github.com/ChaoningZhang/MobileSAM.git"
+            "ERROR: MobileSAM no encontrado. "
+            "Clonar: git clone https://github.com/ChaoningZhang/MobileSAM.git /tmp/MobileSAM"
         )
     print("Cargando mobile_sam.pt…")
     sam = sam_model_registry["vit_t"](checkpoint=CKPT_PATH)
