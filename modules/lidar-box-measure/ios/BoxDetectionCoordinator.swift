@@ -74,61 +74,48 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Cargar coco128-yolo11n-seg
     private func loadModel() {
-        // Lista todos los archivos del bundle para diagnóstico
-        let bundlePath = Bundle.main.bundlePath
-        let allFiles = (try? FileManager.default.contentsOfDirectory(atPath: bundlePath)) ?? []
-        let mlFiles = allFiles.filter {
-            $0.contains("ml") || $0.contains("coco") || $0.contains("model") || $0.contains("yolo")
-        }
-        let bundleForClass = Bundle(for: BoxDetectionCoordinator.self)
-        let classFiles = (try? FileManager.default.contentsOfDirectory(
-            atPath: bundleForClass.bundlePath)) ?? []
-        let classML = classFiles.filter {
-            $0.contains("ml") || $0.contains("coco") || $0.contains("model")
-        }
-
-        // Buscar también en resource bundles (CocoaPods resource_bundles)
-        var bundles: [Bundle] = [Bundle.main, bundleForClass]
-        let bundleNames = ["LidarBoxMeasure", "LidarBoxMeasureResources", "lidar-box-measure"]
-        for bName in bundleNames {
-            if let url = Bundle.main.url(forResource: bName, withExtension: "bundle"),
-               let b = Bundle(url: url) { bundles.append(b) }
-            if let url = bundleForClass.url(forResource: bName, withExtension: "bundle"),
-               let b = Bundle(url: url) { bundles.append(b) }
-        }
-
         let names = ["coco128-yolo11n-seg", "coco128_yolo11n_seg",
                      "coco128-yolov8n-seg", "coco128_yolov8n_seg",
                      "model_core"]
         let exts  = ["mlmodelc", "mlpackage", "mlmodel"]
 
-        for b in bundles {
+        // Buscar en todos los bundles candidatos
+        var searchBundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
+        let subBundleNames = ["LidarBoxMeasure", "LidarBoxMeasureResources", "lidar-box-measure"]
+        for bName in subBundleNames {
+            for parent in [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)] {
+                if let u = parent.url(forResource: bName, withExtension: "bundle"),
+                   let b = Bundle(url: u) { searchBundles.append(b) }
+            }
+        }
+
+        var lastError = ""
+        for b in searchBundles {
+            let root = URL(fileURLWithPath: b.bundlePath)
             for name in names {
                 for ext in exts {
-                    if let url = b.url(forResource: name, withExtension: ext) {
-                        do {
-                            let cfg = MLModelConfiguration()
-                            if #available(iOS 16.0, *) {
-                                cfg.computeUnits = .cpuAndNeuralEngine
-                            } else {
-                                cfg.computeUnits = .all
-                            }
-                            let ml = try MLModel(contentsOf: url, configuration: cfg)
-                            yoloModel = try VNCoreMLModel(for: ml)
-                            modelStatusText = "YOLO OK: \(url.lastPathComponent)"
-                            return
-                        } catch {
-                            modelStatusText = "ERR \(name).\(ext): \(error.localizedDescription)"
+                    // Construir URL directamente (Bundle.url(forResource:) falla con directorios)
+                    let url = root.appendingPathComponent("\(name).\(ext)")
+                    guard FileManager.default.fileExists(atPath: url.path) else { continue }
+                    do {
+                        let cfg = MLModelConfiguration()
+                        if #available(iOS 16.0, *) {
+                            cfg.computeUnits = .cpuAndNeuralEngine
+                        } else {
+                            cfg.computeUnits = .all
                         }
+                        let ml = try MLModel(contentsOf: url, configuration: cfg)
+                        yoloModel = try VNCoreMLModel(for: ml)
+                        modelStatusText = "YOLO OK: \(name).\(ext)"
+                        return
+                    } catch {
+                        lastError = "\(name).\(ext): \(error.localizedDescription)"
                     }
                 }
             }
         }
 
-        // Mostrar qué hay en el bundle para diagnóstico
-        let mainInfo = mlFiles.isEmpty ? "main=[]" : "main=[\(mlFiles.prefix(3).joined(separator: ","))]"
-        let classInfo = classML.isEmpty ? "" : " cls=[\(classML.prefix(2).joined(separator: ","))]"
-        modelStatusText = "NOT LOADED\n\(mainInfo)\(classInfo)"
+        modelStatusText = lastError.isEmpty ? "NOT LOADED - no file found" : "LOAD ERR: \(lastError)"
     }
 
     // MARK: - Setup layers
