@@ -17,8 +17,8 @@ Pod::Spec.new do |s|
 
   s.source_files = 'ios/**/*.{swift,m,mm}'
   s.resources    = [
-    'ios/sam_encoder.mlmodel',
-    'ios/sam_decoder.mlmodel',
+    'ios/sam_encoder.mlpackage',
+    'ios/sam_decoder.mlpackage',
   ]
   s.frameworks = ['ARKit', 'SceneKit', 'AVFoundation', 'CoreML', 'Accelerate']
 

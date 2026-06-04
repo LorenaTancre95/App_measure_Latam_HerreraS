@@ -153,7 +153,7 @@ def convert_encoder(sam):
         torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE),
         [ct.TensorType(name="image", shape=(1, 3, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)],
         ["embedding"],
-        os.path.join(OUT_DIR, "sam_encoder.mlmodel"),
+        os.path.join(OUT_DIR, "sam_encoder.mlpackage"),
         "1/2",
     )
 
@@ -171,7 +171,7 @@ def convert_decoder(sam):
             ct.TensorType(name="point_y",   shape=(1,),              dtype=np.float32),
         ],
         ["mask_logits"],
-        os.path.join(OUT_DIR, "sam_decoder.mlmodel"),
+        os.path.join(OUT_DIR, "sam_decoder.mlpackage"),
         "2/2",
     )
 

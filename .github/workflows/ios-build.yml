@@ -21,8 +21,8 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            modules/lidar-box-measure/ios/sam_encoder.mlmodel
-            modules/lidar-box-measure/ios/sam_decoder.mlmodel
+            modules/lidar-box-measure/ios/sam_encoder.mlpackage
+            modules/lidar-box-measure/ios/sam_decoder.mlpackage
           key: mobilesam-coreml-${{ hashFiles('scripts/convert_mobilesam.py') }}
 
       - name: Setup Python 3.11 para conversión
@@ -54,16 +54,16 @@ jobs:
 
       - name: Verificar modelos
         run: |
-          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlmodel || echo "FALTA encoder"
-          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlmodel || echo "FALTA decoder"
+          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlpackage || echo "FALTA encoder"
+          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlpackage || echo "FALTA decoder"
 
       - name: Subir modelos SAM como artefato
         uses: actions/upload-artifact@v4
         with:
           name: sam-coreml-models
           path: |
-            modules/lidar-box-measure/ios/sam_encoder.mlmodel
-            modules/lidar-box-measure/ios/sam_decoder.mlmodel
+            modules/lidar-box-measure/ios/sam_encoder.mlpackage
+            modules/lidar-box-measure/ios/sam_decoder.mlpackage
           retention-days: 7
 
   # ── Build completo Xcode ──────────────────────────────────────────────────
@@ -83,8 +83,8 @@ jobs:
 
       - name: Verificar modelos SAM presentes
         run: |
-          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlmodel
-          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlmodel
+          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlpackage
+          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlpackage
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

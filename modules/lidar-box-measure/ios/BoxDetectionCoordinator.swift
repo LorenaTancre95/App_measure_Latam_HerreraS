@@ -67,8 +67,11 @@ final class BoxDetectionCoordinator: NSObject {
         let bundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
         var encURL: URL?, decURL: URL?
         for b in bundles {
-            encURL = encURL ?? b.url(forResource: "sam_encoder", withExtension: "mlmodelc")
-            decURL = decURL ?? b.url(forResource: "sam_decoder", withExtension: "mlmodelc")
+            // mlpackage = formato compilado de MLProgram (convert_to="mlprogram")
+            encURL = encURL ?? b.url(forResource: "sam_encoder", withExtension: "mlpackage")
+                            ?? b.url(forResource: "sam_encoder", withExtension: "mlmodelc")
+            decURL = decURL ?? b.url(forResource: "sam_decoder", withExtension: "mlpackage")
+                            ?? b.url(forResource: "sam_decoder", withExtension: "mlmodelc")
         }
         guard let eu = encURL, let du = decURL else {
             print("[SAM] sam_encoder/sam_decoder.mlmodelc no encontrados en bundle")
