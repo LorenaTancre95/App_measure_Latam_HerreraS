@@ -28,12 +28,13 @@ jobs:
       - name: Instalar dependências Python para conversión
         if: steps.cache-sam.outputs.cache-hit != 'true'
         run: |
-          pip3 install --quiet torch torchvision coremltools numpy pillow
-          pip3 install --quiet git+https://github.com/ChaoningZhang/MobileSAM.git
+          python3 -m venv /tmp/sam-venv
+          /tmp/sam-venv/bin/pip install --quiet torch torchvision coremltools numpy pillow
+          /tmp/sam-venv/bin/pip install --quiet git+https://github.com/ChaoningZhang/MobileSAM.git
 
       - name: Converter MobileSAM → CoreML
         if: steps.cache-sam.outputs.cache-hit != 'true'
-        run: python3 scripts/convert_mobilesam.py
+        run: /tmp/sam-venv/bin/python scripts/convert_mobilesam.py
 
       - name: Verificar modelos
         run: |
