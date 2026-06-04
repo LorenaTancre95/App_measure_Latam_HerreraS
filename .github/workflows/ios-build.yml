@@ -6,12 +6,68 @@ on:
   workflow_dispatch:
 
 jobs:
+
+  # ── Convertir MobileSAM → CoreML (cacheado, solo re-corre si cambia el script) ──
+  convert-models:
+    runs-on: macos-14
+    outputs:
+      cache-hit: ${{ steps.cache-sam.outputs.cache-hit }}
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Cache modelos SAM CoreML
+        id: cache-sam
+        uses: actions/cache@v4
+        with:
+          path: |
+            modules/lidar-box-measure/ios/sam_encoder.mlmodel
+            modules/lidar-box-measure/ios/sam_decoder.mlmodel
+          key: mobilesam-coreml-${{ hashFiles('scripts/convert_mobilesam.py') }}
+
+      - name: Instalar dependências Python para conversión
+        if: steps.cache-sam.outputs.cache-hit != 'true'
+        run: |
+          pip3 install --quiet torch torchvision coremltools numpy pillow
+          pip3 install --quiet git+https://github.com/ChaoningZhang/MobileSAM.git
+
+      - name: Converter MobileSAM → CoreML
+        if: steps.cache-sam.outputs.cache-hit != 'true'
+        run: python3 scripts/convert_mobilesam.py
+
+      - name: Verificar modelos
+        run: |
+          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlmodel || echo "FALTA encoder"
+          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlmodel || echo "FALTA decoder"
+
+      - name: Subir modelos SAM como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: sam-coreml-models
+          path: |
+            modules/lidar-box-measure/ios/sam_encoder.mlmodel
+            modules/lidar-box-measure/ios/sam_decoder.mlmodel
+          retention-days: 7
+
+  # ── Build completo Xcode ──────────────────────────────────────────────────
   build-ios:
     runs-on: macos-14
+    needs: convert-models
 
     steps:
       - name: Checkout código
         uses: actions/checkout@v4
+
+      - name: Descargar modelos SAM CoreML del job anterior
+        uses: actions/download-artifact@v4
+        with:
+          name: sam-coreml-models
+          path: modules/lidar-box-measure/ios/
+
+      - name: Verificar modelos SAM presentes
+        run: |
+          ls -lh modules/lidar-box-measure/ios/sam_encoder.mlmodel
+          ls -lh modules/lidar-box-measure/ios/sam_decoder.mlmodel
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

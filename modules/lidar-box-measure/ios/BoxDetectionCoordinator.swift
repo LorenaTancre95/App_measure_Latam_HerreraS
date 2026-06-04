@@ -1,8 +1,7 @@
 import ARKit
 import SceneKit
-import Vision
 import CoreML
-import ImageIO
+import Accelerate
 
 struct NativeMeasurement {
     var comprimento: Double
@@ -40,8 +39,12 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: - Overlay
     private var overlayNodes: [SCNNode] = []
 
-    // MARK: - CoreML / YOLO
-    private var yoloModel: VNCoreMLModel?
+    // MARK: - MobileSAM
+    private var samEncoder: MLModel?
+    private var samDecoder: MLModel?
+    private var cachedEmbedding: MLMultiArray?
+    private var encoderTickCount = 0
+    private let encoderInterval = 4          // re-encode every 4 frames
     private var mlInFlight = false
 
     // MARK: - Manual
@@ -55,30 +58,34 @@ final class BoxDetectionCoordinator: NSObject {
         self.onUpdate = onUpdate
         self.onPlaneFound = onPlaneFound
         super.init()
-        loadYOLOModel()
+        loadSAMModels()
     }
 
-    // MARK: - Model loading
-    private func loadYOLOModel() {
-        // Xcode compila .mlmodel → .mlmodelc durante el build; va al main bundle (static framework)
-        let url = Bundle.main.url(forResource: "model_core", withExtension: "mlmodelc")
-               ?? Bundle(for: BoxDetectionCoordinator.self).url(forResource: "model_core", withExtension: "mlmodelc")
-        guard let modelURL = url else {
-            print("[YOLO] model_core.mlmodelc no encontrado en bundle")
+    // MARK: - SAM model loading
+    // Xcode compila .mlmodel → .mlmodelc; buscamos en main bundle y en el bundle del pod
+    private func loadSAMModels() {
+        let bundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
+        var encURL: URL?, decURL: URL?
+        for b in bundles {
+            encURL = encURL ?? b.url(forResource: "sam_encoder", withExtension: "mlmodelc")
+            decURL = decURL ?? b.url(forResource: "sam_decoder", withExtension: "mlmodelc")
+        }
+        guard let eu = encURL, let du = decURL else {
+            print("[SAM] sam_encoder/sam_decoder.mlmodelc no encontrados en bundle")
             return
         }
         do {
             let cfg = MLModelConfiguration()
             cfg.computeUnits = .all
-            let ml = try MLModel(contentsOf: modelURL, configuration: cfg)
-            yoloModel = try VNCoreMLModel(for: ml)
-            print("[YOLO] modelo cargado OK")
+            samEncoder = try MLModel(contentsOf: eu, configuration: cfg)
+            samDecoder = try MLModel(contentsOf: du, configuration: cfg)
+            print("[SAM] encoder + decoder cargados OK")
         } catch {
-            print("[YOLO] error al cargar: \(error)")
+            print("[SAM] error al cargar: \(error)")
         }
     }
 
-    // MARK: - Pipeline principal (ejecutado en main queue desde ARSessionDelegate)
+    // MARK: - Pipeline principal
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
@@ -88,100 +95,259 @@ final class BoxDetectionCoordinator: NSObject {
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        guard let model = yoloModel, !mlInFlight else { return }
-        runYOLO(model: model, frame: frame, depth: depth,
-                centerD: centerD, vp: vp, cx: cx, cy: cy)
-    }
+        guard let encoder = samEncoder, let decoder = samDecoder, !mlInFlight else { return }
 
-    // MARK: - YOLO inference
-    private func runYOLO(model: VNCoreMLModel, frame: ARFrame, depth: ARDepthData,
-                          centerD: Float, vp: CGSize, cx: CGFloat, cy: CGFloat) {
         mlInFlight = true
+        encoderTickCount += 1
+        let needsEncode = encoderTickCount % encoderInterval == 1 || cachedEmbedding == nil
+
         let pb = frame.capturedImage
         let capturedFrame = frame
         let capturedDepth = depth
 
-        let request = VNCoreMLRequest(model: model) { [weak self] req, err in
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self = self else { return }
-            if let err = err { print("[YOLO] inferencia error: \(err)") }
-            let box = self.parseBestDetection(req.results)
+
+            // ── Paso 1: encoder (costoso, cada encoderInterval frames) ──────────
+            if needsEncode {
+                guard let emb = self.runEncoder(pixelBuffer: pb, model: encoder) else {
+                    DispatchQueue.main.async { self.mlInFlight = false }
+                    return
+                }
+                self.cachedEmbedding = emb
+            }
+            guard let embedding = self.cachedEmbedding else {
+                DispatchQueue.main.async { self.mlInFlight = false }
+                return
+            }
+
+            // ── Paso 2: decoder con punto = centro (barato, cada frame) ─────────
+            // Punto en espacio 1024×1024 (SAM canonical)
+            // El pixelBuffer ARKit está en landscape; mapeamos centro portrait → SAM
+            let samPx = Float(cy / vp.height) * 1024   // portrait Y → SAM X (landscape)
+            let samPy = Float(cx / vp.width)  * 1024   // portrait X → SAM Y
+
+            guard let maskArr = self.runDecoder(
+                embedding: embedding, px: samPx, py: samPy, model: decoder
+            ) else {
+                DispatchQueue.main.async { self.mlInFlight = false; self.clearOverlay() }
+                return
+            }
+
+            // ── Paso 3: máscara → bounding box normalizado ──────────────────────
+            guard let box = self.maskToBoundingBox(
+                mask: maskArr,
+                centerNX: Float(cx / vp.width),
+                centerNY: Float(cy / vp.height)
+            ) else {
+                DispatchQueue.main.async { self.mlInFlight = false; self.clearOverlay() }
+                return
+            }
+
             DispatchQueue.main.async {
                 self.mlInFlight = false
-                if let box = box {
-                    self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
-                                          centerD: centerD, vp: vp, cx: cx, cy: cy)
-                } else {
-                    // Sin detección: limpiar overlay para no dejar cuadros fantasma
-                    self.clearOverlay()
-                }
+                self.measureInRegion(box: box, frame: capturedFrame, depth: capturedDepth,
+                                     centerD: centerD, vp: vp, cx: cx, cy: cy)
             }
         }
-        request.imageCropAndScaleOption = .scaleFill
+    }
 
-        DispatchQueue.global(qos: .userInteractive).async {
-            // .right = el pixelBuffer de ARKit está en landscape, lo rotamos a portrait
-            let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: .right)
-            try? handler.perform([request])
+    // MARK: - SAM Encoder
+    // Redimensiona el pixelBuffer a 1024×1024, normaliza y corre el encoder TinyViT.
+    // Retorna el tensor de embeddings [1, 256, 64, 64].
+    private func runEncoder(pixelBuffer: CVPixelBuffer, model: MLModel) -> MLMultiArray? {
+        // Pixel mean / std de SAM (ImageNet)
+        let mean: [Float] = [123.675, 116.28, 103.53]
+        let std:  [Float] = [58.395,  57.12,  57.375]
+
+        // Escalar imagen a 1024×1024
+        guard let scaled = resizePixelBuffer(pixelBuffer, to: CGSize(width: 1024, height: 1024)),
+              let input  = pixelBufferToSAMTensor(scaled, mean: mean, std: std)
+        else { return nil }
+
+        do {
+            let feat   = try MLDictionaryFeatureProvider(dictionary: ["image": input])
+            let result = try model.prediction(from: feat)
+            return result.featureValue(for: "embedding")?.multiArrayValue
+        } catch {
+            print("[SAM encoder] error: \(error)")
+            return nil
         }
     }
 
-    // MARK: - Parseo de salida YOLO
-    // Soporta VNRecognizedObjectObservation (si CoreML wrappea) o MLMultiArray cruda
-    private func parseBestDetection(_ results: [VNObservation]?) -> CGRect? {
-        guard let results = results else { return nil }
+    // MARK: - SAM Decoder
+    private func runDecoder(embedding: MLMultiArray,
+                            px: Float, py: Float,
+                            model: MLModel) -> MLMultiArray? {
+        do {
+            let pxArr = try MLMultiArray(shape: [1], dataType: .float32)
+            let pyArr = try MLMultiArray(shape: [1], dataType: .float32)
+            pxArr[0] = NSNumber(value: px)
+            pyArr[0] = NSNumber(value: py)
 
-        // Caso fácil: Vision produce observaciones de objetos directamente
-        let objObs = results.compactMap { $0 as? VNRecognizedObjectObservation }
-        if !objObs.isEmpty {
-            guard let best = objObs.max(by: { $0.confidence < $1.confidence }),
-                  best.confidence > 0.25 else { return nil }
-            // VNRecognizedObjectObservation.boundingBox: origin bottom-left → convertir a top-left
-            let b = best.boundingBox
-            return CGRect(x: b.minX, y: 1 - b.maxY, width: b.width, height: b.height)
+            let feat   = try MLDictionaryFeatureProvider(dictionary: [
+                "embedding": embedding,
+                "point_x":   pxArr,
+                "point_y":   pyArr,
+            ])
+            let result = try model.prediction(from: feat)
+            return result.featureValue(for: "mask_logits")?.multiArrayValue
+        } catch {
+            print("[SAM decoder] error: \(error)")
+            return nil
         }
-
-        // Caso raw: MLMultiArray
-        let feats = results.compactMap { $0 as? VNCoreMLFeatureValueObservation }
-        for f in feats {
-            guard let arr = f.featureValue.multiArrayValue else { continue }
-            let shape = arr.shape.map { $0.intValue }
-            print("[YOLO] output '\(f.featureName)' shape: \(shape)")
-            if let box = extractBestBox(from: arr, shape: shape) { return box }
-        }
-        return nil
     }
 
-    // Extrae el box de mayor confianza de un MLMultiArray con shape [1,N,C] o [N,C], C>=5
-    // Layout esperado: x1, y1, x2, y2, conf, [class, mask_coeffs...]
-    // Usa subscript Int (más simple y compatible con WMO): índice lineal i*C+j
-    private func extractBestBox(from arr: MLMultiArray, shape: [Int]) -> CGRect? {
-        guard shape.count >= 2, shape[shape.count - 1] >= 5 else { return nil }
-        let C = shape[shape.count - 1]
-        let N = shape.count == 3 ? shape[1] : shape[0]
-        guard N > 0 else { return nil }
+    // MARK: - Mask → bounding box
+    // mask_logits tiene shape [1, 1, 256, 256]. Umbral en 0 (sigmoid > 0.5).
+    // Retorna el bounding box de la región foreground más cercana al centro,
+    // en coordenadas normalizadas [0,1] top-left origin.
+    private func maskToBoundingBox(mask: MLMultiArray,
+                                   centerNX: Float,
+                                   centerNY: Float) -> CGRect? {
+        let shape = mask.shape.map { $0.intValue }
+        guard shape.count == 4 else { return nil }
+        let H = shape[2], W = shape[3]           // 256 × 256
 
-        var bestConf: Float = 0.25
-        var bestBox: CGRect? = nil
+        // Leer valores float del array lineal [1, 1, H, W]
+        let count = H * W
+        var logits = [Float](repeating: 0, count: count)
+        let ptr = mask.dataPointer.assumingMemoryBound(to: Float32.self)
+        for i in 0..<count { logits[i] = ptr[i] }
 
-        for i in 0..<N {
-            // Para [1,N,C] y [N,C] el índice lineal de [_,i,j] es i*C+j (batch=0)
-            let base = i * C
-            let x1   = arr[base + 0].floatValue
-            let y1   = arr[base + 1].floatValue
-            let x2   = arr[base + 2].floatValue
-            let y2   = arr[base + 3].floatValue
-            let conf = arr[base + 4].floatValue
-
-            guard conf > bestConf, x2 > x1, y2 > y1 else { continue }
-            bestConf = conf
-
-            let scale: CGFloat = x2 > 2.0 ? 1.0 / 640.0 : 1.0
-            bestBox = CGRect(
-                x: CGFloat(x1) * scale, y: CGFloat(y1) * scale,
-                width: CGFloat(x2 - x1) * scale, height: CGFloat(y2 - y1) * scale
-            )
+        // Aplicar sigmoid y umbralizar
+        var binary = [Bool](repeating: false, count: count)
+        for i in 0..<count {
+            binary[i] = 1.0 / (1.0 + exp(-logits[i])) > 0.5
         }
-        return bestBox
+
+        // BFS desde el pixel más cercano al centro que sea foreground
+        let cx = Int(centerNX * Float(W))
+        let cy = Int(centerNY * Float(H))
+        guard cx >= 0, cx < W, cy >= 0, cy < H else { return nil }
+
+        // Encontrar punto de inicio foreground más cercano al centro
+        var startX = cx, startY = cy
+        if !binary[cy * W + cx] {
+            var found = false
+            outer: for r in 1..<min(W, H) / 2 {
+                for dy in -r...r {
+                    for dx in -r...r {
+                        let nx = cx + dx, ny = cy + dy
+                        guard nx >= 0, nx < W, ny >= 0, ny < H else { continue }
+                        if binary[ny * W + nx] { startX = nx; startY = ny; found = true; break outer }
+                    }
+                }
+            }
+            guard found else { return nil }
+        }
+
+        // BFS limitado para extraer la región conectada
+        var visited = [Bool](repeating: false, count: count)
+        var queue = [(Int, Int)](); queue.reserveCapacity(2048)
+        var minX = startX, maxX = startX, minY = startY, maxY = startY
+        queue.append((startX, startY))
+        visited[startY * W + startX] = true
+
+        var qi = 0
+        while qi < queue.count, qi < W * H / 2 {
+            let (x, y) = queue[qi]; qi += 1
+            for (dx, dy) in [(-1,0),(1,0),(0,-1),(0,1)] as [(Int,Int)] {
+                let nx = x+dx, ny = y+dy
+                guard nx >= 0, nx < W, ny >= 0, ny < H else { continue }
+                let idx = ny * W + nx
+                guard !visited[idx], binary[idx] else { continue }
+                visited[idx] = true
+                queue.append((nx, ny))
+                if nx < minX { minX = nx }; if nx > maxX { maxX = nx }
+                if ny < minY { minY = ny }; if ny > maxY { maxY = ny }
+            }
+        }
+
+        let boxW = CGFloat(maxX - minX + 1) / CGFloat(W)
+        let boxH = CGFloat(maxY - minY + 1) / CGFloat(H)
+        guard boxW > 0.05, boxH > 0.05 else { return nil }
+
+        return CGRect(
+            x:      CGFloat(minX) / CGFloat(W),
+            y:      CGFloat(minY) / CGFloat(H),
+            width:  boxW,
+            height: boxH
+        )
+    }
+
+    // MARK: - Pixel buffer helpers
+
+    private func resizePixelBuffer(_ input: CVPixelBuffer, to size: CGSize) -> CVPixelBuffer? {
+        let attrs: [String: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey as String: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey as String: true,
+        ]
+        var output: CVPixelBuffer?
+        CVPixelBufferCreate(nil,
+                            Int(size.width), Int(size.height),
+                            kCVPixelFormatType_32BGRA,
+                            attrs as CFDictionary, &output)
+        guard let dst = output else { return nil }
+
+        CVPixelBufferLockBaseAddress(input, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(input, .readOnly)
+            CVPixelBufferUnlockBaseAddress(dst, [])
+        }
+
+        let srcW = CVPixelBufferGetWidth(input)
+        let srcH = CVPixelBufferGetHeight(input)
+        guard let srcBase = CVPixelBufferGetBaseAddress(input),
+              let dstBase = CVPixelBufferGetBaseAddress(dst)
+        else { return nil }
+
+        var srcBuf = vImage_Buffer(
+            data: srcBase,
+            height: vImagePixelCount(srcH),
+            width:  vImagePixelCount(srcW),
+            rowBytes: CVPixelBufferGetBytesPerRow(input))
+        var dstBuf = vImage_Buffer(
+            data: dstBase,
+            height: vImagePixelCount(Int(size.height)),
+            width:  vImagePixelCount(Int(size.width)),
+            rowBytes: CVPixelBufferGetBytesPerRow(dst))
+        vImageScale_ARGB8888(&srcBuf, &dstBuf, nil, vImage_Flags(0))
+        return dst
+    }
+
+    // Convierte CVPixelBuffer BGRA 1024×1024 → MLMultiArray [1,3,1024,1024] Float32
+    // con la normalización pixel_mean/pixel_std de SAM.
+    private func pixelBufferToSAMTensor(_ pb: CVPixelBuffer,
+                                        mean: [Float], std: [Float]) -> MLMultiArray? {
+        let W = CVPixelBufferGetWidth(pb)
+        let H = CVPixelBufferGetHeight(pb)
+        guard let arr = try? MLMultiArray(shape: [1, 3, H as NSNumber, W as NSNumber],
+                                          dataType: .float32)
+        else { return nil }
+
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let src = base.assumingMemoryBound(to: UInt8.self)
+        let dst = arr.dataPointer.assumingMemoryBound(to: Float32.self)
+        let stride = CVPixelBufferGetBytesPerRow(pb)
+        let planeSize = H * W
+
+        for y in 0..<H {
+            for x in 0..<W {
+                let bgraOff = y * stride + x * 4
+                let b = Float(src[bgraOff + 0])
+                let g = Float(src[bgraOff + 1])
+                let r = Float(src[bgraOff + 2])
+                let pix = y * W + x
+                dst[0 * planeSize + pix] = (r - mean[0]) / std[0]
+                dst[1 * planeSize + pix] = (g - mean[1]) / std[1]
+                dst[2 * planeSize + pix] = (b - mean[2]) / std[2]
+            }
+        }
+        return arr
     }
 
     // MARK: - Medición dentro del bounding box detectado por YOLO
