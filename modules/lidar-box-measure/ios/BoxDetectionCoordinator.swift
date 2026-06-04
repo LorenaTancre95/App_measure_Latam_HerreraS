@@ -416,76 +416,25 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard box.width > 30, box.height > 30 else { return }
 
-        let tol:  Float   = 0.06   // saltar borde cuando profundidad cambia >6cm
-        let step: CGFloat = 3      // paso de scan en píxeles de pantalla
-
-        // Escanear en 5 líneas horizontales y 5 verticales, tomar la mediana
-        var leftXs = [CGFloat](), rightXs = [CGFloat]()
-        var topYs  = [CGFloat](), botYs   = [CGFloat]()
-
-        for frac in [0.3, 0.4, 0.5, 0.6, 0.7] as [CGFloat] {
-            let sy = box.minY + box.height * frac
-            let sx = box.minX + box.width  * frac
-
-            // ← izquierda desde centro
-            var lx = box.midX
-            while lx - step >= box.minX {
-                lx -= step
-                guard let d = sampleDepth(at: CGPoint(x: lx, y: sy),
-                                          frame: frame, depth: depth)
-                else { break }
-                if abs(d - centerD) > tol { lx += step; break }
-            }
-            // → derecha desde centro
-            var rx = box.midX
-            while rx + step <= box.maxX {
-                rx += step
-                guard let d = sampleDepth(at: CGPoint(x: rx, y: sy),
-                                          frame: frame, depth: depth)
-                else { break }
-                if abs(d - centerD) > tol { rx -= step; break }
-            }
-            // ↑ arriba desde centro
-            var ty = box.midY
-            while ty - step >= box.minY {
-                ty -= step
-                guard let d = sampleDepth(at: CGPoint(x: sx, y: ty),
-                                          frame: frame, depth: depth)
-                else { break }
-                if abs(d - centerD) > tol { ty += step; break }
-            }
-            // ↓ abajo desde centro
-            var by = box.midY
-            while by + step <= box.maxY {
-                by += step
-                guard let d = sampleDepth(at: CGPoint(x: sx, y: by),
-                                          frame: frame, depth: depth)
-                else { break }
-                if abs(d - centerD) > tol { by -= step; break }
-            }
-            leftXs.append(lx); rightXs.append(rx)
-            topYs.append(ty);  botYs.append(by)
+        // Usar directamente los 4 corners del bbox YOLO.
+        // Para cada corner se samplea la profundidad real; si está muy lejos del centro
+        // (fondo o piso), se usa centerD como fallback.
+        func cornerDepth(_ pt: CGPoint) -> Float {
+            guard let d = sampleDepth(at: pt, frame: frame, depth: depth),
+                  abs(d - centerD) < 0.25 else { return centerD }
+            return d
         }
 
-        guard !leftXs.isEmpty else { return }
-        let leftX  = medianCG(leftXs)
-        let rightX = medianCG(rightXs)
-        let topY   = medianCG(topYs)
-        let botY   = medianCG(botYs)
+        let tl = CGPoint(x: box.minX, y: box.minY)
+        let tr = CGPoint(x: box.maxX, y: box.minY)
+        let bl = CGPoint(x: box.minX, y: box.maxY)
+        let br = CGPoint(x: box.maxX, y: box.maxY)
 
-        guard rightX - leftX > 20, botY - topY > 20 else { return }
-
-        let tl = CGPoint(x: leftX,  y: topY)
-        let tr = CGPoint(x: rightX, y: topY)
-        let bl = CGPoint(x: leftX,  y: botY)
-        let br = CGPoint(x: rightX, y: botY)
-
-        // Todos los vértices usan centerD: la cara frontal es perpendicular a la cámara
         guard
-            let p3BL = worldPointAtDepth(bl, depth: centerD, frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: centerD, frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: centerD, frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: centerD, frame: frame)
+            let p3BL = worldPointAtDepth(bl, depth: cornerDepth(bl), frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: cornerDepth(br), frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: cornerDepth(tl), frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: cornerDepth(tr), frame: frame)
         else { return }
 
         let fRight     = simd_normalize(p3BR - p3BL)
