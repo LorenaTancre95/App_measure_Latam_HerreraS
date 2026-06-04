@@ -75,7 +75,9 @@ final class BoxDetectionCoordinator: NSObject {
                                       centerD: centerD, dW: dW, dH: dH)
         else { return }
 
-        // Depth map coords → screen coords via displayTransform
+        // displayTransform rota 90° (landscape camera → portrait screen), así que
+        // depth-map X/Y NO mapean directo a screen X/Y. Convertimos las 4 esquinas
+        // del bbox y tomamos el bounding box en screen space.
         let displayTx = frame.displayTransform(for: .portrait, viewportSize: vp)
         func depthToScreen(_ dx: Int, _ dy: Int) -> CGPoint {
             let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
@@ -83,12 +85,23 @@ final class BoxDetectionCoordinator: NSObject {
             return CGPoint(x: ns.x * vp.width, y: ns.y * vp.height)
         }
 
-        let bl = depthToScreen(region.minX, region.maxY)
-        let br = depthToScreen(region.maxX, region.maxY)
-        let tl = depthToScreen(region.minX, region.minY)
-        let tr = depthToScreen(region.maxX, region.minY)
+        let corners = [
+            depthToScreen(region.minX, region.minY),
+            depthToScreen(region.maxX, region.minY),
+            depthToScreen(region.minX, region.maxY),
+            depthToScreen(region.maxX, region.maxY),
+        ]
+        let sMinX = corners.map(\.x).min()!
+        let sMaxX = corners.map(\.x).max()!
+        let sMinY = corners.map(\.y).min()!
+        let sMaxY = corners.map(\.y).max()!
 
-        guard br.x - bl.x > 30, bl.y - tl.y > 30 else { return }
+        guard sMaxX - sMinX > 30, sMaxY - sMinY > 30 else { return }
+
+        let tl = CGPoint(x: sMinX, y: sMinY)
+        let tr = CGPoint(x: sMaxX, y: sMinY)
+        let bl = CGPoint(x: sMinX, y: sMaxY)
+        let br = CGPoint(x: sMaxX, y: sMaxY)
 
         // Gradiente de profundidad en el centro (corrige caras inclinadas)
         let gs: CGFloat = 30
