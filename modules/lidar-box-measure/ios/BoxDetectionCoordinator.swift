@@ -1,6 +1,7 @@
 import ARKit
 import SceneKit
 import CoreML
+import Vision
 
 struct NativeMeasurement {
     var comprimento: Double
@@ -51,7 +52,7 @@ final class BoxDetectionCoordinator: NSObject {
         super.init()
     }
 
-    // MARK: - BFS depth-map region growing measurement
+    // MARK: - Vision rectangle detection + LiDAR measurement
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         let vp = sv.bounds.size
@@ -61,49 +62,55 @@ final class BoxDetectionCoordinator: NSObject {
               centerD > 0.15, centerD < 4.0
         else { return }
 
-        let dm = depth.depthMap
-        let dW = CVPixelBufferGetWidth(dm)
-        let dH = CVPixelBufferGetHeight(dm)
+        // ── Detectar rectángulos con Vision ────────────────────────────────────
+        let request = VNDetectRectanglesRequest()
+        request.minimumConfidence    = 0.4
+        request.minimumAspectRatio   = VNAspectRatio(0.15)
+        request.maximumAspectRatio   = VNAspectRatio(6.0)
+        request.minimumSize          = Float(0.07)
+        request.maximumObservations  = 10
+        request.quadratureTolerance  = VNDegrees(45)
 
-        // Centro pantalla → coordenadas depth map (landscape)
-        let invDisplay = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
-        let normCam    = CGPoint(x: cx / vp.width, y: cy / vp.height).applying(invDisplay)
-        let cDX        = max(0, min(dW - 1, Int(normCam.x * CGFloat(dW))))
-        let cDY        = max(0, min(dH - 1, Int(normCam.y * CGFloat(dH))))
-
-        guard let region = growRegion(depthMap: dm, cx: cDX, cy: cDY,
-                                      centerD: centerD, dW: dW, dH: dH)
+        // orientation: .right → el sensor landscape se trata como portrait
+        let handler = VNImageRequestHandler(
+            cvPixelBuffer: frame.capturedImage,
+            orientation:   .right,
+            options:       [:]
+        )
+        guard (try? handler.perform([request])) != nil,
+              let results = request.results,
+              !results.isEmpty
         else { return }
 
-        // displayTransform rota 90° (landscape camera → portrait screen), así que
-        // depth-map X/Y NO mapean directo a screen X/Y. Convertimos las 4 esquinas
-        // del bbox y tomamos el bounding box en screen space.
-        let displayTx = frame.displayTransform(for: .portrait, viewportSize: vp)
-        func depthToScreen(_ dx: Int, _ dy: Int) -> CGPoint {
-            let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
-            let ns = nc.applying(displayTx)
-            return CGPoint(x: ns.x * vp.width, y: ns.y * vp.height)
+        // Convierte coords Vision (portrait, origen bottom-left, Y↑)
+        // → UIKit screen (portrait, origen top-left, Y↓)
+        func vToS(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: p.x * vp.width, y: (1 - p.y) * vp.height)
         }
 
-        let corners = [
-            depthToScreen(region.minX, region.minY),
-            depthToScreen(region.maxX, region.minY),
-            depthToScreen(region.minX, region.maxY),
-            depthToScreen(region.maxX, region.maxY),
-        ]
-        let sMinX = corners.map(\.x).min()!
-        let sMaxX = corners.map(\.x).max()!
-        let sMinY = corners.map(\.y).min()!
-        let sMaxY = corners.map(\.y).max()!
+        // Elegir el rectángulo cuyo centro esté más cerca del reticle
+        let maxDist = min(vp.width, vp.height) * 0.42
+        guard let obs = results.min(by: { a, b in
+            let ca = vToS(CGPoint(x: a.boundingBox.midX, y: a.boundingBox.midY))
+            let cb = vToS(CGPoint(x: b.boundingBox.midX, y: b.boundingBox.midY))
+            return hypot(ca.x - cx, ca.y - cy) < hypot(cb.x - cx, cb.y - cy)
+        }) else { return }
 
-        guard sMaxX - sMinX > 30, sMaxY - sMinY > 30 else { return }
+        let obsCenter = vToS(CGPoint(x: obs.boundingBox.midX, y: obs.boundingBox.midY))
+        guard hypot(obsCenter.x - cx, obsCenter.y - cy) < maxDist else { return }
 
-        let tl = CGPoint(x: sMinX, y: sMinY)
-        let tr = CGPoint(x: sMaxX, y: sMinY)
-        let bl = CGPoint(x: sMinX, y: sMaxY)
-        let br = CGPoint(x: sMaxX, y: sMaxY)
+        // Esquinas del cuadrilátero detectado por Vision
+        let tl = vToS(obs.topLeft)
+        let tr = vToS(obs.topRight)
+        let bl = vToS(obs.bottomLeft)
+        let br = vToS(obs.bottomRight)
 
-        // Gradiente de profundidad en el centro (corrige caras inclinadas)
+        // Ancho y alto mínimos en pantalla
+        let faceW = hypot(br.x - bl.x, br.y - bl.y)
+        let faceH = hypot(tl.y - bl.y, tl.x - bl.x)
+        guard faceW > 30, faceH > 30 else { return }
+
+        // ── Proyectar a 3D con LiDAR ───────────────────────────────────────────
         let gs: CGFloat = 30
         let dxL = sampleDepth(at: CGPoint(x: cx - gs, y: cy), frame: frame, depth: depth)
         let dxR = sampleDepth(at: CGPoint(x: cx + gs, y: cy), frame: frame, depth: depth)
@@ -113,15 +120,15 @@ final class BoxDetectionCoordinator: NSObject {
                         ? (dxR! - dxL!) / Float(2 * gs) : 0
         let gy: Float = (dyT != nil && dyB != nil && abs(dyB! - dyT!) < 0.20)
                         ? (dyB! - dyT!) / Float(2 * gs) : 0
-        func expD(_ px: CGFloat, _ py: CGFloat) -> Float {
-            centerD + gx * Float(px - cx) + gy * Float(py - cy)
+        func expD(_ p: CGPoint) -> Float {
+            centerD + gx * Float(p.x - cx) + gy * Float(p.y - cy)
         }
 
         guard
-            let p3BL = worldPointAtDepth(bl, depth: expD(bl.x, bl.y), frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: expD(br.x, br.y), frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: expD(tl.x, tl.y), frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: expD(tr.x, tr.y), frame: frame)
+            let p3BL = worldPointAtDepth(bl, depth: expD(bl), frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: expD(br), frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: expD(tl), frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: expD(tr), frame: frame)
         else { return }
 
         let fRight     = simd_normalize(p3BR - p3BL)
@@ -148,73 +155,19 @@ final class BoxDetectionCoordinator: NSObject {
         updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!, measurement: m)
     }
 
-    // MARK: - BFS flood-fill sobre depth map
-    // Expande desde el píxel central hasta todos los píxeles conectados cuya profundidad
-    // esté dentro de ±threshold de centerD. Cap de 40% del mapa evita que piso/paredes
-    // al mismo depth llenen toda la imagen.
-    private func growRegion(depthMap: CVPixelBuffer, cx: Int, cy: Int,
-                            centerD: Float, dW: Int, dH: Int)
-        -> (minX: Int, maxX: Int, minY: Int, maxY: Int)?
-    {
-        let threshold: Float = 0.06
-        let maxPixels        = dW * dH * 2 / 5
-
-        // Inset 2px para ignorar píxeles de borde ruidosos
-        let x0 = 2, x1 = dW - 3, y0 = 2, y1 = dH - 3
-        guard cx >= x0, cx <= x1, cy >= y0, cy <= y1 else { return nil }
-
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthMap, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depthMap) else { return nil }
-        let ptr = base.assumingMemoryBound(to: Float32.self)
-
-        var visited = [Bool](repeating: false, count: dW * dH)
-        var queue   = [(Int, Int)]()
-        queue.reserveCapacity(min(dW * dH / 4, 8192))
-
-        visited[cy * dW + cx] = true
-        queue.append((cx, cy))
-
-        var minX = cx, maxX = cx, minY = cy, maxY = cy
-        var count = 0, qi = 0
-
-        while qi < queue.count, count < maxPixels {
-            let (x, y) = queue[qi]; qi += 1; count += 1
-            for (dx, dy) in [(-1,0),(1,0),(0,-1),(0,1)] as [(Int,Int)] {
-                let nx = x+dx, ny = y+dy
-                guard nx >= x0, nx <= x1, ny >= y0, ny <= y1 else { continue }
-                let idx = ny * dW + nx
-                guard !visited[idx] else { continue }
-                visited[idx] = true
-                let v = ptr[idx]
-                guard v > 0.02, v < 8.0, abs(v - centerD) < threshold else { continue }
-                queue.append((nx, ny))
-                if nx < minX { minX = nx }; if nx > maxX { maxX = nx }
-                if ny < minY { minY = ny }; if ny > maxY { maxY = ny }
-            }
-        }
-
-        guard (maxX - minX) > 5, (maxY - minY) > 5, count > 50 else { return nil }
-        return (minX, maxX, minY, maxY)
-    }
-
     // MARK: - Estimación de profundidad (largura) escaneando la cara superior
     private func estimateDepthFromTopFace(frame: ARFrame, depth: ARDepthData,
                                           topLeft: CGPoint, topRight: CGPoint,
                                           centerD: Float) -> Double? {
         var estimates = [Double]()
-
         for frac in [0.25, 0.50, 0.75] as [CGFloat] {
             let sx = topLeft.x + frac * (topRight.x - topLeft.x)
             var sy = topLeft.y
-
             guard let startD = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
                   let topPt  = worldPointAtDepth(CGPoint(x: sx, y: sy), depth: startD, frame: frame)
             else { continue }
-
             let topFaceY = topPt.y
             var prevPt   = topPt
-
             while sy > 8 {
                 sy -= 5
                 guard let d   = sampleDepth(at: CGPoint(x: sx, y: sy), frame: frame, depth: depth),
@@ -224,11 +177,9 @@ final class BoxDetectionCoordinator: NSObject {
                 if d - startD > 0.22        { break }
                 prevPt = wPt
             }
-
             let boxDepth = Double(simd_distance(topPt, prevPt)) * 100
             if boxDepth > 3, boxDepth < 200 { estimates.append(boxDepth) }
         }
-
         return estimates.isEmpty ? nil : median(estimates)
     }
 
@@ -347,7 +298,7 @@ final class BoxDetectionCoordinator: NSObject {
             guard let self = self else { return }
             self.clearOverlay()
 
-            let yellow = UIColor(red: 0.0, green: 0.90, blue: 0.3, alpha: 1)
+            let green = UIColor(red: 0.0, green: 0.90, blue: 0.3, alpha: 1)
 
             let right      = simd_normalize(br - bl)
             let up         = simd_normalize(tl - bl)
@@ -366,7 +317,7 @@ final class BoxDetectionCoordinator: NSObject {
                 (bl, bbl), (br, bbr), (tl, btl), (tr, btr),
             ]
             for (s, e) in edges {
-                let node = self.makeLine(from: s, to: e, color: yellow)
+                let node = self.makeLine(from: s, to: e, color: green)
                 sv.scene.rootNode.addChildNode(node)
                 self.overlayNodes.append(node)
             }
@@ -377,7 +328,7 @@ final class BoxDetectionCoordinator: NSObject {
                 ("\(Int(measurement.largura.rounded())) cm",     (br + bbr) / 2 + right * 0.065),
             ]
             for (text, pos) in labelData {
-                let node = self.makeTextNode(text, color: yellow)
+                let node = self.makeTextNode(text, color: green)
                 node.position = SCNVector3(pos.x, pos.y, pos.z)
                 sv.scene.rootNode.addChildNode(node)
                 self.overlayNodes.append(node)
