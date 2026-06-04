@@ -221,8 +221,10 @@ final class BoxDetectionCoordinator: NSObject {
             }
 
             // ── FASE 2: LiDAR → medición 3D ────────────────────────────────
+            // Samplear profundidad en el centro del bbox YOLO, no en el centro de pantalla
+            let bboxCenter = CGPoint(x: screenBox.midX, y: screenBox.midY)
             guard let centerD = self.sampleDepth(
-                at: CGPoint(x: cx, y: cy), frame: cfr, depth: cdepth
+                at: bboxCenter, frame: cfr, depth: cdepth
             ), centerD > 0.15, centerD < 4.0 else { return }
 
             DispatchQueue.main.async {
