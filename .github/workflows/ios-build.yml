@@ -42,7 +42,7 @@ jobs:
             "coremltools>=7.0,<8.0" \
             "huggingface_hub>=0.23" \
             "onnx>=1.16" \
-            numpy pillow timm
+            "numpy<2.0" pillow timm
           # Clonar MobileSAM directamente (pip install git+ falla en CI)
           git clone --depth 1 https://github.com/ChaoningZhang/MobileSAM.git /tmp/MobileSAM
 
