@@ -25,16 +25,29 @@ jobs:
             modules/lidar-box-measure/ios/sam_decoder.mlmodel
           key: mobilesam-coreml-${{ hashFiles('scripts/convert_mobilesam.py') }}
 
+      - name: Setup Python 3.11 para conversión
+        if: steps.cache-sam.outputs.cache-hit != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - name: Instalar dependências Python para conversión
         if: steps.cache-sam.outputs.cache-hit != 'true'
         run: |
           python3 -m venv /tmp/sam-venv
-          /tmp/sam-venv/bin/pip install --quiet torch torchvision coremltools numpy pillow
-          /tmp/sam-venv/bin/pip install --quiet git+https://github.com/ChaoningZhang/MobileSAM.git
+          # torch 2.5.x es la ultima version bien testeada con coremltools 8
+          /tmp/sam-venv/bin/pip install --quiet \
+            "torch==2.5.1" \
+            "torchvision==0.20.1" \
+            "coremltools>=8.0,<9.0" \
+            numpy pillow
+          /tmp/sam-venv/bin/pip install --quiet \
+            git+https://github.com/ChaoningZhang/MobileSAM.git
 
       - name: Converter MobileSAM → CoreML
         if: steps.cache-sam.outputs.cache-hit != 'true'
         run: /tmp/sam-venv/bin/python scripts/convert_mobilesam.py
+        timeout-minutes: 20
 
       - name: Verificar modelos
         run: |
