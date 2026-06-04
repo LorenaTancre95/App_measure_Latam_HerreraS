@@ -375,34 +375,84 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     // MARK: - FASE 2: medición 3D con LiDAR
+    // Usa YOLO bbox solo para acotar la región de búsqueda.
+    // Escanea LiDAR desde el centro hacia afuera para encontrar los bordes
+    // reales de la cara frontal (donde la profundidad cambia >6cm).
     private func measure3D(box: CGRect, cx: CGFloat, cy: CGFloat,
                            centerD: Float, frame: ARFrame,
                            depth: ARDepthData, vp: CGSize) {
-        guard box.width > 20, box.height > 20 else { return }
+        guard box.width > 30, box.height > 30 else { return }
 
-        let tl = CGPoint(x: box.minX, y: box.minY)
-        let tr = CGPoint(x: box.maxX, y: box.minY)
-        let bl = CGPoint(x: box.minX, y: box.maxY)
-        let br = CGPoint(x: box.maxX, y: box.maxY)
+        let tol:  Float   = 0.06   // saltar borde cuando profundidad cambia >6cm
+        let step: CGFloat = 3      // paso de scan en píxeles de pantalla
 
-        let gs: CGFloat = 30
-        let dxL = sampleDepth(at: CGPoint(x: cx - gs, y: cy), frame: frame, depth: depth)
-        let dxR = sampleDepth(at: CGPoint(x: cx + gs, y: cy), frame: frame, depth: depth)
-        let dyT = sampleDepth(at: CGPoint(x: cx, y: cy - gs), frame: frame, depth: depth)
-        let dyB = sampleDepth(at: CGPoint(x: cx, y: cy + gs), frame: frame, depth: depth)
-        let gx: Float = (dxL != nil && dxR != nil && abs(dxR! - dxL!) < 0.20)
-                        ? (dxR! - dxL!) / Float(2 * gs) : 0
-        let gy: Float = (dyT != nil && dyB != nil && abs(dyB! - dyT!) < 0.20)
-                        ? (dyB! - dyT!) / Float(2 * gs) : 0
-        func expD(_ p: CGPoint) -> Float {
-            centerD + gx * Float(p.x - cx) + gy * Float(p.y - cy)
+        // Escanear en 5 líneas horizontales y 5 verticales, tomar la mediana
+        var leftXs = [CGFloat](), rightXs = [CGFloat]()
+        var topYs  = [CGFloat](), botYs   = [CGFloat]()
+
+        for frac in [0.3, 0.4, 0.5, 0.6, 0.7] as [CGFloat] {
+            let sy = box.minY + box.height * frac
+            let sx = box.minX + box.width  * frac
+
+            // ← izquierda desde centro
+            var lx = box.midX
+            while lx - step >= box.minX {
+                lx -= step
+                guard let d = sampleDepth(at: CGPoint(x: lx, y: sy),
+                                          frame: frame, depth: depth)
+                else { break }
+                if abs(d - centerD) > tol { lx += step; break }
+            }
+            // → derecha desde centro
+            var rx = box.midX
+            while rx + step <= box.maxX {
+                rx += step
+                guard let d = sampleDepth(at: CGPoint(x: rx, y: sy),
+                                          frame: frame, depth: depth)
+                else { break }
+                if abs(d - centerD) > tol { rx -= step; break }
+            }
+            // ↑ arriba desde centro
+            var ty = box.midY
+            while ty - step >= box.minY {
+                ty -= step
+                guard let d = sampleDepth(at: CGPoint(x: sx, y: ty),
+                                          frame: frame, depth: depth)
+                else { break }
+                if abs(d - centerD) > tol { ty += step; break }
+            }
+            // ↓ abajo desde centro
+            var by = box.midY
+            while by + step <= box.maxY {
+                by += step
+                guard let d = sampleDepth(at: CGPoint(x: sx, y: by),
+                                          frame: frame, depth: depth)
+                else { break }
+                if abs(d - centerD) > tol { by -= step; break }
+            }
+            leftXs.append(lx); rightXs.append(rx)
+            topYs.append(ty);  botYs.append(by)
         }
 
+        guard !leftXs.isEmpty else { return }
+        let leftX  = medianCG(leftXs)
+        let rightX = medianCG(rightXs)
+        let topY   = medianCG(topYs)
+        let botY   = medianCG(botYs)
+
+        guard rightX - leftX > 20, botY - topY > 20 else { return }
+
+        let tl = CGPoint(x: leftX,  y: topY)
+        let tr = CGPoint(x: rightX, y: topY)
+        let bl = CGPoint(x: leftX,  y: botY)
+        let br = CGPoint(x: rightX, y: botY)
+
+        // Todos los vértices usan centerD: la cara frontal es perpendicular a la cámara
         guard
-            let p3BL = worldPointAtDepth(bl, depth: expD(bl), frame: frame),
-            let p3BR = worldPointAtDepth(br, depth: expD(br), frame: frame),
-            let p3TL = worldPointAtDepth(tl, depth: expD(tl), frame: frame),
-            let p3TR = worldPointAtDepth(tr, depth: expD(tr), frame: frame)
+            let p3BL = worldPointAtDepth(bl, depth: centerD, frame: frame),
+            let p3BR = worldPointAtDepth(br, depth: centerD, frame: frame),
+            let p3TL = worldPointAtDepth(tl, depth: centerD, frame: frame),
+            let p3TR = worldPointAtDepth(tr, depth: centerD, frame: frame)
         else { return }
 
         let fRight     = simd_normalize(p3BR - p3BL)
@@ -518,6 +568,11 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     private func median(_ arr: [Double]) -> Double {
+        let s = arr.sorted(); let m = s.count / 2
+        return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
+    }
+
+    private func medianCG(_ arr: [CGFloat]) -> CGFloat {
         let s = arr.sorted(); let m = s.count / 2
         return s.count % 2 == 0 ? (s[m-1] + s[m]) / 2 : s[m]
     }
