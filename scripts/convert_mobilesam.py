@@ -137,7 +137,7 @@ def convert_encoder(sam):
         )],
         outputs=[ct.TensorType(name="embedding")],
         compute_units=ct.ComputeUnit.ALL,
-        minimum_deployment_target=ct.target.iOS14,
+        minimum_deployment_target=ct.target.iOS15,
         convert_to="mlprogram",
     )
 
@@ -167,7 +167,7 @@ def convert_decoder(sam):
         ],
         outputs=[ct.TensorType(name="mask_logits")],
         compute_units=ct.ComputeUnit.ALL,
-        minimum_deployment_target=ct.target.iOS14,
+        minimum_deployment_target=ct.target.iOS15,
         convert_to="mlprogram",
     )
 

@@ -9,7 +9,7 @@ Pod::Spec.new do |s|
   s.homepage       = 'https://github.com/coki0291/App_measure_Latam'
   s.license        = { :type => 'MIT' }
   s.authors        = { 'coki0291' => 'slherrera91@gmail.com' }
-  s.platform       = :ios, '14.0'
+  s.platform       = :ios, '15.0'
   s.source         = { :path => '.' }
   s.static_framework = true
 
