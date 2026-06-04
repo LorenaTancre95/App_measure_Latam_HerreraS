@@ -74,11 +74,33 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Cargar coco128-yolo11n-seg
     private func loadModel() {
+        // Lista todos los archivos del bundle para diagnóstico
+        let bundlePath = Bundle.main.bundlePath
+        let allFiles = (try? FileManager.default.contentsOfDirectory(atPath: bundlePath)) ?? []
+        let mlFiles = allFiles.filter {
+            $0.contains("ml") || $0.contains("coco") || $0.contains("model") || $0.contains("yolo")
+        }
+        let bundleForClass = Bundle(for: BoxDetectionCoordinator.self)
+        let classFiles = (try? FileManager.default.contentsOfDirectory(
+            atPath: bundleForClass.bundlePath)) ?? []
+        let classML = classFiles.filter {
+            $0.contains("ml") || $0.contains("coco") || $0.contains("model")
+        }
+
+        // Buscar también en resource bundles (CocoaPods resource_bundles)
+        var bundles: [Bundle] = [Bundle.main, bundleForClass]
+        let bundleNames = ["LidarBoxMeasure", "LidarBoxMeasureResources", "lidar-box-measure"]
+        for bName in bundleNames {
+            if let url = Bundle.main.url(forResource: bName, withExtension: "bundle"),
+               let b = Bundle(url: url) { bundles.append(b) }
+            if let url = bundleForClass.url(forResource: bName, withExtension: "bundle"),
+               let b = Bundle(url: url) { bundles.append(b) }
+        }
+
         let names = ["coco128-yolo11n-seg", "coco128_yolo11n_seg",
                      "coco128-yolov8n-seg", "coco128_yolov8n_seg",
                      "model_core"]
         let exts  = ["mlmodelc", "mlpackage", "mlmodel"]
-        let bundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
 
         for b in bundles {
             for name in names {
@@ -93,16 +115,20 @@ final class BoxDetectionCoordinator: NSObject {
                             }
                             let ml = try MLModel(contentsOf: url, configuration: cfg)
                             yoloModel = try VNCoreMLModel(for: ml)
-                            modelStatusText = "YOLO: \(url.lastPathComponent)"
+                            modelStatusText = "YOLO OK: \(url.lastPathComponent)"
                             return
                         } catch {
-                            modelStatusText = "YOLO ERR: \(name).\(ext)"
+                            modelStatusText = "ERR \(name).\(ext): \(error.localizedDescription)"
                         }
                     }
                 }
             }
         }
-        modelStatusText = "YOLO: NOT LOADED"
+
+        // Mostrar qué hay en el bundle para diagnóstico
+        let mainInfo = mlFiles.isEmpty ? "main=[]" : "main=[\(mlFiles.prefix(3).joined(separator: ","))]"
+        let classInfo = classML.isEmpty ? "" : " cls=[\(classML.prefix(2).joined(separator: ","))]"
+        modelStatusText = "NOT LOADED\n\(mainInfo)\(classInfo)"
     }
 
     // MARK: - Setup layers
@@ -130,7 +156,7 @@ final class BoxDetectionCoordinator: NSObject {
         guard let sv = sceneView, detectionLayer.superlayer == nil else { return }
         detectionLayer.frame = sv.bounds
         labelLayer.frame     = CGRect(x: 0, y: 0, width: 120, height: 22)
-        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 60)
+        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 100)
         sv.layer.addSublayer(detectionLayer)
         sv.layer.addSublayer(labelLayer)
         sv.layer.addSublayer(debugLayer)
