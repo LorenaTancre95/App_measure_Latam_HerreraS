@@ -34,6 +34,11 @@ final class BoxDetectionCoordinator: NSObject {
     private let scanInterval: TimeInterval = 0.20
     private var scanInFlight = false
 
+    // MARK: - Persistencia de detección
+    private var lastDetection: CGRect?
+    private var missedFrames   = 0
+    private let maxMissedFrames = 8
+
     // MARK: - YOLO model
     private var yoloModel: VNCoreMLModel?
     private let modelInputSize: CGFloat = 640
@@ -194,17 +199,25 @@ final class BoxDetectionCoordinator: NSObject {
             defer { DispatchQueue.main.async { self.scanInFlight = false } }
 
             // ── FASE 1: YOLO → bbox 2D ─────────────────────────────────────
-            guard let pred = self.detectClosestBox(in: pb, viewportSize: vp, cx: cx, cy: cy)
-            else {
-                DispatchQueue.main.async { self.clearDetectionLayer() }
-                return
-            }
+            let pred = self.detectClosestBox(in: pb, viewportSize: vp, cx: cx, cy: cy)
 
-            // Coordenadas de pantalla del bbox (con orientación .right ya aplicada)
-            let screenBox = pred.screenRect(viewportSize: vp, modelSize: self.modelInputSize)
-
-            DispatchQueue.main.async {
-                self.drawDetectionRect(screenBox, label: "box \(Int(pred.score * 100))%", in: vp)
+            let screenBox: CGRect
+            if let p = pred {
+                screenBox = p.screenRect(viewportSize: vp, modelSize: self.modelInputSize)
+                DispatchQueue.main.async {
+                    self.lastDetection = screenBox
+                    self.missedFrames  = 0
+                    self.drawDetectionRect(screenBox, label: "box \(Int(p.score * 100))%", in: vp)
+                }
+            } else {
+                // Sin detección: usar última bbox conocida hasta maxMissedFrames
+                DispatchQueue.main.async { self.missedFrames += 1 }
+                guard let last = self.lastDetection, self.missedFrames <= self.maxMissedFrames
+                else {
+                    DispatchQueue.main.async { self.clearDetectionLayer() }
+                    return
+                }
+                screenBox = last
             }
 
             // ── FASE 2: LiDAR → medición 3D ────────────────────────────────
@@ -230,7 +243,7 @@ final class BoxDetectionCoordinator: NSObject {
 
         var boxesOutput: MLMultiArray?
         var allObservationTypes = [String]()
-        let confidenceThreshold: Float = 0.15
+        let confidenceThreshold: Float = 0.08
         let iouThreshold:        Float = 0.60
 
         let request = VNCoreMLRequest(model: model) { req, err in
