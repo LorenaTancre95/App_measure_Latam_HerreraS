@@ -120,30 +120,21 @@ class DecoderWrapper(nn.Module):
 
 # ── Conversión ────────────────────────────────────────────────────────────────
 
-def to_onnx_and_coreml(wrapper, dummy_inputs, input_specs, output_names, out_path, step):
-    """Export wrapper → ONNX → CoreML. Más robusto que trazar directo con coremltools."""
-    import onnx
+def to_coreml(wrapper, dummy_inputs, input_specs, output_names, out_path, step):
+    """
+    Export wrapper → CoreML usando torch.export.export(strict=False).
+    strict=False permite operaciones dinámicas de TinyViT (assert, len, etc.)
+    y es la API recomendada para coremltools 8+.
+    """
+    args = dummy_inputs if isinstance(dummy_inputs, tuple) else (dummy_inputs,)
 
-    onnx_path = out_path.replace(".mlmodel", ".onnx")
-    in_names  = [s.name for s in input_specs]
-
-    print(f"  [{step}] Exportando a ONNX…")
+    print(f"  [{step}] torch.export.export(strict=False)…")
     with torch.no_grad():
-        torch.onnx.export(
-            wrapper,
-            dummy_inputs,
-            onnx_path,
-            opset_version=16,
-            input_names=in_names,
-            output_names=output_names,
-            do_constant_folding=True,
-        )
-    onnx.checker.check_model(onnx_path)
-    print(f"  [{step}] ONNX OK ({os.path.getsize(onnx_path)//1_000_000} MB)")
+        exported = torch.export.export(wrapper, args, strict=False)
 
-    print(f"  [{step}] Convirtiendo ONNX → CoreML…")
+    print(f"  [{step}] Convirtiendo ExportedProgram → CoreML…")
     mlmodel = ct.convert(
-        onnx_path,
+        exported,
         inputs=input_specs,
         outputs=[ct.TensorType(name=n) for n in output_names],
         compute_units=ct.ComputeUnit.ALL,
@@ -151,43 +142,36 @@ def to_onnx_and_coreml(wrapper, dummy_inputs, input_specs, output_names, out_pat
         convert_to="mlprogram",
     )
     mlmodel.save(out_path)
-    os.remove(onnx_path)
     print(f"  [{step}] Guardado: {out_path}")
     return out_path
 
 
 def convert_encoder(sam):
     print("\n[1/2] Convirtiendo encoder…")
-    wrapper = EncoderWrapper(sam)
-    dummy   = torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE)
-    out_path = os.path.join(OUT_DIR, "sam_encoder.mlmodel")
-    return to_onnx_and_coreml(
-        wrapper,
-        dummy,
+    return to_coreml(
+        EncoderWrapper(sam),
+        torch.zeros(1, 3, IMAGE_SIZE, IMAGE_SIZE),
         [ct.TensorType(name="image", shape=(1, 3, IMAGE_SIZE, IMAGE_SIZE), dtype=np.float32)],
         ["embedding"],
-        out_path,
+        os.path.join(OUT_DIR, "sam_encoder.mlmodel"),
         "1/2",
     )
 
 
 def convert_decoder(sam):
     print("\n[2/2] Convirtiendo decoder…")
-    wrapper   = DecoderWrapper(sam)
-    dummy_inp = (torch.zeros(1, 256, 64, 64),
-                 torch.tensor([512.0]),
-                 torch.tensor([512.0]))
-    out_path  = os.path.join(OUT_DIR, "sam_decoder.mlmodel")
-    return to_onnx_and_coreml(
-        wrapper,
-        dummy_inp,
+    return to_coreml(
+        DecoderWrapper(sam),
+        (torch.zeros(1, 256, 64, 64),
+         torch.tensor([512.0]),
+         torch.tensor([512.0])),
         [
             ct.TensorType(name="embedding", shape=(1, 256, 64, 64), dtype=np.float32),
             ct.TensorType(name="point_x",   shape=(1,),              dtype=np.float32),
             ct.TensorType(name="point_y",   shape=(1,),              dtype=np.float32),
         ],
         ["mask_logits"],
-        out_path,
+        os.path.join(OUT_DIR, "sam_decoder.mlmodel"),
         "2/2",
     )
 
