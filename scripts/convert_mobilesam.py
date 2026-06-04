@@ -144,6 +144,7 @@ def to_onnx_and_coreml(wrapper, dummy_inputs, input_specs, output_names, out_pat
     print(f"  [{step}] Convirtiendo ONNX → CoreML…")
     mlmodel = ct.convert(
         onnx_path,
+        source="pytorch",
         inputs=input_specs,
         outputs=[ct.TensorType(name=n) for n in output_names],
         compute_units=ct.ComputeUnit.ALL,
