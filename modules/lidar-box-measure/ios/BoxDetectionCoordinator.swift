@@ -89,22 +89,38 @@ final class BoxDetectionCoordinator: NSObject {
             }
         }
 
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         var lastError = ""
+
         for b in searchBundles {
             let root = URL(fileURLWithPath: b.bundlePath)
             for name in names {
                 for ext in exts {
-                    // Construir URL directamente (Bundle.url(forResource:) falla con directorios)
                     let url = root.appendingPathComponent("\(name).\(ext)")
                     guard FileManager.default.fileExists(atPath: url.path) else { continue }
                     do {
+                        // .mlpackage necesita compilarse; usar cache para no recompilar cada vez
+                        let loadURL: URL
+                        if ext == "mlpackage" {
+                            let cached = cacheDir.appendingPathComponent("\(name).mlmodelc")
+                            if FileManager.default.fileExists(atPath: cached.path) {
+                                loadURL = cached
+                            } else {
+                                modelStatusText = "Compilando modelo..."
+                                let tmp = try MLModel.compileModel(at: url)
+                                try? FileManager.default.moveItem(at: tmp, to: cached)
+                                loadURL = cached
+                            }
+                        } else {
+                            loadURL = url
+                        }
                         let cfg = MLModelConfiguration()
                         if #available(iOS 16.0, *) {
                             cfg.computeUnits = .cpuAndNeuralEngine
                         } else {
                             cfg.computeUnits = .all
                         }
-                        let ml = try MLModel(contentsOf: url, configuration: cfg)
+                        let ml = try MLModel(contentsOf: loadURL, configuration: cfg)
                         yoloModel = try VNCoreMLModel(for: ml)
                         modelStatusText = "YOLO OK: \(name).\(ext)"
                         return
