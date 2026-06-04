@@ -54,13 +54,18 @@ final class BoxDetectionCoordinator: NSObject {
 
     // MARK: - Stability / EMA
     private var buffer: [NativeMeasurement] = []
-    private let stabilityWindow = 5
-    private let thresholdCm     = 4.0
+    private let stabilityWindow = 8
+    private let thresholdCm     = 2.0
     private var smoothBL: SIMD3<Float>?
     private var smoothBR: SIMD3<Float>?
     private var smoothTL: SIMD3<Float>?
     private var smoothTR: SIMD3<Float>?
-    private let smoothAlpha: Float = 0.30
+    private let smoothAlpha: Float = 0.10   // suave: 10% por frame
+
+    // MARK: - Lock mode (congela wireframe cuando es estable)
+    private var isLocked = false
+    private var lockedTransform: simd_float4x4?
+    private let lockMovementThreshold: Float = 0.08  // 8cm mueve la cámara → desbloquea
 
     // MARK: - Manual mode
     private var manualPoints: [SIMD3<Float>] = []
@@ -390,12 +395,25 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     // MARK: - FASE 2: medición 3D con LiDAR
-    // Usa YOLO bbox solo para acotar la región de búsqueda.
-    // Escanea LiDAR desde el centro hacia afuera para encontrar los bordes
-    // reales de la cara frontal (donde la profundidad cambia >6cm).
     private func measure3D(box: CGRect, cx: CGFloat, cy: CGFloat,
                            centerD: Float, frame: ARFrame,
                            depth: ARDepthData, vp: CGSize) {
+        // Si está bloqueado, solo desbloquear si la cámara se movió >8cm
+        if isLocked {
+            if let lt = lockedTransform {
+                let cur = frame.camera.transform.columns.3
+                let prv = lt.columns.3
+                let moved = simd_length(SIMD3<Float>(cur.x - prv.x, cur.y - prv.y, cur.z - prv.z))
+                if moved < lockMovementThreshold { return }
+            }
+            // Cámara se movió → desbloquear y reiniciar
+            isLocked = false
+            lockedTransform = nil
+            buffer.removeAll()
+            smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
+        }
+        lockedTransform = frame.camera.transform
+
         guard box.width > 30, box.height > 30 else { return }
 
         let tol:  Float   = 0.06   // saltar borde cuando profundidad cambia >6cm
@@ -579,6 +597,7 @@ final class BoxDetectionCoordinator: NSObject {
             largura:     median(buffer.map(\.largura)),
             altura:      median(buffer.map(\.altura)))
         lastMeasurement = stable
+        isLocked = true   // congelar wireframe — medición estable
         DispatchQueue.main.async { [weak self] in self?.onUpdate(stable) }
     }
 
