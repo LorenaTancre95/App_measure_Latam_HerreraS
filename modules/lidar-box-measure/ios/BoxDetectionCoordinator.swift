@@ -418,7 +418,7 @@ final class BoxDetectionCoordinator: NSObject {
         }
         lockedTransform = frame.camera.transform
 
-        guard box.width > 20, box.height > 20 else { return }
+        guard box.width > 15, box.height > 15 else { return }
 
         // 1. Muestrear grilla 10×10 dentro del bbox para encontrar la profundidad del frente
         let G = 10
@@ -460,7 +460,6 @@ final class BoxDetectionCoordinator: NSObject {
         let fRight = simd_normalize(br - bl)
         let fUp    = simd_normalize(tl - bl)
         let faceN  = simd_normalize(simd_cross(fRight, fUp))
-        guard abs(faceN.y) < 0.70 else { return }  // cara demasiado horizontal → piso
 
         let c = Double(simd_distance(bl, br)) * 100  // comprimento (ancho cara frontal)
         let a = Double(simd_distance(tl, bl)) * 100  // altura
