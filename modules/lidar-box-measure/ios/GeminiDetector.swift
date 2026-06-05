@@ -16,7 +16,7 @@ struct GeminiCorners {
 
 final class GeminiDetector {
 
-    // ⚠️ No compartir esta key públicamente
+    // swiftlint:disable:next line_length
     private let apiKey  = "AIzaSyBiiL7jIZzl436vNrp6ZUCo0_-EpSAkrig"
     private let model   = "gemini-2.0-flash"
     private let baseURL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -31,23 +31,13 @@ final class GeminiDetector {
             status = "Gemini: img err"; completion(nil); return
         }
 
-        let body: [String: Any] = [
-            "contents": [[
-                "parts": [
-                    ["inline_data": ["mime_type": "image/jpeg",
-                                     "data": jpeg.base64EncodedString()]],
-                    ["text": detectionPrompt]
-                ]
-            ]],
-            "generationConfig": [
-                "responseMimeType": "application/json",
-                "responseSchema": responseSchema
-            ]
-        ]
+        guard let bodyData = buildRequestBody(jpeg: jpeg) else {
+            status = "Gemini: body err"; completion(nil); return
+        }
 
-        guard let url = URL(string: "\(baseURL)/\(model):generateContent?key=\(apiKey)"),
-              let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
-            status = "Gemini: req err"; completion(nil); return
+        let urlStr = "\(baseURL)/\(model):generateContent?key=\(apiKey)"
+        guard let url = URL(string: urlStr) else {
+            status = "Gemini: url err"; completion(nil); return
         }
 
         var req = URLRequest(url: url)
@@ -65,84 +55,120 @@ final class GeminiDetector {
                 self.status = "Gemini: \(error.localizedDescription.prefix(28))"
                 completion(nil); return
             }
-            guard let data = data,
-                  let json      = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let cands     = json["candidates"] as? [[String: Any]],
-                  let content   = cands.first?["content"] as? [String: Any],
-                  let parts     = content["parts"] as? [[String: Any]],
-                  let text      = parts.first?["text"] as? String,
-                  let rData     = text.data(using: .utf8),
-                  let result    = try? JSONSerialization.jsonObject(with: rData) as? [String: Any]
-            else {
-                self.status = "Gemini: parse err \(ms)ms"; completion(nil); return
+            guard let data = data else {
+                self.status = "Gemini: no data \(ms)ms"; completion(nil); return
             }
-
-            guard let detected = result["boxDetected"] as? Bool, detected,
-                  let cd = result["corners"] as? [String: Any]
-            else {
-                self.status = "Gemini: no box \(ms)ms"; completion(nil); return
-            }
-
-            func pt(_ k: String) -> CGPoint? {
-                guard let d = cd[k] as? [String: Any],
-                      let x = d["x"] as? Double,
-                      let y = d["y"] as? Double
-                else { return nil }
-                return CGPoint(x: x / 100.0, y: y / 100.0)
-            }
-
-            guard let bl = pt("bottomLeft"),  let br = pt("bottomRight"),
-                  let tl = pt("topLeft"),     let tr = pt("topRight")
-            else {
-                self.status = "Gemini: corner err \(ms)ms"; completion(nil); return
-            }
-
-            self.status = "Gemini OK \(ms)ms"
-            completion(GeminiCorners(bottomLeft: bl, bottomRight: br,
-                                     topLeft: tl,    topRight: tr))
+            self.parseResponse(data: data, ms: ms, completion: completion)
         }.resume()
     }
 
-    // MARK: - Prompt y schema
+    // MARK: - Request body
 
-    private var detectionPrompt: String {
-        """
-        Analyze this image and find the cardboard box or rectangular package \
-        with the most clearly visible front face.
-        Return the 4 corners of the FRONT FACE (the face closest to the camera) \
-        as percentage coordinates (0–100) of image width and height:
-        • bottomLeft:  bottom-left corner of the front face
-        • bottomRight: bottom-right corner of the front face
-        • topLeft:     top-left corner of the front face
-        • topRight:    top-right corner of the front face
-        Place corners exactly at the physical edges of the box, not inside it.
-        If no box or rectangular package is visible, set boxDetected to false.
-        """
+    private func buildRequestBody(jpeg: Data) -> Data? {
+        let b64 = jpeg.base64EncodedString()
+
+        let inlineData: [String: Any] = ["mime_type": "image/jpeg", "data": b64]
+        let imagePart:  [String: Any] = ["inline_data": inlineData]
+        let textPart:   [String: Any] = ["text": detectionPrompt]
+        let content:    [String: Any] = ["parts": [imagePart, textPart]]
+
+        let genConfig: [String: Any] = [
+            "responseMimeType": "application/json",
+            "responseSchema": buildSchema()
+        ]
+
+        let body: [String: Any] = [
+            "contents": [content],
+            "generationConfig": genConfig
+        ]
+
+        return try? JSONSerialization.data(withJSONObject: body)
     }
 
-    private var responseSchema: [String: Any] {
-        func corner() -> [String: Any] {
-            ["type": "OBJECT",
-             "properties": ["x": ["type": "NUMBER"], "y": ["type": "NUMBER"]],
-             "required": ["x", "y"]]
-        }
+    private func buildSchema() -> [String: Any] {
+        let numType: [String: Any]  = ["type": "NUMBER"]
+        let boolType: [String: Any] = ["type": "BOOLEAN"]
+
+        let xyProps: [String: Any]  = ["x": numType, "y": numType]
+        let cornerSchema: [String: Any] = [
+            "type": "OBJECT",
+            "properties": xyProps,
+            "required": ["x", "y"]
+        ]
+
+        let cornersProps: [String: Any] = [
+            "bottomLeft":  cornerSchema,
+            "bottomRight": cornerSchema,
+            "topLeft":     cornerSchema,
+            "topRight":    cornerSchema
+        ]
+        let cornersSchema: [String: Any] = [
+            "type": "OBJECT",
+            "properties": cornersProps,
+            "required": ["bottomLeft", "bottomRight", "topLeft", "topRight"]
+        ]
+
+        let rootProps: [String: Any] = [
+            "boxDetected": boolType,
+            "corners": cornersSchema
+        ]
         return [
             "type": "OBJECT",
-            "properties": [
-                "boxDetected": ["type": "BOOLEAN"],
-                "corners": [
-                    "type": "OBJECT",
-                    "properties": [
-                        "bottomLeft":  corner(),
-                        "bottomRight": corner(),
-                        "topLeft":     corner(),
-                        "topRight":    corner()
-                    ],
-                    "required": ["bottomLeft", "bottomRight", "topLeft", "topRight"]
-                ]
-            ],
+            "properties": rootProps,
             "required": ["boxDetected", "corners"]
         ]
+    }
+
+    // MARK: - Response parsing
+
+    private func parseResponse(data: Data, ms: Int,
+                                completion: (GeminiCorners?) -> Void) {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cands   = json["candidates"] as? [[String: Any]],
+              let content = cands.first?["content"] as? [String: Any],
+              let parts   = content["parts"] as? [[String: Any]],
+              let text    = parts.first?["text"] as? String,
+              let rData   = text.data(using: .utf8),
+              let result  = try? JSONSerialization.jsonObject(with: rData) as? [String: Any]
+        else {
+            status = "Gemini: parse err \(ms)ms"; completion(nil); return
+        }
+
+        guard let detected = result["boxDetected"] as? Bool, detected,
+              let cd = result["corners"] as? [String: Any]
+        else {
+            status = "Gemini: no box \(ms)ms"; completion(nil); return
+        }
+
+        func pt(_ k: String) -> CGPoint? {
+            guard let d = cd[k] as? [String: Any],
+                  let x = d["x"] as? Double,
+                  let y = d["y"] as? Double
+            else { return nil }
+            return CGPoint(x: x / 100.0, y: y / 100.0)
+        }
+
+        guard let bl = pt("bottomLeft"),  let br = pt("bottomRight"),
+              let tl = pt("topLeft"),     let tr = pt("topRight")
+        else {
+            status = "Gemini: corner err \(ms)ms"; completion(nil); return
+        }
+
+        status = "Gemini OK \(ms)ms"
+        completion(GeminiCorners(bottomLeft: bl, bottomRight: br,
+                                 topLeft: tl,    topRight: tr))
+    }
+
+    // MARK: - Prompt
+
+    private var detectionPrompt: String {
+        return "Analyze this image and find the cardboard box or rectangular package. " +
+               "Return the 4 corners of the FRONT FACE (the face closest to the camera) " +
+               "as percentage coordinates 0 to 100 of image width and height. " +
+               "bottomLeft is the bottom-left corner, bottomRight is the bottom-right corner, " +
+               "topLeft is the top-left corner, topRight is the top-right corner. " +
+               "Place corners exactly at the physical edges of the box. " +
+               "If no box is visible set boxDetected to false."
     }
 
     // MARK: - Imagen
@@ -150,9 +176,9 @@ final class GeminiDetector {
     private func pixelBufferToJPEG(_ pb: CVPixelBuffer) -> Data? {
         let ci  = CIImage(cvPixelBuffer: pb).oriented(.right)
         let ctx = CIContext(options: [.useSoftwareRenderer: false])
-        // Escalar a max 640px para reducir tamaño del payload
-        let scale = min(1.0, 640.0 / max(ci.extent.width, ci.extent.height))
-        let img   = scale < 1.0
+        let maxDim = max(ci.extent.width, ci.extent.height)
+        let scale  = maxDim > 640 ? 640.0 / maxDim : 1.0
+        let img    = scale < 1.0
             ? ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             : ci
         guard let cg = ctx.createCGImage(img, from: img.extent) else { return nil }
