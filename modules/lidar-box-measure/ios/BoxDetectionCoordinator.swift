@@ -86,6 +86,14 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: SAM segmentation
     private let sam = SAMInference()
 
+    // MARK: Gemini detection
+    private let gemini          = GeminiDetector()
+    private var cachedCorners:    GeminiCorners? = nil
+    private var lastGeminiCall:   TimeInterval   = 0
+    private let geminiInterval:   TimeInterval   = 2.5
+    private var lastMeasureTime:  TimeInterval   = 0
+    private let measureInterval:  TimeInterval   = 0.10
+
     // MARK: 2D overlay (CALayer)
     private let detectionLayer = CAShapeLayer()
     private let labelLayer     = CATextLayer()
@@ -216,7 +224,7 @@ final class BoxDetectionCoordinator: NSObject {
         sv.layer.addSublayer(detectionLayer)
         sv.layer.addSublayer(labelLayer)
         sv.layer.addSublayer(debugLayer)
-        debugLayer.string = "\(modelStatusText)\n\(sam.status)"
+        debugLayer.string = gemini.status
     }
 
     private func updateDebug(_ text: String) {
@@ -227,54 +235,187 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Main pipeline
+    // MARK: - Main pipeline (Gemini corners + LiDAR depth)
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
-        guard let sv = sceneView, !scanInFlight else { return }
+        guard let sv = sceneView else { return }
         attachLayersIfNeeded()
-        updateDebug("\(modelStatusText)\n\(sam.status)")
         let vp = sv.bounds.size
-        let cx = vp.width / 2, cy = vp.height / 2
-        scanInFlight = true
+
+        // ── Por frame: medir con los corners cacheados de Gemini ────────────
+        if let corners = cachedCorners,
+           frame.timestamp - lastMeasureTime > measureInterval {
+            lastMeasureTime = frame.timestamp
+            measureWithCorners(corners, frame: frame, depth: depth, vp: vp)
+        }
+
+        // ── Periódico: llamar a Gemini cada geminiInterval segundos ──────────
+        guard !scanInFlight,
+              frame.timestamp - lastGeminiCall > geminiInterval else { return }
+        lastGeminiCall = frame.timestamp
+        scanInFlight   = true
         let pb = frame.capturedImage
 
-        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+        updateDebug("Gemini: detectando...")
+
+        gemini.detectCorners(pixelBuffer: pb) { [weak self] corners in
             guard let self = self else { return }
-            defer { DispatchQueue.main.async { self.scanInFlight = false } }
-
-            // ── Fase 1: YOLO → bbox 2D ──────────────────────────────────────
-            let pred = self.detectClosestBox(in: pb, viewportSize: vp, cx: cx, cy: cy)
-
-            let screenBox: CGRect
-            if let p = pred {
-                let box = p.screenRect(viewportSize: vp, modelSize: self.modelInputSize)
-                DispatchQueue.main.async {
-                    self.lastDetection = box
-                    self.missedFrames  = 0
-                    self.drawDetectionRect(box, label: "caja \(Int(p.score * 100))%", in: vp)
-                }
-                screenBox = box
-            } else {
-                DispatchQueue.main.async { self.missedFrames += 1 }
-                guard let last = self.lastDetection,
-                      self.missedFrames <= self.maxMissedFrames else {
-                    DispatchQueue.main.async { self.clearDetectionLayer() }
-                    return
-                }
-                screenBox = last
-            }
-
-            // ── Fase 2: SAM segmentación (background) ───────────────────────
-            let samMask = self.sam.getMask(pixelBuffer: pb,
-                                           screenBox: screenBox,
-                                           viewportSize: vp)
-            self.updateDebug("\(self.modelStatusText)\n\(self.sam.status)")
-
-            // ── Fase 3: medición 3D (main thread por acceso a ARFrame) ───────
             DispatchQueue.main.async {
-                self.measure3D(box: screenBox, samMask: samMask,
-                               frame: frame, depth: depth, vp: vp)
+                self.scanInFlight = false
+                if let c = corners {
+                    self.cachedCorners = c
+                    self.missedFrames  = 0
+                } else {
+                    self.missedFrames += 1
+                    if self.missedFrames > self.maxMissedFrames {
+                        self.cachedCorners = nil
+                        self.clearDetectionLayer()
+                    }
+                }
+                self.updateDebug(self.gemini.status)
             }
         }
+    }
+
+    // MARK: - Medición: Gemini corners → LiDAR depth → wireframe 3D
+    private func measureWithCorners(_ corners: GeminiCorners,
+                                     frame: ARFrame, depth: ARDepthData, vp: CGSize) {
+        // Lock check
+        if isLocked {
+            if let lt = lockedTransform {
+                let cur = frame.camera.transform.columns.3
+                let prv = lt.columns.3
+                if simd_length(SIMD3<Float>(cur.x-prv.x, cur.y-prv.y, cur.z-prv.z)) < lockMovementThreshold { return }
+            }
+            isLocked = false; lockedTransform = nil; buffer.removeAll()
+            smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
+            smoothBBL = nil; smoothBBR = nil; smoothBTL = nil; smoothBTR = nil
+        }
+        lockedTransform = frame.camera.transform
+
+        // Gemini da corners normalizados [0,1] → screen coords
+        let bl_s = CGPoint(x: corners.bottomLeft.x  * vp.width, y: corners.bottomLeft.y  * vp.height)
+        let br_s = CGPoint(x: corners.bottomRight.x * vp.width, y: corners.bottomRight.y * vp.height)
+        let tl_s = CGPoint(x: corners.topLeft.x     * vp.width, y: corners.topLeft.y     * vp.height)
+        let tr_s = CGPoint(x: corners.topRight.x    * vp.width, y: corners.topRight.y    * vp.height)
+
+        // Dibujar rect 2D de detección
+        let rxMin = min(bl_s.x, tl_s.x), rxMax = max(br_s.x, tr_s.x)
+        let ryMin = min(tl_s.y, tr_s.y), ryMax = max(bl_s.y, br_s.y)
+        let screenBox = CGRect(x: rxMin, y: ryMin, width: rxMax-rxMin, height: ryMax-ryMin)
+        DispatchQueue.main.async { self.drawDetectionRect(screenBox, label: "caja", in: vp) }
+
+        // Profundidad LiDAR en cada corner (vecindario mediana)
+        guard let dBL = sampleDepthNeighborhood(at: bl_s, frame: frame, depth: depth, vp: vp),
+              let dBR = sampleDepthNeighborhood(at: br_s, frame: frame, depth: depth, vp: vp),
+              let dTL = sampleDepthNeighborhood(at: tl_s, frame: frame, depth: depth, vp: vp),
+              let dTR = sampleDepthNeighborhood(at: tr_s, frame: frame, depth: depth, vp: vp)
+        else { return }
+
+        // Proyectar cada corner a 3D mundo
+        guard let p3BL = worldPointAtDepth(bl_s, depth: dBL, frame: frame, vp: vp),
+              let p3BR = worldPointAtDepth(br_s, depth: dBR, frame: frame, vp: vp),
+              let p3TL = worldPointAtDepth(tl_s, depth: dTL, frame: frame, vp: vp),
+              let p3TR = worldPointAtDepth(tr_s, depth: dTR, frame: frame, vp: vp)
+        else { return }
+
+        let c = Double(simd_distance(p3BL, p3BR)) * 100   // comprimento
+        let a = Double(simd_distance(p3BL, p3TL)) * 100   // altura
+        guard c > 3, c < 300, a > 3, a < 300 else { return }
+
+        // Normal del plano frontal para extruir la cara trasera
+        let faceEdgeR = simd_normalize(p3BR - p3BL)
+        let faceEdgeU = simd_normalize(p3TL - p3BL)
+        var faceN = simd_normalize(simd_cross(faceEdgeR, faceEdgeU))
+        let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                   frame.camera.transform.columns.3.y,
+                                   frame.camera.transform.columns.3.z)
+        if simd_dot(faceN, camPos - p3BL) < 0 { faceN = -faceN }
+
+        // Estimación de profundidad (largura): samples más profundos dentro del bbox
+        let centerD = (dBL + dBR + dTL + dTR) / 4
+        let dm = depth.depthMap
+        let dW = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
+        let invTx = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let bboxNorm = [bl_s, br_s, tl_s, tr_s].map {
+            CGPoint(x: $0.x / vp.width, y: $0.y / vp.height).applying(invTx)
+        }
+        let dxS = max(0,    Int(bboxNorm.map { $0.x }.min()! * CGFloat(dW)))
+        let dxE = min(dW-1, Int(bboxNorm.map { $0.x }.max()! * CGFloat(dW)))
+        let dyS = max(0,    Int(bboxNorm.map { $0.y }.min()! * CGFloat(dH)))
+        let dyE = min(dH-1, Int(bboxNorm.map { $0.y }.max()! * CGFloat(dH)))
+        var deeperSamples: [Float] = []
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        if let base = CVPixelBufferGetBaseAddress(dm) {
+            let ptr = base.assumingMemoryBound(to: Float32.self)
+            for dy in stride(from: dyS, through: dyE, by: 3) {
+                for dx in stride(from: dxS, through: dxE, by: 3) {
+                    let v = ptr[dy * dW + dx]
+                    if v > centerD + 0.06 && v < centerD + 0.65 { deeperSamples.append(v) }
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(dm, .readOnly)
+
+        let depthEst: Float
+        if deeperSamples.count >= 6 {
+            let ds = deeperSamples.sorted()
+            depthEst = max(ds[min(ds.count-1, ds.count*3/4)] - centerD, 0.03)
+        } else {
+            depthEst = Float(min(c, a) / 100.0) * 0.65
+        }
+
+        var aFinal = a
+        if let fy = floorWorldY {
+            let topY = Double(max(p3TL.y, p3TR.y))
+            let hFloor = (topY - Double(fy)) * 100
+            if hFloor > 5 && hFloor < 300 { aFinal = hFloor }
+        }
+        let l = max(Double(depthEst) * 100, 3.0)
+
+        // Cara trasera (extrusión)
+        let ext = -faceN * Float(l / 100)
+        let bbl = p3BL + ext, bbr = p3BR + ext
+        let btl = p3TL + ext, btr = p3TR + ext
+
+        // EMA smoothing
+        let α = smoothAlpha
+        smoothBL  = smoothBL.map  { α*p3BL + (1-α)*$0 } ?? p3BL
+        smoothBR  = smoothBR.map  { α*p3BR + (1-α)*$0 } ?? p3BR
+        smoothTL  = smoothTL.map  { α*p3TL + (1-α)*$0 } ?? p3TL
+        smoothTR  = smoothTR.map  { α*p3TR + (1-α)*$0 } ?? p3TR
+        smoothBBL = smoothBBL.map { α*bbl  + (1-α)*$0 } ?? bbl
+        smoothBBR = smoothBBR.map { α*bbr  + (1-α)*$0 } ?? bbr
+        smoothBTL = smoothBTL.map { α*btl  + (1-α)*$0 } ?? btl
+        smoothBTR = smoothBTR.map { α*btr  + (1-α)*$0 } ?? btr
+
+        let m = NativeMeasurement(comprimento: c, largura: l, altura: aFinal)
+        addToBuffer(m)
+        DispatchQueue.main.async {
+            self.updateOverlay(bl: self.smoothBL!, br: self.smoothBR!,
+                               tl: self.smoothTL!, tr: self.smoothTR!,
+                               bbl: self.smoothBBL!, bbr: self.smoothBBR!,
+                               btl: self.smoothBTL!, btr: self.smoothBTR!,
+                               measurement: m)
+        }
+    }
+
+    // MARK: - Muestra profundidad LiDAR en vecindario de un punto pantalla
+    // Percentil 25 para preferir la cara frontal (más cercana) sobre bordes ruidosos.
+    private func sampleDepthNeighborhood(at pt: CGPoint, frame: ARFrame,
+                                          depth: ARDepthData, vp: CGSize) -> Float? {
+        let offsets: [CGFloat] = [-8, -4, 0, 4, 8]
+        var depths: [Float] = []
+        for dy in offsets {
+            for dx in offsets {
+                if let d = sampleDepth(at: CGPoint(x: pt.x + dx, y: pt.y + dy),
+                                       frame: frame, depth: depth, vp: vp) {
+                    depths.append(d)
+                }
+            }
+        }
+        guard depths.count >= 3 else { return nil }
+        let sorted = depths.sorted()
+        return sorted[sorted.count / 4]
     }
 
     // MARK: - YOLO inference
@@ -750,6 +891,7 @@ final class BoxDetectionCoordinator: NSObject {
         lastMeasurement = nil; isLocked = false; lockedTransform = nil
         smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
         smoothBBL = nil; smoothBBR = nil; smoothBTL = nil; smoothBTR = nil
+        cachedCorners = nil; lastGeminiCall = 0
     }
 
     private func makeLine(from s: SIMD3<Float>, to e: SIMD3<Float>, color: UIColor) -> SCNNode {
@@ -840,10 +982,8 @@ extension BoxDetectionCoordinator: ARSCNViewDelegate {
 extension BoxDetectionCoordinator: ARSessionDelegate {
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
         guard mode == .auto,
-              frame.timestamp - lastScanTime > scanInterval,
               let depthData = frame.sceneDepth
         else { return }
-        lastScanTime = frame.timestamp
         measureFromCenter(frame: frame, depth: depthData)
     }
     func session(_ session: ARSession, didFailWithError error: Error) {
