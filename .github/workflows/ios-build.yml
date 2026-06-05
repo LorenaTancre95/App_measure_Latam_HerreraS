@@ -70,6 +70,7 @@ jobs:
         run: npx expo prebuild --platform ios --clean --no-install
         env:
           EXPO_NO_TELEMETRY: 1
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Diagnosticar e forçar registro do LidarBoxMeasureModule
         run: |
@@ -142,6 +143,12 @@ jobs:
           }
           add_if_missing NSCameraUsageDescription "Necessário para medir caixas com LiDAR"
           add_if_missing NSMotionUsageDescription "Necessário para rastreamento e medição 3D"
+          # Inyectar Gemini API key (set si ya existe, add si no)
+          /usr/libexec/PlistBuddy -c "Set :GEMINI_API_KEY '$GEMINI_API_KEY'" "$PLIST" 2>/dev/null || \
+          /usr/libexec/PlistBuddy -c "Add :GEMINI_API_KEY string '$GEMINI_API_KEY'" "$PLIST"
+          echo "GEMINI_API_KEY inyectada en Info.plist"
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: Patch Podfile
         run: |
