@@ -83,6 +83,9 @@ final class BoxDetectionCoordinator: NSObject {
     private let modelInputSize: CGFloat = 640
     private var modelStatusText = "YOLO: loading..."
 
+    // MARK: SAM segmentation
+    private let sam = SAMInference()
+
     // MARK: 2D overlay (CALayer)
     private let detectionLayer = CAShapeLayer()
     private let labelLayer     = CATextLayer()
@@ -121,6 +124,7 @@ final class BoxDetectionCoordinator: NSObject {
         self.onPlaneFound = onPlaneFound
         super.init()
         loadModel()
+        sam.load()
         setupLayers()
     }
 
@@ -255,10 +259,15 @@ final class BoxDetectionCoordinator: NSObject {
                 screenBox = last
             }
 
-            // ── Fase 2: ARKit raycast + ARMesh bounding box ─────────────────
-            // Debe ejecutarse en main thread (ARKit requirement)
+            // ── Fase 2: SAM segmentación (background) ───────────────────────
+            let samMask = self.sam.getMask(pixelBuffer: pb,
+                                           screenBox: screenBox,
+                                           viewportSize: vp)
+
+            // ── Fase 3: medición 3D (main thread por acceso a ARFrame) ───────
             DispatchQueue.main.async {
-                self.measure3D(box: screenBox, frame: frame, depth: depth, vp: vp)
+                self.measure3D(box: screenBox, samMask: samMask,
+                               frame: frame, depth: depth, vp: vp)
             }
         }
     }
@@ -399,11 +408,9 @@ final class BoxDetectionCoordinator: NSObject {
         return nil
     }
 
-    // MARK: - Medición: YOLO bbox + LiDAR depth map
-    // Proyecta los 4 corners del bbox a 3D usando la profundidad real del mapa LiDAR.
-    // No depende de ARMeshAnchor (que capturaba 1 m de sala y daba resultados erróneos).
-    private func measure3D(box: CGRect, frame: ARFrame,
-                            depth: ARDepthData, vp: CGSize) {
+    // MARK: - Medición: YOLO bbox + SAM mask + LiDAR depth map
+    private func measure3D(box: CGRect, samMask: [Bool]?,
+                            frame: ARFrame, depth: ARDepthData, vp: CGSize) {
         // Lock mode
         if isLocked {
             if let lt = lockedTransform {
@@ -420,21 +427,30 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard box.width > 15, box.height > 15 else { return }
 
-        // 1. Muestrear grilla 10×10 dentro del bbox para encontrar la profundidad del frente
-        let G = 10
+        // 1. Muestrear grilla 14×14 dentro del bbox, filtrando con máscara SAM si está disponible
+        let G = 14
+        let maskW = SAMInference.maskW, maskH = SAMInference.maskH
         var allDepths: [Float] = []
         allDepths.reserveCapacity(G * G)
         for r in 0..<G {
             for c in 0..<G {
                 let sx = box.minX + box.width  * CGFloat(c) / CGFloat(G - 1)
                 let sy = box.minY + box.height * CGFloat(r) / CGFloat(G - 1)
+
+                // Si tenemos máscara SAM, excluir pixels fuera de la segmentación
+                if let mask = samMask {
+                    let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
+                    let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
+                    guard mask[my * maskW + mx] else { continue }
+                }
+
                 if let d = sampleDepth(at: CGPoint(x: sx, y: sy),
                                        frame: frame, depth: depth, vp: vp) {
                     allDepths.append(d)
                 }
             }
         }
-        guard allDepths.count >= 15 else { return }
+        guard allDepths.count >= 10 else { return }
 
         // La cara frontal de la caja es el cluster de mínima profundidad
         let minD = allDepths.min()!

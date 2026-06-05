@@ -16,7 +16,9 @@ Pod::Spec.new do |s|
   s.dependency 'ExpoModulesCore'
 
   s.source_files = 'ios/**/*.{swift,m,mm}'
-  s.resources    = ['ios/box_detector.mlpackage']
+  s.resources    = ['ios/box_detector.mlpackage',
+                    'ios/sam_encoder.mlpackage',
+                    'ios/sam_decoder.mlpackage']
   s.frameworks   = ['ARKit', 'SceneKit', 'AVFoundation', 'CoreML', 'Vision']
 
   s.pod_target_xcconfig = {
