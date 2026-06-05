@@ -108,6 +108,9 @@ final class BoxDetectionCoordinator: NSObject {
     private var smoothBTR: SIMD3<Float>?
     private let smoothAlpha: Float = 0.12
 
+    // MARK: Floor plane
+    private var floorWorldY: Float? = nil
+
     private var isLocked = false
     private var lockedTransform: simd_float4x4?
     private let lockMovementThreshold: Float = 0.08
@@ -468,15 +471,11 @@ final class BoxDetectionCoordinator: NSObject {
         let frontPts3D = collectFrontFacePoints(centerD: centerD, yoloBox: box,
                                                  samMask: samMask, frame: frame,
                                                  depth: depth, vp: vp)
-        guard frontPts3D.count >= 20 else { return }
+        guard frontPts3D.count >= 15 else { return }
 
-        // 3. Medir cara frontal en 3D: proyectar puntos sobre el plano de la cara
+        // 3. Medir cara frontal en 3D: PCA da los verdaderos ejes del plano de la cara
         let centroid3D = frontPts3D.reduce(.zero, +) / Float(frontPts3D.count)
-        let faceN = simd_normalize(camPos3 - centroid3D)
-        let faceRRaw = simd_cross(SIMD3<Float>(0, 1, 0), faceN)
-        let faceR = simd_length(faceRRaw) > 0.001 ? simd_normalize(faceRRaw)
-                                                   : SIMD3<Float>(1, 0, 0)
-        let faceU = simd_cross(faceN, faceR)  // ≈ world-up proyectado al plano de cara
+        let (faceR, faceU, faceN) = computeFacePCA(frontPts3D, centroid: centroid3D, camPos: camPos3)
 
         var minR: Float = .infinity, maxR: Float = -.infinity
         var minU: Float = .infinity, maxU: Float = -.infinity
@@ -493,7 +492,13 @@ final class BoxDetectionCoordinator: NSObject {
         let tr = centroid3D + faceR * maxR + faceU * maxU
 
         let c = Double(maxR - minR) * 100
-        let a = Double(maxU - minU) * 100
+        var a = Double(maxU - minU) * 100
+        // If floor plane is known, use it to cross-check height
+        if let fy = floorWorldY {
+            let topY = Double(max(tl.y, tr.y))
+            let hFloor = (topY - Double(fy)) * 100
+            if hFloor > 5 && hFloor < 300 { a = hFloor }
+        }
         guard c > 3, c < 300, a > 3, a < 300 else { return }
 
         // 4. Profundidad de la caja: percentil 75 de deeper samples para evitar outliers de fondo
@@ -569,7 +574,8 @@ final class BoxDetectionCoordinator: NSObject {
         for dy in stride(from: dyS, through: dyE, by: step) {
             for dx in stride(from: dxS, through: dxE, by: step) {
                 let d = dptr[dy * dW + dx]
-                guard d > 0.02, d < 8.0, abs(d - centerD) < 0.10 else { continue }
+                let depthTol: Float = samMask != nil ? 0.25 : 0.12
+                guard d > 0.02, d < 8.0, abs(d - centerD) < depthTol else { continue }
 
                 // Filtrar con máscara SAM (necesita posición en pantalla)
                 if let mask = samMask {
@@ -591,6 +597,53 @@ final class BoxDetectionCoordinator: NSObject {
             }
         }
         return points
+    }
+
+    // MARK: - PCA: verdaderos ejes del plano frontal de la caja
+    // El eigenvector de mayor varianza → faceR (ancho), segundo → faceU (alto),
+    // tercero → faceN (normal, menor varianza porque los puntos están en un plano).
+    private func computeFacePCA(_ pts: [SIMD3<Float>], centroid: SIMD3<Float>,
+                                  camPos: SIMD3<Float>)
+        -> (right: SIMD3<Float>, up: SIMD3<Float>, normal: SIMD3<Float>)
+    {
+        var Cxx: Float = 0, Cyy: Float = 0, Czz: Float = 0
+        var Cxy: Float = 0, Cxz: Float = 0, Cyz: Float = 0
+        for p in pts {
+            let d = p - centroid
+            Cxx += d.x*d.x; Cyy += d.y*d.y; Czz += d.z*d.z
+            Cxy += d.x*d.y; Cxz += d.x*d.z; Cyz += d.y*d.z
+        }
+        let n = Float(pts.count)
+        Cxx /= n; Cyy /= n; Czz /= n; Cxy /= n; Cxz /= n; Cyz /= n
+
+        func cov(_ v: SIMD3<Float>) -> SIMD3<Float> {
+            SIMD3(Cxx*v.x + Cxy*v.y + Cxz*v.z,
+                  Cxy*v.x + Cyy*v.y + Cyz*v.z,
+                  Cxz*v.x + Cyz*v.y + Czz*v.z)
+        }
+
+        // Power iteration: eigenvector de mayor varianza
+        var e1 = simd_normalize(SIMD3<Float>(1, 0.01, 0.01))
+        for _ in 0..<30 { let t = cov(e1); guard simd_length(t) > 1e-8 else { break }; e1 = simd_normalize(t) }
+
+        // Segundo eigenvector via deflación
+        var e2 = simd_normalize(SIMD3<Float>(0.01, 1, 0.01))
+        for _ in 0..<30 {
+            let t = cov(e2); guard simd_length(t) > 1e-8 else { break }
+            let td = t - simd_dot(t, e1) * e1; guard simd_length(td) > 1e-8 else { break }
+            e2 = simd_normalize(td)
+        }
+
+        // Tercer eigenvector = normal del plano (menor varianza)
+        var e3 = simd_normalize(simd_cross(e1, e2))
+        if simd_dot(e3, camPos - centroid) < 0 { e3 = -e3 }
+
+        // faceU = eje más vertical, faceR = eje más horizontal
+        var faceU = abs(e1.y) >= abs(e2.y) ? e1 : e2
+        var faceR = abs(e1.y) >= abs(e2.y) ? e2 : e1
+        if faceU.y < 0 { faceU = -faceU }
+        if simd_dot(simd_cross(faceR, faceU), e3) < 0 { faceR = -faceR }
+        return (faceR, faceU, e3)
     }
 
     // MARK: - LiDAR helpers (fallback)
@@ -762,8 +815,24 @@ private extension YOLOPrediction {
 // MARK: - ARKit delegates
 extension BoxDetectionCoordinator: ARSCNViewDelegate {
     func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
-        if anchor is ARPlaneAnchor {
+        if let plane = anchor as? ARPlaneAnchor {
             DispatchQueue.main.async { [weak self] in self?.onPlaneFound() }
+            if plane.alignment == .horizontal {
+                let worldY = anchor.transform.columns.3.y
+                DispatchQueue.main.async { [weak self] in
+                    guard let s = self else { return }
+                    if s.floorWorldY == nil || worldY < s.floorWorldY! { s.floorWorldY = worldY }
+                }
+            }
+        }
+    }
+    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        if let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal {
+            let worldY = anchor.transform.columns.3.y
+            DispatchQueue.main.async { [weak self] in
+                guard let s = self else { return }
+                if s.floorWorldY == nil || worldY < s.floorWorldY! { s.floorWorldY = worldY }
+            }
         }
     }
 }
