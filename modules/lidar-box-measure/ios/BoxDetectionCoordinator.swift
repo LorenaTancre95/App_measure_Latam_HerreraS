@@ -435,8 +435,10 @@ final class BoxDetectionCoordinator: NSObject {
         let G = 14
         let maskW = SAMInference.maskW, maskH = SAMInference.maskH
         var rawDepths:    [Float] = []
+        var rawPoints:    [CGPoint] = []
         var maskedDepths: [Float] = []
         rawDepths.reserveCapacity(G * G)
+        rawPoints.reserveCapacity(G * G)
         maskedDepths.reserveCapacity(G * G)
 
         for r in 0..<G {
@@ -446,6 +448,7 @@ final class BoxDetectionCoordinator: NSObject {
                 guard let d = sampleDepth(at: CGPoint(x: sx, y: sy),
                                           frame: frame, depth: depth, vp: vp) else { continue }
                 rawDepths.append(d)
+                rawPoints.append(CGPoint(x: sx, y: sy))
                 if let mask = samMask {
                     let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
                     let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
@@ -454,17 +457,32 @@ final class BoxDetectionCoordinator: NSObject {
             }
         }
 
-        // Si SAM filtró suficientes puntos úsalos; si no, usar todos (SAM falló o caja muy grande)
+        // Si SAM filtró suficientes puntos úsalos; si no, usar todos
         let allDepths = (samMask != nil && maskedDepths.count >= 10) ? maskedDepths : rawDepths
         guard allDepths.count >= 10 else { return }
 
-        // La cara frontal de la caja es el cluster de mínima profundidad
+        // La cara frontal es el cluster de mínima profundidad
         let minD = allDepths.min()!
         let frontCluster = allDepths.filter { abs($0 - minD) < 0.15 }
         let sorted = frontCluster.sorted()
-        let centerD = sorted[sorted.count / 2]  // mediana de la cara frontal
+        let centerD = sorted[sorted.count / 2]
 
-        // 2. Proyectar los 4 corners del bbox YOLO a 3D usando centerD
+        // 2. Bbox 2D de los puntos del depth map que pertenecen a la cara frontal (±12 cm)
+        // Esto alinea el wireframe con las aristas reales de la cara frontal,
+        // no con los corners del bbox de YOLO (que incluye caras laterales/superior).
+        var fMinX = CGFloat.infinity, fMaxX = -CGFloat.infinity
+        var fMinY = CGFloat.infinity, fMaxY = -CGFloat.infinity
+        for (i, d) in rawDepths.enumerated() {
+            guard abs(d - centerD) < 0.12 else { continue }
+            let p = rawPoints[i]
+            if p.x < fMinX { fMinX = p.x }; if p.x > fMaxX { fMaxX = p.x }
+            if p.y < fMinY { fMinY = p.y }; if p.y > fMaxY { fMaxY = p.y }
+        }
+        let faceBox = (fMaxX - fMinX > 20 && fMaxY - fMinY > 20)
+            ? CGRect(x: fMinX, y: fMinY, width: fMaxX - fMinX, height: fMaxY - fMinY)
+            : box  // fallback al bbox YOLO si no hay suficientes puntos frontales
+
+        // 3. Proyectar corners de la cara frontal a 3D
         func project(_ sx: CGFloat, _ sy: CGFloat) -> SIMD3<Float>? {
             let d = sampleDepth(at: CGPoint(x: sx, y: sy),
                                 frame: frame, depth: depth, vp: vp) ?? centerD
@@ -473,10 +491,10 @@ final class BoxDetectionCoordinator: NSObject {
                                      frame: frame, vp: vp)
         }
         guard
-            let bl = project(box.minX, box.maxY),
-            let br = project(box.maxX, box.maxY),
-            let tl = project(box.minX, box.minY),
-            let tr = project(box.maxX, box.minY)
+            let bl = project(faceBox.minX, faceBox.maxY),
+            let br = project(faceBox.maxX, faceBox.maxY),
+            let tl = project(faceBox.minX, faceBox.minY),
+            let tr = project(faceBox.maxX, faceBox.minY)
         else { return }
 
         // Normal de la cara: dirección cámara → caja, estable sin importar el depth de los corners
