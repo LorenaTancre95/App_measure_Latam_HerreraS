@@ -123,34 +123,47 @@ final class GeminiDetector {
 
     private func parseResponse(data: Data, ms: Int,
                                 completion: (GeminiCorners?) -> Void) {
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let cands   = json["candidates"] as? [[String: Any]],
-              let content = cands.first?["content"] as? [String: Any],
-              let parts   = content["parts"] as? [[String: Any]],
-              let text    = parts.first?["text"] as? String,
-              let rData   = text.data(using: .utf8),
-              let result  = try? JSONSerialization.jsonObject(with: rData) as? [String: Any]
-        else {
-            status = "Gemini: parse err \(ms)ms"; completion(nil); return
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            status = "Gemini: bad JSON \(ms)ms"; completion(nil); return
         }
-
-        guard let detected = result["boxDetected"] as? Bool, detected,
-              let cd = result["corners"] as? [String: Any]
-        else {
+        // API-level error (invalid key, quota, bad model, bad schema)
+        if let err = json["error"] as? [String: Any],
+           let msg = err["message"] as? String {
+            status = "API err: \(msg.prefix(50))"
+            completion(nil); return
+        }
+        guard let cands = json["candidates"] as? [[String: Any]] else {
+            let keys = json.keys.joined(separator: ",")
+            status = "Gemini: no candidates [\(keys)] \(ms)ms"
+            completion(nil); return
+        }
+        guard let content = cands.first?["content"] as? [String: Any],
+              let parts   = content["parts"] as? [[String: Any]],
+              let text    = parts.first?["text"] as? String else {
+            status = "Gemini: no text \(ms)ms"; completion(nil); return
+        }
+        guard let rData  = text.data(using: .utf8),
+              let result = try? JSONSerialization.jsonObject(with: rData) as? [String: Any] else {
+            let preview = String(text.prefix(60)).replacingOccurrences(of: "\n", with: " ")
+            status = "Gemini: inner JSON err: \(preview)"
+            completion(nil); return
+        }
+        let detected = (result["boxDetected"] as? Bool)
+                    ?? ((result["boxDetected"] as? NSNumber)?.boolValue ?? false)
+        guard detected, let cd = result["corners"] as? [String: Any] else {
             status = "Gemini: no box \(ms)ms"; completion(nil); return
         }
 
         func pt(_ k: String) -> CGPoint? {
             guard let d = cd[k] as? [String: Any],
-                  let x = d["x"] as? Double,
-                  let y = d["y"] as? Double
+                  let x = (d["x"] as? NSNumber)?.doubleValue,
+                  let y = (d["y"] as? NSNumber)?.doubleValue
             else { return nil }
             return CGPoint(x: x / 100.0, y: y / 100.0)
         }
 
         guard let bl = pt("bottomLeft"),  let br = pt("bottomRight"),
-              let tl = pt("topLeft"),     let tr = pt("topRight")
-        else {
+              let tl = pt("topLeft"),     let tr = pt("topRight") else {
             status = "Gemini: corner err \(ms)ms"; completion(nil); return
         }
 
