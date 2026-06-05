@@ -209,11 +209,11 @@ final class BoxDetectionCoordinator: NSObject {
         guard let sv = sceneView, detectionLayer.superlayer == nil else { return }
         detectionLayer.frame = sv.bounds
         labelLayer.frame     = CGRect(x: 0, y: 0, width: 120, height: 22)
-        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 44)
+        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 56)
         sv.layer.addSublayer(detectionLayer)
         sv.layer.addSublayer(labelLayer)
         sv.layer.addSublayer(debugLayer)
-        debugLayer.string = modelStatusText
+        debugLayer.string = "\(modelStatusText)\n\(sam.status)"
     }
 
     private func updateDebug(_ text: String) {
@@ -228,6 +228,7 @@ final class BoxDetectionCoordinator: NSObject {
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView, !scanInFlight else { return }
         attachLayersIfNeeded()
+        updateDebug("\(modelStatusText)\n\(sam.status)")
         let vp = sv.bounds.size
         let cx = vp.width / 2, cy = vp.height / 2
         scanInFlight = true
@@ -278,7 +279,7 @@ final class BoxDetectionCoordinator: NSObject {
                                    viewportSize vp: CGSize,
                                    cx: CGFloat, cy: CGFloat) -> YOLOPrediction? {
         guard let model = yoloModel else {
-            updateDebug("\(modelStatusText)\nNO MODEL")
+            updateDebug("\(modelStatusText)\nNO MODEL\n\(sam.status)")
             return nil
         }
 
@@ -305,7 +306,7 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard let boxes = boxesOutput else {
             let types = allObsTypes.prefix(3).joined(separator: ", ")
-            updateDebug("\(modelStatusText)\nnil output | [\(types)]")
+            updateDebug("\(modelStatusText)\nnil output | [\(types)]\n\(sam.status)")
             return nil
         }
 
@@ -340,7 +341,7 @@ final class BoxDetectionCoordinator: NSObject {
                 maskCoefficients: coefs))
         }
         guard !predictions.isEmpty else {
-            updateDebug("\(modelStatusText)\nC=\(C) N=\(N) cls=\(numClasses)\nno preds>thr")
+            updateDebug("\(modelStatusText)\nC=\(C) N=\(N) cls=\(numClasses) no det\n\(sam.status)")
             return nil
         }
 
@@ -354,7 +355,7 @@ final class BoxDetectionCoordinator: NSObject {
             let rb = $1.screenRect(viewportSize: vp, modelSize: modelInputSize)
             return hypot(ra.midX - cx, ra.midY - cy) < hypot(rb.midX - cx, rb.midY - cy)
         })!
-        updateDebug("\(modelStatusText)\ncls=\(Int(best.score*100))%")
+        updateDebug("\(modelStatusText)\ncls=\(Int(best.score*100))% \(sam.status)")
         return best
     }
 
