@@ -457,9 +457,12 @@ final class BoxDetectionCoordinator: NSObject {
             let tr = project(box.maxX, box.minY)
         else { return }
 
-        let fRight = simd_normalize(br - bl)
-        let fUp    = simd_normalize(tl - bl)
-        let faceN  = simd_normalize(simd_cross(fRight, fUp))
+        // Normal de la cara: dirección cámara → caja, estable sin importar el depth de los corners
+        let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                    frame.camera.transform.columns.3.y,
+                                    frame.camera.transform.columns.3.z)
+        let faceCenter = (bl + br + tl + tr) / 4
+        let faceN = simd_normalize(camPos3 - faceCenter)
 
         let c = Double(simd_distance(bl, br)) * 100  // comprimento (ancho cara frontal)
         let a = Double(simd_distance(tl, bl)) * 100  // altura
