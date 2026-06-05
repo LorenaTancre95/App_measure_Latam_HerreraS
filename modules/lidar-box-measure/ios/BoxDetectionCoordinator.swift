@@ -429,16 +429,12 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard box.width > 15, box.height > 15 else { return }
 
-        // 1. Muestrear grilla 14×14 dentro del bbox
-        // Recolectamos todos los depths en un solo pase; si SAM está disponible,
-        // acumulamos también el subconjunto filtrado. Si SAM filtra demasiado, caemos al total.
+        // 1. Grilla 14×14 para estimar centerD (rápido)
         let G = 14
         let maskW = SAMInference.maskW, maskH = SAMInference.maskH
         var rawDepths:    [Float] = []
-        var rawPoints:    [CGPoint] = []
         var maskedDepths: [Float] = []
         rawDepths.reserveCapacity(G * G)
-        rawPoints.reserveCapacity(G * G)
         maskedDepths.reserveCapacity(G * G)
 
         for r in 0..<G {
@@ -448,7 +444,6 @@ final class BoxDetectionCoordinator: NSObject {
                 guard let d = sampleDepth(at: CGPoint(x: sx, y: sy),
                                           frame: frame, depth: depth, vp: vp) else { continue }
                 rawDepths.append(d)
-                rawPoints.append(CGPoint(x: sx, y: sy))
                 if let mask = samMask {
                     let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
                     let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
@@ -457,67 +452,59 @@ final class BoxDetectionCoordinator: NSObject {
             }
         }
 
-        // Si SAM filtró suficientes puntos úsalos; si no, usar todos
         let allDepths = (samMask != nil && maskedDepths.count >= 10) ? maskedDepths : rawDepths
         guard allDepths.count >= 10 else { return }
 
-        // La cara frontal es el cluster de mínima profundidad
         let minD = allDepths.min()!
         let frontCluster = allDepths.filter { abs($0 - minD) < 0.15 }
-        let sorted = frontCluster.sorted()
-        let centerD = sorted[sorted.count / 2]
+        let sortedFront = frontCluster.sorted()
+        let centerD = sortedFront[sortedFront.count / 2]
 
-        // 2. Bbox 2D de los puntos del depth map que pertenecen a la cara frontal (±12 cm)
-        // Esto alinea el wireframe con las aristas reales de la cara frontal,
-        // no con los corners del bbox de YOLO (que incluye caras laterales/superior).
-        var fMinX = CGFloat.infinity, fMaxX = -CGFloat.infinity
-        var fMinY = CGFloat.infinity, fMaxY = -CGFloat.infinity
-        for (i, d) in rawDepths.enumerated() {
-            guard abs(d - centerD) < 0.12 else { continue }
-            let p = rawPoints[i]
-            if p.x < fMinX { fMinX = p.x }; if p.x > fMaxX { fMaxX = p.x }
-            if p.y < fMinY { fMinY = p.y }; if p.y > fMaxY { fMaxY = p.y }
-        }
-        let faceBox = (fMaxX - fMinX > 20 && fMaxY - fMinY > 20)
-            ? CGRect(x: fMinX, y: fMinY, width: fMaxX - fMinX, height: fMaxY - fMinY)
-            : box  // fallback al bbox YOLO si no hay suficientes puntos frontales
-
-        // 3. Proyectar corners de la cara frontal a 3D
-        func project(_ sx: CGFloat, _ sy: CGFloat) -> SIMD3<Float>? {
-            let d = sampleDepth(at: CGPoint(x: sx, y: sy),
-                                frame: frame, depth: depth, vp: vp) ?? centerD
-            let clamped = abs(d - centerD) < 0.25 ? d : centerD
-            return worldPointAtDepth(CGPoint(x: sx, y: sy), depth: clamped,
-                                     frame: frame, vp: vp)
-        }
-        guard
-            let bl = project(faceBox.minX, faceBox.maxY),
-            let br = project(faceBox.maxX, faceBox.maxY),
-            let tl = project(faceBox.minX, faceBox.minY),
-            let tr = project(faceBox.maxX, faceBox.minY)
-        else { return }
-
-        // Normal de la cara: dirección cámara → caja, estable sin importar el depth de los corners
+        // 2. Proyectar pixels del depth map (cara frontal) directamente a 3D
+        // Mucho más preciso que proyectar 4 corners 2D de YOLO: usa cientos de puntos reales.
         let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
                                     frame.camera.transform.columns.3.y,
                                     frame.camera.transform.columns.3.z)
-        let faceCenter = (bl + br + tl + tr) / 4
-        let faceN = simd_normalize(camPos3 - faceCenter)
+        let frontPts3D = collectFrontFacePoints(centerD: centerD, yoloBox: box,
+                                                 samMask: samMask, frame: frame,
+                                                 depth: depth, vp: vp)
+        guard frontPts3D.count >= 20 else { return }
 
-        let c = Double(simd_distance(bl, br)) * 100  // comprimento (ancho cara frontal)
-        let a = Double(simd_distance(tl, bl)) * 100  // altura
+        // 3. Medir cara frontal en 3D: proyectar puntos sobre el plano de la cara
+        let centroid3D = frontPts3D.reduce(.zero, +) / Float(frontPts3D.count)
+        let faceN = simd_normalize(camPos3 - centroid3D)
+        let faceRRaw = simd_cross(SIMD3<Float>(0, 1, 0), faceN)
+        let faceR = simd_length(faceRRaw) > 0.001 ? simd_normalize(faceRRaw)
+                                                   : SIMD3<Float>(1, 0, 0)
+        let faceU = simd_cross(faceN, faceR)  // ≈ world-up proyectado al plano de cara
+
+        var minR: Float = .infinity, maxR: Float = -.infinity
+        var minU: Float = .infinity, maxU: Float = -.infinity
+        for p in frontPts3D {
+            let d = p - centroid3D
+            let pr = simd_dot(d, faceR), pu = simd_dot(d, faceU)
+            if pr < minR { minR = pr }; if pr > maxR { maxR = pr }
+            if pu < minU { minU = pu }; if pu > maxU { maxU = pu }
+        }
+
+        let bl = centroid3D + faceR * minR + faceU * minU
+        let br = centroid3D + faceR * maxR + faceU * minU
+        let tl = centroid3D + faceR * minR + faceU * maxU
+        let tr = centroid3D + faceR * maxR + faceU * maxU
+
+        let c = Double(maxR - minR) * 100
+        let a = Double(maxU - minU) * 100
         guard c > 3, c < 300, a > 3, a < 300 else { return }
 
-        // 3. Estimar profundidad de la caja
-        // Si la cámara está levemente ladeada, los píxeles de las caras laterales/superior
-        // tienen profundidad un poco mayor que la cara frontal.
-        let deeperSamples = allDepths.filter { $0 > centerD + 0.06 && $0 < centerD + 0.70 }
+        // 4. Profundidad de la caja: percentil 75 de deeper samples para evitar outliers de fondo
+        let deeperSamples = allDepths.filter { $0 > centerD + 0.06 && $0 < centerD + 0.65 }
         let depthEst: Float
         if deeperSamples.count >= 6 {
-            let maxD = deeperSamples.max()!
-            depthEst = max(maxD - centerD, 0.03)
+            let ds = deeperSamples.sorted()
+            let p75 = ds[min(ds.count - 1, ds.count * 3 / 4)]
+            depthEst = max(p75 - centerD, 0.03)
         } else {
-            depthEst = Float(min(c, a) / 100.0) * 0.65  // fallback geométrico
+            depthEst = Float(min(c, a) / 100.0) * 0.65
         }
         let l = max(Double(depthEst) * 100, 3.0)
 
@@ -542,6 +529,68 @@ final class BoxDetectionCoordinator: NSObject {
         updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!,
                       bbl: smoothBBL!, bbr: smoothBBR!, btl: smoothBTL!, btr: smoothBTR!,
                       measurement: m)
+    }
+
+    // MARK: - Colectar puntos 3D de la cara frontal desde el depth map
+    // Itera el depth map con step=2 dentro del yoloBox, filtrando depth ≈ centerD (±10cm)
+    // y máscara SAM. Proyecta directamente a mundo 3D sin pasar por pantalla.
+    private func collectFrontFacePoints(centerD: Float, yoloBox: CGRect, samMask: [Bool]?,
+                                         frame: ARFrame, depth: ARDepthData,
+                                         vp: CGSize) -> [SIMD3<Float>] {
+        let dm = depth.depthMap
+        let dW = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
+
+        let invTx = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let corners: [CGPoint] = [
+            CGPoint(x: yoloBox.minX / vp.width, y: yoloBox.minY / vp.height),
+            CGPoint(x: yoloBox.maxX / vp.width, y: yoloBox.minY / vp.height),
+            CGPoint(x: yoloBox.minX / vp.width, y: yoloBox.maxY / vp.height),
+            CGPoint(x: yoloBox.maxX / vp.width, y: yoloBox.maxY / vp.height),
+        ].map { $0.applying(invTx) }
+        let dxS = max(0, Int(corners.map { $0.x }.min()! * CGFloat(dW)))
+        let dxE = min(dW - 1, Int(corners.map { $0.x }.max()! * CGFloat(dW)))
+        let dyS = max(0, Int(corners.map { $0.y }.min()! * CGFloat(dH)))
+        let dyE = min(dH - 1, Int(corners.map { $0.y }.max()! * CGFloat(dH)))
+
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dm, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(dm) else { return [] }
+        let dptr = base.assumingMemoryBound(to: Float32.self)
+
+        let displayTx = frame.displayTransform(for: .portrait, viewportSize: vp)
+        let maskW = SAMInference.maskW, maskH = SAMInference.maskH
+        let intr = frame.camera.intrinsics
+        let iW   = Float(frame.camera.imageResolution.width)
+        let iH   = Float(frame.camera.imageResolution.height)
+
+        var points: [SIMD3<Float>] = []
+
+        let step = 2
+        for dy in stride(from: dyS, through: dyE, by: step) {
+            for dx in stride(from: dxS, through: dxE, by: step) {
+                let d = dptr[dy * dW + dx]
+                guard d > 0.02, d < 8.0, abs(d - centerD) < 0.10 else { continue }
+
+                // Filtrar con máscara SAM (necesita posición en pantalla)
+                if let mask = samMask {
+                    let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
+                    let ns = nc.applying(displayTx)
+                    let sx = ns.x * vp.width, sy = ns.y * vp.height
+                    let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
+                    let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
+                    guard mask[my * maskW + mx] else { continue }
+                }
+
+                // Depth pixel → cámara imagen → cámara 3D → mundo (sin pasar por pantalla)
+                let imgX = Float(dx) / Float(dW) * iW
+                let imgY = Float(dy) / Float(dH) * iH
+                let xCam = (imgX - intr[2][0]) / intr[0][0] * d
+                let yCam = (imgY - intr[2][1]) / intr[1][1] * d
+                let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, -d, 1)
+                points.append(SIMD3<Float>(pt.x, pt.y, pt.z))
+            }
+        }
+        return points
     }
 
     // MARK: - LiDAR helpers (fallback)
