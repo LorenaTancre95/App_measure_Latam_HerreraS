@@ -263,6 +263,7 @@ final class BoxDetectionCoordinator: NSObject {
             let samMask = self.sam.getMask(pixelBuffer: pb,
                                            screenBox: screenBox,
                                            viewportSize: vp)
+            self.updateDebug("\(self.modelStatusText)\n\(self.sam.status)")
 
             // ── Fase 3: medición 3D (main thread por acceso a ARFrame) ───────
             DispatchQueue.main.async {
@@ -427,29 +428,33 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard box.width > 15, box.height > 15 else { return }
 
-        // 1. Muestrear grilla 14×14 dentro del bbox, filtrando con máscara SAM si está disponible
+        // 1. Muestrear grilla 14×14 dentro del bbox
+        // Recolectamos todos los depths en un solo pase; si SAM está disponible,
+        // acumulamos también el subconjunto filtrado. Si SAM filtra demasiado, caemos al total.
         let G = 14
         let maskW = SAMInference.maskW, maskH = SAMInference.maskH
-        var allDepths: [Float] = []
-        allDepths.reserveCapacity(G * G)
+        var rawDepths:    [Float] = []
+        var maskedDepths: [Float] = []
+        rawDepths.reserveCapacity(G * G)
+        maskedDepths.reserveCapacity(G * G)
+
         for r in 0..<G {
             for c in 0..<G {
                 let sx = box.minX + box.width  * CGFloat(c) / CGFloat(G - 1)
                 let sy = box.minY + box.height * CGFloat(r) / CGFloat(G - 1)
-
-                // Si tenemos máscara SAM, excluir pixels fuera de la segmentación
+                guard let d = sampleDepth(at: CGPoint(x: sx, y: sy),
+                                          frame: frame, depth: depth, vp: vp) else { continue }
+                rawDepths.append(d)
                 if let mask = samMask {
                     let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
                     let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
-                    guard mask[my * maskW + mx] else { continue }
-                }
-
-                if let d = sampleDepth(at: CGPoint(x: sx, y: sy),
-                                       frame: frame, depth: depth, vp: vp) {
-                    allDepths.append(d)
+                    if mask[my * maskW + mx] { maskedDepths.append(d) }
                 }
             }
         }
+
+        // Si SAM filtró suficientes puntos úsalos; si no, usar todos (SAM falló o caja muy grande)
+        let allDepths = (samMask != nil && maskedDepths.count >= 10) ? maskedDepths : rawDepths
         guard allDepths.count >= 10 else { return }
 
         // La cara frontal de la caja es el cluster de mínima profundidad
