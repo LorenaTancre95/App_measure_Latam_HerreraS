@@ -17,7 +17,7 @@ struct GeminiCorners {
 final class GeminiDetector {
 
     private let apiKey  = Bundle.main.infoDictionary?["GEMINI_API_KEY"] as? String ?? ""
-    private let model   = "gemini-1.5-flash"
+    private let model   = "gemini-2.0-flash"
     private let baseURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
     private(set) var status = "Gemini: init"
