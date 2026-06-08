@@ -350,16 +350,19 @@ final class BoxDetectionCoordinator: NSObject {
             for dy in stride(from: dyS, through: dyE, by: 3) {
                 for dx in stride(from: dxS, through: dxE, by: 3) {
                     let v = ptr[dy * dW + dx]
-                    if v > centerD + 0.06 && v < centerD + 0.65 { deeperSamples.append(v) }
+                    if v > centerD + 0.06 && v < centerD + 0.50 { deeperSamples.append(v) }
                 }
             }
         }
         CVPixelBufferUnlockBaseAddress(dm, .readOnly)
 
+        // Cap depth: una caja raramente es más profunda que su lado mayor
+        let maxDepthM = Float(max(c, a) / 100.0)
         let depthEst: Float
         if deeperSamples.count >= 6 {
             let ds = deeperSamples.sorted()
-            depthEst = max(ds[min(ds.count-1, ds.count*3/4)] - centerD, 0.03)
+            let raw = ds[min(ds.count-1, ds.count*3/4)] - centerD
+            depthEst = max(min(raw, maxDepthM), 0.03)
         } else {
             depthEst = Float(min(c, a) / 100.0) * 0.65
         }
