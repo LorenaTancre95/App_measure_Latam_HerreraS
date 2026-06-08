@@ -126,11 +126,14 @@ final class GeminiDetector {
         }
 
         guard let fbl = pt("fbl"), let fbr = pt("fbr"),
-              let ftl = pt("ftl"), let ftr = pt("ftr"),
-              let bbl = pt("bbl"), let bbr = pt("bbr"),
-              let btl = pt("btl"), let btr = pt("btr") else {
+              let ftl = pt("ftl"), let ftr = pt("ftr") else {
             status = "Gemini: vertex err \(ms)ms"; completion(nil); return
         }
+        // Corners traseros son opcionales — LiDAR los calcula por extrusion
+        let bbl = pt("bbl") ?? fbl
+        let bbr = pt("bbr") ?? fbr
+        let btl = pt("btl") ?? ftl
+        let btr = pt("btr") ?? ftr
 
         status = "Gemini OK \(ms)ms"
         completion(GeminiBox(fbl: fbl, fbr: fbr, ftl: ftl, ftr: ftr,
@@ -140,21 +143,18 @@ final class GeminiDetector {
     // MARK: - Prompt
 
     private var detectionPrompt: String {
-        return "Find the cardboard box in this image and locate all 8 corners of the 3D box. " +
+        return "You are analyzing an image to detect a cardboard box. " +
+               "Find the main cardboard box and identify the 4 corners of its FRONT face " +
+               "(the face most directly facing the camera — do NOT estimate hidden corners). " +
                "Reply with ONLY a raw JSON object, no markdown, no explanation. " +
-               "The 8 vertices are: " +
-               "fbl=front-bottom-left, fbr=front-bottom-right, ftl=front-top-left, ftr=front-top-right " +
-               "(the face closest to the camera), " +
-               "bbl=back-bottom-left, bbr=back-bottom-right, btl=back-top-left, btr=back-top-right " +
-               "(the face farthest from camera, visible via top or side faces). " +
-               "Estimate hidden corners by extending the visible edges. " +
-               "x and y are percentages 0-100 of image width and height. " +
-               "Format: {\"boxDetected\":true,\"vertices\":{" +
-               "\"fbl\":{\"x\":10,\"y\":80},\"fbr\":{\"x\":60,\"y\":80}," +
-               "\"ftl\":{\"x\":10,\"y\":30},\"ftr\":{\"x\":60,\"y\":30}," +
-               "\"bbl\":{\"x\":60,\"y\":85},\"bbr\":{\"x\":90,\"y\":85}," +
-               "\"btl\":{\"x\":60,\"y\":20},\"btr\":{\"x\":90,\"y\":20}}} " +
-               "If no box: {\"boxDetected\":false,\"vertices\":{}}"
+               "Label each corner explicitly: " +
+               "ftl = front-top-left, ftr = front-top-right, " +
+               "fbl = front-bottom-left, fbr = front-bottom-right. " +
+               "x and y are percentages 0-100 of image width and height (origin top-left). " +
+               "Example format: {\"boxDetected\":true,\"vertices\":{" +
+               "\"ftl\":{\"x\":20,\"y\":25},\"ftr\":{\"x\":65,\"y\":30}," +
+               "\"fbl\":{\"x\":15,\"y\":70},\"fbr\":{\"x\":60,\"y\":75}}} " +
+               "If no box is visible: {\"boxDetected\":false,\"vertices\":{}}"
     }
 
     // MARK: - Imagen
