@@ -221,9 +221,10 @@ final class BoxDetectionCoordinator: NSObject {
         debugLayer.isWrapped       = true
 
         wireframeLayer.fillColor   = UIColor.clear.cgColor
-        wireframeLayer.strokeColor = UIColor(red: 0.0, green: 0.90, blue: 0.3, alpha: 1).cgColor
-        wireframeLayer.lineWidth   = 2.5
+        wireframeLayer.strokeColor = UIColor(red: 1.0, green: 0.25, blue: 0.1, alpha: 1).cgColor
+        wireframeLayer.lineWidth   = 3.5
         wireframeLayer.lineCap     = .round
+        wireframeLayer.lineJoin    = .round
     }
 
     private func attachLayersIfNeeded() {
@@ -937,13 +938,13 @@ final class BoxDetectionCoordinator: NSObject {
             let n = makeLine(from: s, to: e, color: green)
             sv.scene.rootNode.addChildNode(n); overlayNodes.append(n)
         }
-        let cStr = "\(Int(measurement.comprimento.rounded())) cm"
-        let aStr = "\(Int(measurement.altura.rounded())) cm"
-        let lStr = "\(Int(measurement.largura.rounded())) cm"
+        let cStr = "Ancho: \(Int(measurement.comprimento.rounded())) cm"
+        let aStr = "Alto: \(Int(measurement.altura.rounded())) cm"
+        let lStr = "Largo: \(Int(measurement.largura.rounded())) cm"
         let labels: [(String, SIMD3<Float>)] = [
             (cStr, (bl+br)/2 + up * (-0.06)),
-            (aStr, (bl+tl)/2 + right * (-0.07)),
-            (lStr, (br+bbr)/2 + right * 0.07)
+            (aStr, (bl+tl)/2 + right * (-0.09)),
+            (lStr, (br+bbr)/2 + right * 0.09)
         ]
         for (txt, pos) in labels {
             let n = makeTextNode(txt, color: green)
