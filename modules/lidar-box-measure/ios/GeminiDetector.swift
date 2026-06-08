@@ -18,7 +18,7 @@ final class GeminiDetector {
 
     private let apiKey  = Bundle.main.infoDictionary?["GEMINI_API_KEY"] as? String ?? ""
     private let model   = "gemini-2.0-flash"
-    private let baseURL = "https://generativelanguage.googleapis.com/v1/models"
+    private let baseURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
     private(set) var status = "Gemini: init"
 
@@ -71,51 +71,11 @@ final class GeminiDetector {
         let textPart:   [String: Any] = ["text": detectionPrompt]
         let content:    [String: Any] = ["parts": [imagePart, textPart]]
 
-        let genConfig: [String: Any] = [
-            "responseMimeType": "application/json",
-            "responseSchema": buildSchema()
-        ]
-
         let body: [String: Any] = [
-            "contents": [content],
-            "generationConfig": genConfig
+            "contents": [content]
         ]
 
         return try? JSONSerialization.data(withJSONObject: body)
-    }
-
-    private func buildSchema() -> [String: Any] {
-        let numType: [String: Any]  = ["type": "NUMBER"]
-        let boolType: [String: Any] = ["type": "BOOLEAN"]
-
-        let xyProps: [String: Any]  = ["x": numType, "y": numType]
-        let cornerSchema: [String: Any] = [
-            "type": "OBJECT",
-            "properties": xyProps,
-            "required": ["x", "y"]
-        ]
-
-        let cornersProps: [String: Any] = [
-            "bottomLeft":  cornerSchema,
-            "bottomRight": cornerSchema,
-            "topLeft":     cornerSchema,
-            "topRight":    cornerSchema
-        ]
-        let cornersSchema: [String: Any] = [
-            "type": "OBJECT",
-            "properties": cornersProps,
-            "required": ["bottomLeft", "bottomRight", "topLeft", "topRight"]
-        ]
-
-        let rootProps: [String: Any] = [
-            "boxDetected": boolType,
-            "corners": cornersSchema
-        ]
-        return [
-            "type": "OBJECT",
-            "properties": rootProps,
-            "required": ["boxDetected", "corners"]
-        ]
     }
 
     // MARK: - Response parsing
@@ -141,9 +101,15 @@ final class GeminiDetector {
               let text    = parts.first?["text"] as? String else {
             status = "Gemini: no text \(ms)ms"; completion(nil); return
         }
-        guard let rData  = text.data(using: .utf8),
+        // Strip markdown code blocks if Gemini wraps the JSON
+        var clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let r = clean.range(of: "```json") { clean = String(clean[r.upperBound...]) }
+        if let r = clean.range(of: "```")     { clean = String(clean[clean.startIndex..<r.lowerBound]) }
+        clean = clean.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let rData  = clean.data(using: .utf8),
               let result = try? JSONSerialization.jsonObject(with: rData) as? [String: Any] else {
-            let preview = String(text.prefix(60)).replacingOccurrences(of: "\n", with: " ")
+            let preview = String(clean.prefix(60)).replacingOccurrences(of: "\n", with: " ")
             status = "Gemini: inner JSON err: \(preview)"
             completion(nil); return
         }
@@ -174,13 +140,14 @@ final class GeminiDetector {
     // MARK: - Prompt
 
     private var detectionPrompt: String {
-        return "Analyze this image and find the cardboard box or rectangular package. " +
-               "Return the 4 corners of the FRONT FACE (the face closest to the camera) " +
-               "as percentage coordinates 0 to 100 of image width and height. " +
-               "bottomLeft is the bottom-left corner, bottomRight is the bottom-right corner, " +
-               "topLeft is the top-left corner, topRight is the top-right corner. " +
-               "Place corners exactly at the physical edges of the box. " +
-               "If no box is visible set boxDetected to false."
+        return "Find the cardboard box front face in this image. " +
+               "Reply with ONLY a raw JSON object, no markdown, no explanation. " +
+               "Format: {\"boxDetected\":true,\"corners\":{\"bottomLeft\":{\"x\":10,\"y\":80}," +
+               "\"bottomRight\":{\"x\":90,\"y\":80},\"topLeft\":{\"x\":10,\"y\":20}," +
+               "\"topRight\":{\"x\":90,\"y\":20}}} " +
+               "where x and y are percentages 0-100 of image width and height. " +
+               "If no box visible: {\"boxDetected\":false,\"corners\":{\"bottomLeft\":{\"x\":0,\"y\":0}," +
+               "\"bottomRight\":{\"x\":0,\"y\":0},\"topLeft\":{\"x\":0,\"y\":0},\"topRight\":{\"x\":0,\"y\":0}}}"
     }
 
     // MARK: - Imagen
