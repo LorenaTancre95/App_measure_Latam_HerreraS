@@ -23,7 +23,7 @@ struct GeminiBox {
 final class GeminiDetector {
 
     private let apiKey  = Bundle.main.infoDictionary?["GEMINI_API_KEY"] as? String ?? ""
-    private let model   = "gemini-2.5-pro"
+    private let model   = "gemini-2.5-flash"
     private let baseURL = "https://generativelanguage.googleapis.com/v1beta/models"
 
     private(set) var status = "Gemini: init"
@@ -47,7 +47,7 @@ final class GeminiDetector {
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = bodyData
-        req.timeoutInterval = 15
+        req.timeoutInterval = 20
 
         let t0 = Date()
         URLSession.shared.dataTask(with: req) { [weak self] data, _, error in

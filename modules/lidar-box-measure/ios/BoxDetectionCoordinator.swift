@@ -98,6 +98,7 @@ final class BoxDetectionCoordinator: NSObject {
     private let detectionLayer = CAShapeLayer()
     private let labelLayer     = CATextLayer()
     private let debugLayer     = CATextLayer()
+    private let wireframeLayer = CAShapeLayer()
 
     // MARK: 3D wireframe (SceneKit)
     private var overlayNodes: [SCNNode] = []
@@ -218,14 +219,21 @@ final class BoxDetectionCoordinator: NSObject {
         debugLayer.alignmentMode   = .left
         debugLayer.contentsScale   = UIScreen.main.scale
         debugLayer.isWrapped       = true
+
+        wireframeLayer.fillColor   = UIColor.clear.cgColor
+        wireframeLayer.strokeColor = UIColor(red: 0.0, green: 0.90, blue: 0.3, alpha: 1).cgColor
+        wireframeLayer.lineWidth   = 2.5
+        wireframeLayer.lineCap     = .round
     }
 
     private func attachLayersIfNeeded() {
         guard let sv = sceneView, detectionLayer.superlayer == nil else { return }
-        detectionLayer.frame = sv.bounds
-        labelLayer.frame     = CGRect(x: 0, y: 0, width: 120, height: 22)
-        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 120)
+        detectionLayer.frame  = sv.bounds
+        wireframeLayer.frame  = sv.bounds
+        labelLayer.frame      = CGRect(x: 0, y: 0, width: 120, height: 22)
+        debugLayer.frame      = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 120)
         sv.layer.addSublayer(detectionLayer)
+        sv.layer.addSublayer(wireframeLayer)
         sv.layer.addSublayer(labelLayer)
         sv.layer.addSublayer(debugLayer)
         debugLayer.string = gemini.status
@@ -280,9 +288,12 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Medición: Gemini 8 vértices → 3D directo con LiDAR depth
+    // MARK: - Medición: Gemini 8 vértices → wireframe 2D + PCA LiDAR para medidas
     private func measureWithBox(_ box: GeminiBox,
                                  frame: ARFrame, depth: ARDepthData, vp: CGSize) {
+        // Dibujar wireframe 2D inmediatamente desde los vértices de Gemini
+        DispatchQueue.main.async { self.draw2DBox(box, in: vp) }
+
         // Lock check
         if isLocked {
             if let lt = lockedTransform {
@@ -296,128 +307,124 @@ final class BoxDetectionCoordinator: NSObject {
         }
         lockedTransform = frame.camera.transform
 
-        // Coordenadas pantalla de los 8 vértices (box coords son 0-1)
+        // Cara frontal en coordenadas pantalla
         func sp(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * vp.width, y: p.y * vp.height) }
         let sFBL = sp(box.fbl), sFBR = sp(box.fbr)
         let sFTL = sp(box.ftl), sFTR = sp(box.ftr)
-        let sBBL = sp(box.bbl), sBBR = sp(box.bbr)
-        let sBTL = sp(box.btl), sBTR = sp(box.btr)
-
-        // Bounding rect de la cara frontal para la UI
         let frontXs = [sFBL.x, sFBR.x, sFTL.x, sFTR.x]
         let frontYs = [sFBL.y, sFBR.y, sFTL.y, sFTR.y]
         let screenBox = CGRect(x: frontXs.min()!, y: frontYs.min()!,
                                width: frontXs.max()! - frontXs.min()!,
                                height: frontYs.max()! - frontYs.min()!)
         guard screenBox.width > 20, screenBox.height > 20 else { return }
-        DispatchQueue.main.async { self.drawDetectionRect(screenBox, label: "caja", in: vp) }
 
-        // Profundidad LiDAR en los 4 corners frontales
-        guard let dFBL = sampleDepthNeighborhood(at: sFBL, frame: frame, depth: depth, vp: vp),
-              let dFBR = sampleDepthNeighborhood(at: sFBR, frame: frame, depth: depth, vp: vp),
-              let dFTL = sampleDepthNeighborhood(at: sFTL, frame: frame, depth: depth, vp: vp),
-              let dFTR = sampleDepthNeighborhood(at: sFTR, frame: frame, depth: depth, vp: vp),
-              [dFBL, dFBR, dFTL, dFTR].allSatisfy({ $0 > 0.10 && $0 < 5.0 })
-        else { return }
+        // Profundidad del centro de la cara frontal
+        guard let centerD = sampleDepth(at: CGPoint(x: screenBox.midX, y: screenBox.midY),
+                                         frame: frame, depth: depth, vp: vp),
+              centerD > 0.15, centerD < 4.0 else { return }
 
-        let centerD = (dFBL + dFBR + dFTL + dFTR) / 4
+        // Recolectar puntos 3D de la cara frontal usando el polígono Gemini como máscara
+        let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                    frame.camera.transform.columns.3.y,
+                                    frame.camera.transform.columns.3.z)
+        let geminiQuad: [CGPoint] = [sFTL, sFTR, sFBR, sFBL]
+        let frontPts = collectFrontFacePoints(centerD: centerD, yoloBox: screenBox,
+                                               quadMask: geminiQuad, samMask: nil,
+                                               frame: frame, depth: depth, vp: vp)
+        guard frontPts.count >= 15 else { return }
 
-        // Profundidad LiDAR en corners traseros (pueden estar ocluidos → fallback centerD)
-        let dBBL = sampleDepthNeighborhood(at: sBBL, frame: frame, depth: depth, vp: vp) ?? centerD
-        let dBBR = sampleDepthNeighborhood(at: sBBR, frame: frame, depth: depth, vp: vp) ?? centerD
-        let dBTL = sampleDepthNeighborhood(at: sBTL, frame: frame, depth: depth, vp: vp) ?? centerD
-        let dBTR = sampleDepthNeighborhood(at: sBTR, frame: frame, depth: depth, vp: vp) ?? centerD
+        // Acumular puntos multi-frame y ejecutar PCA
+        accPoints.append(contentsOf: frontPts)
+        if accPoints.count > accMaxPoints { accPoints.removeFirst(accPoints.count - accMaxPoints) }
+        let ptsForPCA = accPoints.count >= 200 ? accPoints : frontPts
 
-        // Proyectar corners frontales a 3D
-        guard let p3FBL = worldPointAtDepth(sFBL, depth: dFBL, frame: frame, vp: vp),
-              let p3FBR = worldPointAtDepth(sFBR, depth: dFBR, frame: frame, vp: vp),
-              let p3FTL = worldPointAtDepth(sFTL, depth: dFTL, frame: frame, vp: vp),
-              let p3FTR = worldPointAtDepth(sFTR, depth: dFTR, frame: frame, vp: vp)
-        else { return }
+        let centroid = ptsForPCA.reduce(.zero, +) / Float(ptsForPCA.count)
+        let (faceR, faceU, faceN) = computeFacePCA(ptsForPCA, centroid: centroid, camPos: camPos3)
 
-        let width  = Double(simd_distance(p3FBL, p3FBR)) * 100  // comprimento
-        let height = Double(simd_distance(p3FBL, p3FTL)) * 100  // altura
-        guard width > 3, width < 300, height > 3, height < 300 else { return }
-
-        // Proyectar corners traseros con su profundidad LiDAR
-        let p3BBLraw = worldPointAtDepth(sBBL, depth: dBBL, frame: frame, vp: vp) ?? p3FBL
-        let p3BBRraw = worldPointAtDepth(sBBR, depth: dBBR, frame: frame, vp: vp) ?? p3FBR
-        let p3BTLraw = worldPointAtDepth(sBTL, depth: dBTL, frame: frame, vp: vp) ?? p3FTL
-        let p3BTRraw = worldPointAtDepth(sBTR, depth: dBTR, frame: frame, vp: vp) ?? p3FTR
-
-        // Separación media front→back: indica si los corners traseros tienen depth real
-        let avgSep = (simd_distance(p3FBL, p3BBLraw) + simd_distance(p3FBR, p3BBRraw) +
-                      simd_distance(p3FTL, p3BTLraw) + simd_distance(p3FTR, p3BTRraw)) / 4
-
-        let p3BBL: SIMD3<Float>, p3BBR: SIMD3<Float>
-        let p3BTL: SIMD3<Float>, p3BTR: SIMD3<Float>
-        let depthM: Float
-
-        if avgSep > 0.05 {
-            // Caja en ángulo: corners traseros tienen profundidad real de LiDAR
-            p3BBL = p3BBLraw; p3BBR = p3BBRraw
-            p3BTL = p3BTLraw; p3BTR = p3BTRraw
-            depthM = avgSep
-        } else {
-            // Vista frontal / oclusión: estimar depth con samples LiDAR más profundos en bbox
-            let dm = depth.depthMap
-            let dW = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
-            let invTx = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
-            let bboxNorm = [
-                CGPoint(x: screenBox.minX / vp.width, y: screenBox.minY / vp.height),
-                CGPoint(x: screenBox.maxX / vp.width, y: screenBox.maxY / vp.height)
-            ].map { $0.applying(invTx) }
-            let dxS = max(0,    Int(bboxNorm.map { $0.x }.min()! * CGFloat(dW)))
-            let dxE = min(dW-1, Int(bboxNorm.map { $0.x }.max()! * CGFloat(dW)))
-            let dyS = max(0,    Int(bboxNorm.map { $0.y }.min()! * CGFloat(dH)))
-            let dyE = min(dH-1, Int(bboxNorm.map { $0.y }.max()! * CGFloat(dH)))
-            var deeperSamples: [Float] = []
-            CVPixelBufferLockBaseAddress(dm, .readOnly)
-            if let base = CVPixelBufferGetBaseAddress(dm) {
-                let ptr = base.assumingMemoryBound(to: Float32.self)
-                for dy in stride(from: dyS, through: dyE, by: 3) {
-                    for dx in stride(from: dxS, through: dxE, by: 3) {
-                        let v = ptr[dy * dW + dx]
-                        if v > centerD + 0.06 && v < centerD + 0.50 { deeperSamples.append(v) }
-                    }
-                }
-            }
-            CVPixelBufferUnlockBaseAddress(dm, .readOnly)
-
-            let rawEst: Float
-            if deeperSamples.count >= 6 {
-                let ds = deeperSamples.sorted()
-                rawEst = ds[min(ds.count-1, ds.count*3/4)] - centerD
-            } else {
-                rawEst = Float(min(width, height) / 100.0) * 0.80
-            }
-            depthM = max(rawEst, 0.03)
-
-            // Extruir cara trasera a lo largo de la normal de la cara frontal
-            let faceN = simd_normalize(simd_cross(simd_normalize(p3FBR - p3FBL),
-                                                   simd_normalize(p3FTL - p3FBL)))
-            let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
-                                       frame.camera.transform.columns.3.y,
-                                       frame.camera.transform.columns.3.z)
-            let corrN = simd_dot(faceN, camPos3 - p3FBL) > 0 ? faceN : -faceN
-            let ext   = -corrN * depthM
-            p3BBL = p3FBL + ext; p3BBR = p3FBR + ext
-            p3BTL = p3FTL + ext; p3BTR = p3FTR + ext
+        var minR: Float = .infinity, maxR: Float = -.infinity
+        var minU: Float = .infinity, maxU: Float = -.infinity
+        for p in ptsForPCA {
+            let d = p - centroid
+            let pr = simd_dot(d, faceR), pu = simd_dot(d, faceU)
+            if pr < minR { minR = pr }; if pr > maxR { maxR = pr }
+            if pu < minU { minU = pu }; if pu > maxU { maxU = pu }
         }
 
-        let depth3 = max(Double(depthM) * 100, 3.0)
+        var bl = centroid + faceR * minR + faceU * minU
+        var br = centroid + faceR * maxR + faceU * minU
+        var tl = centroid + faceR * minR + faceU * maxU
+        var tr = centroid + faceR * maxR + faceU * maxU
+
+        let c = Double(maxR - minR) * 100
+        var a = Double(maxU - minU) * 100
+        guard c > 3, c < 300, a > 3, a < 300 else { return }
+
+        // Snap to floor
+        if let fy = floorWorldY {
+            let bottomY = min(bl.y, br.y)
+            let snap = fy - bottomY
+            if abs(snap) < 0.25 {
+                bl.y += snap; br.y += snap
+                tl.y += snap; tr.y += snap
+                a = Double(max(tl.y, tr.y) - fy) * 100
+            }
+        }
+        guard a > 3 else { return }
+
+        // Profundidad: samples LiDAR más profundos dentro del bbox
+        let dm = depth.depthMap
+        let dW = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
+        let invTx = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let bboxPts = [CGPoint(x: screenBox.minX/vp.width, y: screenBox.minY/vp.height),
+                       CGPoint(x: screenBox.maxX/vp.width, y: screenBox.maxY/vp.height)].map { $0.applying(invTx) }
+        let dxS = max(0,    Int(bboxPts.map { $0.x }.min()! * CGFloat(dW)))
+        let dxE = min(dW-1, Int(bboxPts.map { $0.x }.max()! * CGFloat(dW)))
+        let dyS = max(0,    Int(bboxPts.map { $0.y }.min()! * CGFloat(dH)))
+        let dyE = min(dH-1, Int(bboxPts.map { $0.y }.max()! * CGFloat(dH)))
+        var deeperSamples: [Float] = []
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        if let base = CVPixelBufferGetBaseAddress(dm) {
+            let ptr = base.assumingMemoryBound(to: Float32.self)
+            for dy in stride(from: dyS, through: dyE, by: 3) {
+                for dx in stride(from: dxS, through: dxE, by: 3) {
+                    let v = ptr[dy * dW + dx]
+                    if v > centerD + 0.06 && v < centerD + 0.50 { deeperSamples.append(v) }
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(dm, .readOnly)
+
+        let toBox = simd_normalize(centroid - camPos3)
+        let cosTheta = min(abs(simd_dot(faceN, -toBox)), 1.0)
+        let sinTheta = sqrt(max(0, 1 - cosTheta * cosTheta))
+        let cCorrected = cosTheta > 0.25 ? c / Double(cosTheta) : c
+        let maxDepthM = Float(cCorrected / 100.0)
+        let depthEst: Float
+        if deeperSamples.count >= 6 {
+            let ds = deeperSamples.sorted()
+            let rawApparent = ds[min(ds.count-1, ds.count*3/4)] - centerD
+            let rawCorrected = sinTheta > 0.25 ? rawApparent / sinTheta : rawApparent
+            depthEst = max(min(rawCorrected, maxDepthM), 0.03)
+        } else {
+            depthEst = Float(cCorrected / 100.0) * 0.80
+        }
+        let l = max(Double(depthEst) * 100, 3.0)
+
+        let ext  = -faceN * Float(l / 100)
+        let bbl  = bl + ext, bbr = br + ext
+        let btl  = tl + ext, btr = tr + ext
 
         let α = smoothAlpha
-        smoothBL  = smoothBL.map  { α*p3FBL + (1-α)*$0 } ?? p3FBL
-        smoothBR  = smoothBR.map  { α*p3FBR + (1-α)*$0 } ?? p3FBR
-        smoothTL  = smoothTL.map  { α*p3FTL + (1-α)*$0 } ?? p3FTL
-        smoothTR  = smoothTR.map  { α*p3FTR + (1-α)*$0 } ?? p3FTR
-        smoothBBL = smoothBBL.map { α*p3BBL + (1-α)*$0 } ?? p3BBL
-        smoothBBR = smoothBBR.map { α*p3BBR + (1-α)*$0 } ?? p3BBR
-        smoothBTL = smoothBTL.map { α*p3BTL + (1-α)*$0 } ?? p3BTL
-        smoothBTR = smoothBTR.map { α*p3BTR + (1-α)*$0 } ?? p3BTR
+        smoothBL  = smoothBL.map  { α*bl  + (1-α)*$0 } ?? bl
+        smoothBR  = smoothBR.map  { α*br  + (1-α)*$0 } ?? br
+        smoothTL  = smoothTL.map  { α*tl  + (1-α)*$0 } ?? tl
+        smoothTR  = smoothTR.map  { α*tr  + (1-α)*$0 } ?? tr
+        smoothBBL = smoothBBL.map { α*bbl + (1-α)*$0 } ?? bbl
+        smoothBBR = smoothBBR.map { α*bbr + (1-α)*$0 } ?? bbr
+        smoothBTL = smoothBTL.map { α*btl + (1-α)*$0 } ?? btl
+        smoothBTR = smoothBTR.map { α*btr + (1-α)*$0 } ?? btr
 
-        let m = NativeMeasurement(comprimento: width, largura: depth3, altura: height)
+        let m = NativeMeasurement(comprimento: cCorrected, largura: l, altura: a)
         addToBuffer(m)
         DispatchQueue.main.async {
             self.updateOverlay(bl: self.smoothBL!, br: self.smoothBR!,
@@ -565,7 +572,29 @@ final class BoxDetectionCoordinator: NSObject {
 
     private func clearDetectionLayer() {
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        detectionLayer.path = nil; labelLayer.string = nil
+        detectionLayer.path = nil; labelLayer.string = nil; wireframeLayer.path = nil
+        CATransaction.commit()
+    }
+
+    // MARK: - 2D wireframe (Gemini vertices directo en pantalla)
+    private func draw2DBox(_ box: GeminiBox, in vp: CGSize) {
+        wireframeLayer.frame = CGRect(origin: .zero, size: vp)
+        func sp(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * vp.width, y: p.y * vp.height) }
+        let fbl = sp(box.fbl), fbr = sp(box.fbr)
+        let ftl = sp(box.ftl), ftr = sp(box.ftr)
+        let bbl = sp(box.bbl), bbr = sp(box.bbr)
+        let btl = sp(box.btl), btr = sp(box.btr)
+
+        let path = UIBezierPath()
+        let edges: [(CGPoint, CGPoint)] = [
+            (fbl, fbr), (fbr, ftr), (ftr, ftl), (ftl, fbl),   // cara frontal
+            (bbl, bbr), (bbr, btr), (btr, btl), (btl, bbl),   // cara trasera
+            (fbl, bbl), (fbr, bbr), (ftl, btl), (ftr, btr)    // aristas laterales
+        ]
+        for (a, b) in edges { path.move(to: a); path.addLine(to: b) }
+
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        wireframeLayer.path = path.cgPath
         CATransaction.commit()
     }
 
@@ -931,6 +960,9 @@ final class BoxDetectionCoordinator: NSObject {
         overlayNodes.forEach { $0.removeFromParentNode() }
         overlayNodes.removeAll()
         clearDetectionLayer()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        wireframeLayer.path = nil
+        CATransaction.commit()
     }
 
     func reset() {
