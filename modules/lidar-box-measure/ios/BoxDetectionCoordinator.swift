@@ -276,7 +276,7 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Medición: Gemini corners → LiDAR depth → wireframe 3D
+    // MARK: - Medición: Gemini bbox → PCA 3D (mismo pipeline que YOLO)
     private func measureWithCorners(_ corners: GeminiCorners,
                                      frame: ARFrame, depth: ARDepthData, vp: CGSize) {
         // Lock check
@@ -292,57 +292,65 @@ final class BoxDetectionCoordinator: NSObject {
         }
         lockedTransform = frame.camera.transform
 
-        // Gemini da corners normalizados [0,1] → screen coords
-        let bl_s = CGPoint(x: corners.bottomLeft.x  * vp.width, y: corners.bottomLeft.y  * vp.height)
-        let br_s = CGPoint(x: corners.bottomRight.x * vp.width, y: corners.bottomRight.y * vp.height)
-        let tl_s = CGPoint(x: corners.topLeft.x     * vp.width, y: corners.topLeft.y     * vp.height)
-        let tr_s = CGPoint(x: corners.topRight.x    * vp.width, y: corners.topRight.y    * vp.height)
-
-        // Dibujar rect 2D de detección
-        let rxMin = min(bl_s.x, tl_s.x), rxMax = max(br_s.x, tr_s.x)
-        let ryMin = min(tl_s.y, tr_s.y), ryMax = max(bl_s.y, br_s.y)
+        // Gemini corners → bounding rect en pantalla
+        let xs = [corners.bottomLeft.x, corners.bottomRight.x, corners.topLeft.x, corners.topRight.x]
+        let ys = [corners.bottomLeft.y, corners.bottomRight.y, corners.topLeft.y, corners.topRight.y]
+        let rxMin = xs.min()! * vp.width,  rxMax = xs.max()! * vp.width
+        let ryMin = ys.min()! * vp.height, ryMax = ys.max()! * vp.height
         let screenBox = CGRect(x: rxMin, y: ryMin, width: rxMax-rxMin, height: ryMax-ryMin)
+        guard screenBox.width > 20, screenBox.height > 20 else { return }
         DispatchQueue.main.async { self.drawDetectionRect(screenBox, label: "caja", in: vp) }
 
-        // Profundidad LiDAR en cada corner (vecindario mediana)
-        guard let dBL = sampleDepthNeighborhood(at: bl_s, frame: frame, depth: depth, vp: vp),
-              let dBR = sampleDepthNeighborhood(at: br_s, frame: frame, depth: depth, vp: vp),
-              let dTL = sampleDepthNeighborhood(at: tl_s, frame: frame, depth: depth, vp: vp),
-              let dTR = sampleDepthNeighborhood(at: tr_s, frame: frame, depth: depth, vp: vp)
-        else { return }
+        // Profundidad del centro del bbox
+        guard let centerD = sampleDepth(at: CGPoint(x: screenBox.midX, y: screenBox.midY),
+                                         frame: frame, depth: depth, vp: vp),
+              centerD > 0.15, centerD < 4.0 else { return }
 
-        // Proyectar cada corner a 3D mundo
-        guard let p3BL = worldPointAtDepth(bl_s, depth: dBL, frame: frame, vp: vp),
-              let p3BR = worldPointAtDepth(br_s, depth: dBR, frame: frame, vp: vp),
-              let p3TL = worldPointAtDepth(tl_s, depth: dTL, frame: frame, vp: vp),
-              let p3TR = worldPointAtDepth(tr_s, depth: dTR, frame: frame, vp: vp)
-        else { return }
+        // Recolectar puntos 3D de la cara frontal con PCA (mismo que YOLO)
+        let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                    frame.camera.transform.columns.3.y,
+                                    frame.camera.transform.columns.3.z)
+        let frontPts = collectFrontFacePoints(centerD: centerD, yoloBox: screenBox,
+                                               samMask: nil, frame: frame,
+                                               depth: depth, vp: vp)
+        guard frontPts.count >= 15 else { return }
 
-        let c = Double(simd_distance(p3BL, p3BR)) * 100   // comprimento
-        let a = Double(simd_distance(p3BL, p3TL)) * 100   // altura
+        let centroid = frontPts.reduce(.zero, +) / Float(frontPts.count)
+        let (faceR, faceU, faceN) = computeFacePCA(frontPts, centroid: centroid, camPos: camPos3)
+
+        var minR: Float = .infinity, maxR: Float = -.infinity
+        var minU: Float = .infinity, maxU: Float = -.infinity
+        for p in frontPts {
+            let d = p - centroid
+            let pr = simd_dot(d, faceR), pu = simd_dot(d, faceU)
+            if pr < minR { minR = pr }; if pr > maxR { maxR = pr }
+            if pu < minU { minU = pu }; if pu > maxU { maxU = pu }
+        }
+
+        let bl = centroid + faceR * minR + faceU * minU
+        let br = centroid + faceR * maxR + faceU * minU
+        let tl = centroid + faceR * minR + faceU * maxU
+        let tr = centroid + faceR * maxR + faceU * maxU
+
+        let c = Double(maxR - minR) * 100
+        var a = Double(maxU - minU) * 100
+        if let fy = floorWorldY {
+            let topY = Double(max(tl.y, tr.y))
+            let hFloor = (topY - Double(fy)) * 100
+            if hFloor > 5 && hFloor < 300 { a = hFloor }
+        }
         guard c > 3, c < 300, a > 3, a < 300 else { return }
 
-        // Normal del plano frontal para extruir la cara trasera
-        let faceEdgeR = simd_normalize(p3BR - p3BL)
-        let faceEdgeU = simd_normalize(p3TL - p3BL)
-        var faceN = simd_normalize(simd_cross(faceEdgeR, faceEdgeU))
-        let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
-                                   frame.camera.transform.columns.3.y,
-                                   frame.camera.transform.columns.3.z)
-        if simd_dot(faceN, camPos - p3BL) < 0 { faceN = -faceN }
-
-        // Estimación de profundidad (largura): samples más profundos dentro del bbox
-        let centerD = (dBL + dBR + dTL + dTR) / 4
+        // Profundidad: samples LiDAR más profundos dentro del bbox
         let dm = depth.depthMap
         let dW = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
         let invTx = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
-        let bboxNorm = [bl_s, br_s, tl_s, tr_s].map {
-            CGPoint(x: $0.x / vp.width, y: $0.y / vp.height).applying(invTx)
-        }
-        let dxS = max(0,    Int(bboxNorm.map { $0.x }.min()! * CGFloat(dW)))
-        let dxE = min(dW-1, Int(bboxNorm.map { $0.x }.max()! * CGFloat(dW)))
-        let dyS = max(0,    Int(bboxNorm.map { $0.y }.min()! * CGFloat(dH)))
-        let dyE = min(dH-1, Int(bboxNorm.map { $0.y }.max()! * CGFloat(dH)))
+        let bboxPts = [CGPoint(x: screenBox.minX/vp.width, y: screenBox.minY/vp.height),
+                       CGPoint(x: screenBox.maxX/vp.width, y: screenBox.maxY/vp.height)].map { $0.applying(invTx) }
+        let dxS = max(0,    Int(bboxPts.map { $0.x }.min()! * CGFloat(dW)))
+        let dxE = min(dW-1, Int(bboxPts.map { $0.x }.max()! * CGFloat(dW)))
+        let dyS = max(0,    Int(bboxPts.map { $0.y }.min()! * CGFloat(dH)))
+        let dyE = min(dH-1, Int(bboxPts.map { $0.y }.max()! * CGFloat(dH)))
         var deeperSamples: [Float] = []
         CVPixelBufferLockBaseAddress(dm, .readOnly)
         if let base = CVPixelBufferGetBaseAddress(dm) {
@@ -356,7 +364,6 @@ final class BoxDetectionCoordinator: NSObject {
         }
         CVPixelBufferUnlockBaseAddress(dm, .readOnly)
 
-        // Cap depth: una caja raramente es más profunda que su lado mayor
         let maxDepthM = Float(max(c, a) / 100.0)
         let depthEst: Float
         if deeperSamples.count >= 6 {
@@ -366,32 +373,23 @@ final class BoxDetectionCoordinator: NSObject {
         } else {
             depthEst = Float(min(c, a) / 100.0) * 0.65
         }
-
-        var aFinal = a
-        if let fy = floorWorldY {
-            let topY = Double(max(p3TL.y, p3TR.y))
-            let hFloor = (topY - Double(fy)) * 100
-            if hFloor > 5 && hFloor < 300 { aFinal = hFloor }
-        }
         let l = max(Double(depthEst) * 100, 3.0)
 
-        // Cara trasera (extrusión)
         let ext = -faceN * Float(l / 100)
-        let bbl = p3BL + ext, bbr = p3BR + ext
-        let btl = p3TL + ext, btr = p3TR + ext
+        let bbl = bl + ext, bbr = br + ext
+        let btl = tl + ext, btr = tr + ext
 
-        // EMA smoothing
         let α = smoothAlpha
-        smoothBL  = smoothBL.map  { α*p3BL + (1-α)*$0 } ?? p3BL
-        smoothBR  = smoothBR.map  { α*p3BR + (1-α)*$0 } ?? p3BR
-        smoothTL  = smoothTL.map  { α*p3TL + (1-α)*$0 } ?? p3TL
-        smoothTR  = smoothTR.map  { α*p3TR + (1-α)*$0 } ?? p3TR
-        smoothBBL = smoothBBL.map { α*bbl  + (1-α)*$0 } ?? bbl
-        smoothBBR = smoothBBR.map { α*bbr  + (1-α)*$0 } ?? bbr
-        smoothBTL = smoothBTL.map { α*btl  + (1-α)*$0 } ?? btl
-        smoothBTR = smoothBTR.map { α*btr  + (1-α)*$0 } ?? btr
+        smoothBL  = smoothBL.map  { α*bl  + (1-α)*$0 } ?? bl
+        smoothBR  = smoothBR.map  { α*br  + (1-α)*$0 } ?? br
+        smoothTL  = smoothTL.map  { α*tl  + (1-α)*$0 } ?? tl
+        smoothTR  = smoothTR.map  { α*tr  + (1-α)*$0 } ?? tr
+        smoothBBL = smoothBBL.map { α*bbl + (1-α)*$0 } ?? bbl
+        smoothBBR = smoothBBR.map { α*bbr + (1-α)*$0 } ?? bbr
+        smoothBTL = smoothBTL.map { α*btl + (1-α)*$0 } ?? btl
+        smoothBTR = smoothBTR.map { α*btr + (1-α)*$0 } ?? btr
 
-        let m = NativeMeasurement(comprimento: c, largura: l, altura: aFinal)
+        let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
         addToBuffer(m)
         DispatchQueue.main.async {
             self.updateOverlay(bl: self.smoothBL!, br: self.smoothBR!,
