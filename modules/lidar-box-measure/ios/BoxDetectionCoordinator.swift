@@ -310,7 +310,14 @@ final class BoxDetectionCoordinator: NSObject {
         let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
                                     frame.camera.transform.columns.3.y,
                                     frame.camera.transform.columns.3.z)
+        let geminiQuad: [CGPoint] = [
+            CGPoint(x: corners.topLeft.x     * vp.width, y: corners.topLeft.y     * vp.height),
+            CGPoint(x: corners.topRight.x    * vp.width, y: corners.topRight.y    * vp.height),
+            CGPoint(x: corners.bottomRight.x * vp.width, y: corners.bottomRight.y * vp.height),
+            CGPoint(x: corners.bottomLeft.x  * vp.width, y: corners.bottomLeft.y  * vp.height),
+        ]
         let frontPts = collectFrontFacePoints(centerD: centerD, yoloBox: screenBox,
+                                               quadMask: geminiQuad,
                                                samMask: nil, frame: frame,
                                                depth: depth, vp: vp)
         guard frontPts.count >= 15 else { return }
@@ -681,7 +688,22 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: - Colectar puntos 3D de la cara frontal desde el depth map
     // Itera el depth map con step=2 dentro del yoloBox, filtrando depth ≈ centerD (±10cm)
     // y máscara SAM. Proyecta directamente a mundo 3D sin pasar por pantalla.
-    private func collectFrontFacePoints(centerD: Float, yoloBox: CGRect, samMask: [Bool]?,
+    private func pointInConvexQuad(_ p: CGPoint, _ q: [CGPoint]) -> Bool {
+        func cross(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint) -> CGFloat {
+            (b.x-a.x)*(c.y-a.y) - (b.y-a.y)*(c.x-a.x)
+        }
+        let n = q.count
+        var pos = 0, neg = 0
+        for i in 0..<n {
+            let c = cross(q[i], q[(i+1)%n], p)
+            if c > 0 { pos += 1 } else if c < 0 { neg += 1 }
+        }
+        return pos == n || neg == n
+    }
+
+    private func collectFrontFacePoints(centerD: Float, yoloBox: CGRect,
+                                         quadMask: [CGPoint]? = nil,
+                                         samMask: [Bool]?,
                                          frame: ARFrame, depth: ARDepthData,
                                          vp: CGSize) -> [SIMD3<Float>] {
         let dm = depth.depthMap
@@ -719,14 +741,17 @@ final class BoxDetectionCoordinator: NSObject {
                 let depthTol: Float = samMask != nil ? 0.25 : 0.12
                 guard d > 0.02, d < 8.0, abs(d - centerD) < depthTol else { continue }
 
-                // Filtrar con máscara SAM (necesita posición en pantalla)
-                if let mask = samMask {
+                // Filtrar con polígono de Gemini o máscara SAM
+                if quadMask != nil || samMask != nil {
                     let nc = CGPoint(x: CGFloat(dx) / CGFloat(dW), y: CGFloat(dy) / CGFloat(dH))
                     let ns = nc.applying(displayTx)
-                    let sx = ns.x * vp.width, sy = ns.y * vp.height
-                    let mx = max(0, min(maskW - 1, Int(sx / vp.width  * CGFloat(maskW))))
-                    let my = max(0, min(maskH - 1, Int(sy / vp.height * CGFloat(maskH))))
-                    guard mask[my * maskW + mx] else { continue }
+                    let sp = CGPoint(x: ns.x * vp.width, y: ns.y * vp.height)
+                    if let quad = quadMask, !pointInConvexQuad(sp, quad) { continue }
+                    if let mask = samMask {
+                        let mx = max(0, min(maskW - 1, Int(sp.x / vp.width  * CGFloat(maskW))))
+                        let my = max(0, min(maskH - 1, Int(sp.y / vp.height * CGFloat(maskH))))
+                        guard mask[my * maskW + mx] else { continue }
+                    }
                 }
 
                 // Depth pixel → cámara imagen → cámara 3D → mundo (sin pasar por pantalla)
