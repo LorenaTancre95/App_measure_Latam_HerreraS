@@ -292,8 +292,8 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: - Medición: Gemini 8 vértices → wireframe 2D + PCA LiDAR para medidas
     private func measureWithBox(_ box: GeminiBox,
                                  frame: ARFrame, depth: ARDepthData, vp: CGSize) {
-        // Dibujar wireframe 2D inmediatamente desde los vértices de Gemini
-        DispatchQueue.main.async { self.draw2DBox(box, in: vp) }
+        // Dibujar wireframe 2D con coords correctas
+        DispatchQueue.main.async { self.draw2DBox(box, frame: frame, in: vp) }
 
         // Lock check
         if isLocked {
@@ -308,8 +308,8 @@ final class BoxDetectionCoordinator: NSObject {
         }
         lockedTransform = frame.camera.transform
 
-        // Cara frontal en coordenadas pantalla
-        func sp(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * vp.width, y: p.y * vp.height) }
+        // Cara frontal en coordenadas pantalla correctas (con displayTransform)
+        func sp(_ p: CGPoint) -> CGPoint { geminiToScreen(p, frame: frame, vp: vp) }
         let sFBL = sp(box.fbl), sFBR = sp(box.fbr)
         let sFTL = sp(box.ftl), sFTR = sp(box.ftr)
         let frontXs = [sFBL.x, sFBR.x, sFTL.x, sFTR.x]
@@ -577,17 +577,35 @@ final class BoxDetectionCoordinator: NSObject {
         CATransaction.commit()
     }
 
-    // MARK: - 2D wireframe: solo cara frontal (Gemini detecta bien los 4 corners frontales;
-    // los traseros son estimados y poco fiables). El cubo completo lo dibuja updateOverlay.
-    private func draw2DBox(_ box: GeminiBox, in vp: CGSize) {
+    // MARK: - Coordinate transform: Gemini JPEG portrait (4:3) → screen
+    // El JPEG se crea con .oriented(.right) desde el buffer landscape de ARKit.
+    // .oriented(.right): portrait(px,py) ← landscape(1-py, px) en coords normalizadas.
+    // displayTransform convierte landscape normalized → viewport normalized.
+    private func geminiToScreen(_ p: CGPoint, frame: ARFrame, vp: CGSize) -> CGPoint {
+        let camNorm = CGPoint(x: 1.0 - p.y, y: p.x)
+        let tx      = frame.displayTransform(for: .portrait, viewportSize: vp)
+        let vpNorm  = camNorm.applying(tx)
+        return CGPoint(x: vpNorm.x * vp.width, y: vpNorm.y * vp.height)
+    }
+
+    // MARK: - 2D wireframe: vértices visibles de Gemini en coords de pantalla correctas
+    private func draw2DBox(_ box: GeminiBox, frame: ARFrame, in vp: CGSize) {
         wireframeLayer.frame = CGRect(origin: .zero, size: vp)
-        func sp(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * vp.width, y: p.y * vp.height) }
+        func sp(_ p: CGPoint) -> CGPoint { geminiToScreen(p, frame: frame, vp: vp) }
+
         let fbl = sp(box.fbl), fbr = sp(box.fbr)
         let ftl = sp(box.ftl), ftr = sp(box.ftr)
+        let btl = sp(box.btl), btr = sp(box.btr)
 
         let path = UIBezierPath()
-        for (a, b) in [(fbl,fbr),(fbr,ftr),(ftr,ftl),(ftl,fbl)] {
-            path.move(to: a); path.addLine(to: b)
+        // Cara frontal
+        for (a, b) in [(fbl,fbr),(fbr,ftr),(ftr,ftl),(ftl,fbl)] { path.move(to:a); path.addLine(to:b) }
+        // Cara superior (si btl/btr son distintos de ftl/ftr, Gemini los vio)
+        let hasTop = simd_distance(
+            SIMD2(Float(btl.x), Float(btl.y)),
+            SIMD2(Float(ftl.x), Float(ftl.y))) > 8
+        if hasTop {
+            for (a, b) in [(ftl,btl),(ftr,btr),(btl,btr)] { path.move(to:a); path.addLine(to:b) }
         }
 
         CATransaction.begin(); CATransaction.setDisableActions(true)

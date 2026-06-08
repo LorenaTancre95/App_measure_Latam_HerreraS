@@ -143,18 +143,19 @@ final class GeminiDetector {
     // MARK: - Prompt
 
     private var detectionPrompt: String {
-        return "You are analyzing an image to detect a cardboard box. " +
-               "Find the main cardboard box and identify the 4 corners of its FRONT face " +
-               "(the face most directly facing the camera — do NOT estimate hidden corners). " +
-               "Reply with ONLY a raw JSON object, no markdown, no explanation. " +
-               "Label each corner explicitly: " +
-               "ftl = front-top-left, ftr = front-top-right, " +
-               "fbl = front-bottom-left, fbr = front-bottom-right. " +
-               "x and y are percentages 0-100 of image width and height (origin top-left). " +
-               "Example format: {\"boxDetected\":true,\"vertices\":{" +
-               "\"ftl\":{\"x\":20,\"y\":25},\"ftr\":{\"x\":65,\"y\":30}," +
-               "\"fbl\":{\"x\":15,\"y\":70},\"fbr\":{\"x\":60,\"y\":75}}} " +
-               "If no box is visible: {\"boxDetected\":false,\"vertices\":{}}"
+        return "Detect the cardboard box in this image. " +
+               "Identify ALL corners that are actually visible — do NOT estimate or invent hidden corners. " +
+               "A typical angled box shows 6 visible corners: " +
+               "ftl (front-top-left), ftr (front-top-right), fbl (front-bottom-left), fbr (front-bottom-right), " +
+               "btl (back-top-left, visible on the top face), btr (back-top-right, visible on the top face). " +
+               "Only include a corner if you can clearly see it. " +
+               "x and y are percentages 0-100 of image width/height, origin at top-left. " +
+               "Reply ONLY with raw JSON, no markdown. " +
+               "Format: {\"boxDetected\":true,\"vertices\":{" +
+               "\"ftl\":{\"x\":18,\"y\":45},\"ftr\":{\"x\":62,\"y\":38}," +
+               "\"fbl\":{\"x\":15,\"y\":78},\"fbr\":{\"x\":60,\"y\":70}," +
+               "\"btl\":{\"x\":28,\"y\":18},\"btr\":{\"x\":75,\"y\":10}}} " +
+               "If no box visible: {\"boxDetected\":false,\"vertices\":{}}"
     }
 
     // MARK: - Imagen
