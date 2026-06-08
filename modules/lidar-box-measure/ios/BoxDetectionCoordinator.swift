@@ -576,22 +576,18 @@ final class BoxDetectionCoordinator: NSObject {
         CATransaction.commit()
     }
 
-    // MARK: - 2D wireframe (Gemini vertices directo en pantalla)
+    // MARK: - 2D wireframe: solo cara frontal (Gemini detecta bien los 4 corners frontales;
+    // los traseros son estimados y poco fiables). El cubo completo lo dibuja updateOverlay.
     private func draw2DBox(_ box: GeminiBox, in vp: CGSize) {
         wireframeLayer.frame = CGRect(origin: .zero, size: vp)
         func sp(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x * vp.width, y: p.y * vp.height) }
         let fbl = sp(box.fbl), fbr = sp(box.fbr)
         let ftl = sp(box.ftl), ftr = sp(box.ftr)
-        let bbl = sp(box.bbl), bbr = sp(box.bbr)
-        let btl = sp(box.btl), btr = sp(box.btr)
 
         let path = UIBezierPath()
-        let edges: [(CGPoint, CGPoint)] = [
-            (fbl, fbr), (fbr, ftr), (ftr, ftl), (ftl, fbl),   // cara frontal
-            (bbl, bbr), (bbr, btr), (btr, btl), (btl, bbl),   // cara trasera
-            (fbl, bbl), (fbr, bbr), (ftl, btl), (ftr, btr)    // aristas laterales
-        ]
-        for (a, b) in edges { path.move(to: a); path.addLine(to: b) }
+        for (a, b) in [(fbl,fbr),(fbr,ftr),(ftr,ftl),(ftl,fbl)] {
+            path.move(to: a); path.addLine(to: b)
+        }
 
         CATransaction.begin(); CATransaction.setDisableActions(true)
         wireframeLayer.path = path.cgPath
