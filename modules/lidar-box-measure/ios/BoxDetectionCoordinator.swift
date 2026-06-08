@@ -114,7 +114,11 @@ final class BoxDetectionCoordinator: NSObject {
     private var smoothBBR: SIMD3<Float>?
     private var smoothBTL: SIMD3<Float>?
     private var smoothBTR: SIMD3<Float>?
-    private let smoothAlpha: Float = 0.12
+    private let smoothAlpha: Float = 0.30
+
+    // MARK: Point cloud accumulation (multi-frame fusion)
+    private var accPoints: [SIMD3<Float>] = []
+    private let accMaxPoints = 3000
 
     // MARK: Floor plane
     private var floorWorldY: Float? = nil
@@ -262,12 +266,14 @@ final class BoxDetectionCoordinator: NSObject {
             DispatchQueue.main.async {
                 self.scanInFlight = false
                 if let c = corners {
+                    if self.cachedCorners == nil { self.accPoints.removeAll() }
                     self.cachedCorners = c
                     self.missedFrames  = 0
                 } else {
                     self.missedFrames += 1
                     if self.missedFrames > self.maxMissedFrames {
                         self.cachedCorners = nil
+                        self.accPoints.removeAll()
                         self.clearDetectionLayer()
                     }
                 }
@@ -322,31 +328,43 @@ final class BoxDetectionCoordinator: NSObject {
                                                depth: depth, vp: vp)
         guard frontPts.count >= 15 else { return }
 
-        let centroid = frontPts.reduce(.zero, +) / Float(frontPts.count)
-        let (faceR, faceU, faceN) = computeFacePCA(frontPts, centroid: centroid, camPos: camPos3)
+        // Acumular puntos de múltiples frames para reducir ruido
+        accPoints.append(contentsOf: frontPts)
+        if accPoints.count > accMaxPoints { accPoints.removeFirst(accPoints.count - accMaxPoints) }
+        let ptsForPCA = accPoints.count >= 200 ? accPoints : frontPts
+
+        let centroid = ptsForPCA.reduce(.zero, +) / Float(ptsForPCA.count)
+        let (faceR, faceU, faceN) = computeFacePCA(ptsForPCA, centroid: centroid, camPos: camPos3)
 
         var minR: Float = .infinity, maxR: Float = -.infinity
         var minU: Float = .infinity, maxU: Float = -.infinity
-        for p in frontPts {
+        for p in ptsForPCA {
             let d = p - centroid
             let pr = simd_dot(d, faceR), pu = simd_dot(d, faceU)
             if pr < minR { minR = pr }; if pr > maxR { maxR = pr }
             if pu < minU { minU = pu }; if pu > maxU { maxU = pu }
         }
 
-        let bl = centroid + faceR * minR + faceU * minU
-        let br = centroid + faceR * maxR + faceU * minU
-        let tl = centroid + faceR * minR + faceU * maxU
-        let tr = centroid + faceR * maxR + faceU * maxU
+        var bl = centroid + faceR * minR + faceU * minU
+        var br = centroid + faceR * maxR + faceU * minU
+        var tl = centroid + faceR * minR + faceU * maxU
+        var tr = centroid + faceR * maxR + faceU * maxU
 
         let c = Double(maxR - minR) * 100
         var a = Double(maxU - minU) * 100
-        if let fy = floorWorldY {
-            let topY = Double(max(tl.y, tr.y))
-            let hFloor = (topY - Double(fy)) * 100
-            if hFloor > 5 && hFloor < 300 { a = hFloor }
-        }
         guard c > 3, c < 300, a > 3, a < 300 else { return }
+
+        // Snap to floor
+        if let fy = floorWorldY {
+            let bottomY = min(bl.y, br.y)
+            let snap = fy - bottomY
+            if abs(snap) < 0.25 {
+                bl.y += snap; br.y += snap
+                tl.y += snap; tr.y += snap
+                a = Double(max(tl.y, tr.y) - fy) * 100
+            }
+        }
+        guard a > 3 else { return }
 
         // Profundidad: samples LiDAR más profundos dentro del bbox
         let dm = depth.depthMap
@@ -917,7 +935,7 @@ final class BoxDetectionCoordinator: NSObject {
         lastMeasurement = nil; isLocked = false; lockedTransform = nil
         smoothBL = nil; smoothBR = nil; smoothTL = nil; smoothTR = nil
         smoothBBL = nil; smoothBBR = nil; smoothBTL = nil; smoothBTR = nil
-        cachedCorners = nil; lastGeminiCall = 0
+        cachedCorners = nil; lastGeminiCall = 0; accPoints.removeAll()
     }
 
     private func makeLine(from s: SIMD3<Float>, to e: SIMD3<Float>, color: UIColor) -> SCNNode {
