@@ -220,7 +220,7 @@ final class BoxDetectionCoordinator: NSObject {
         guard let sv = sceneView, detectionLayer.superlayer == nil else { return }
         detectionLayer.frame = sv.bounds
         labelLayer.frame     = CGRect(x: 0, y: 0, width: 120, height: 22)
-        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 56)
+        debugLayer.frame     = CGRect(x: 8, y: 60, width: sv.bounds.width - 16, height: 120)
         sv.layer.addSublayer(detectionLayer)
         sv.layer.addSublayer(labelLayer)
         sv.layer.addSublayer(debugLayer)

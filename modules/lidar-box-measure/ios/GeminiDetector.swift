@@ -88,7 +88,7 @@ final class GeminiDetector {
         // API-level error (invalid key, quota, bad model, bad schema)
         if let err = json["error"] as? [String: Any],
            let msg = err["message"] as? String {
-            status = "API err: \(msg.prefix(50))"
+            status = "API err: \(msg.prefix(200))"
             completion(nil); return
         }
         guard let cands = json["candidates"] as? [[String: Any]] else {
