@@ -248,7 +248,7 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Main pipeline (Gemini corners + LiDAR depth)
+    // MARK: - Main pipeline: YOLO detection → LiDAR PCA measurement
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         attachLayersIfNeeded()
@@ -256,20 +256,38 @@ final class BoxDetectionCoordinator: NSObject {
 
         guard !scanInFlight,
               frame.timestamp - lastScanTime > scanInterval else { return }
-        lastScanTime  = frame.timestamp
-        scanInFlight  = true
+        lastScanTime = frame.timestamp
+        scanInFlight = true
 
-        // Use the center 70 % of the screen as the detection region.
-        // The user keeps the reticle on the box face; LiDAR depth-clustering
-        // inside this region finds the front face without any external API.
-        let inset: CGFloat = 0.15
-        let centerBox = CGRect(x: vp.width  * inset,
-                               y: vp.height * inset,
-                               width:  vp.width  * (1 - 2 * inset),
-                               height: vp.height * (1 - 2 * inset))
+        let cx = vp.width / 2, cy = vp.height / 2
+        let vpBounds = CGRect(origin: .zero, size: vp)
 
-        measure3D(box: centerBox, samMask: nil, frame: frame, depth: depth, vp: vp)
-        updateDebug("LiDAR scan")
+        if let det = detectClosestBox(in: frame.capturedImage, viewportSize: vp, cx: cx, cy: cy) {
+            // YOLO found a box: expand 5% to capture edge pixels, clamp to screen
+            let rect = det.screenRect(viewportSize: vp, modelSize: modelInputSize)
+            let expanded = rect.insetBy(dx: -rect.width * 0.05, dy: -rect.height * 0.05)
+                              .intersection(vpBounds)
+            lastDetection = expanded
+            missedFrames = 0
+            drawDetectionRect(rect, label: "\(Int(det.score * 100))%", in: vp)
+            measure3D(box: expanded, samMask: nil, frame: frame, depth: depth, vp: vp)
+            updateDebug("YOLO+LiDAR \(modelStatusText)")
+        } else if let prev = lastDetection, missedFrames < maxMissedFrames {
+            // YOLO missed: reuse last known bounding box for a few frames
+            missedFrames += 1
+            measure3D(box: prev, samMask: nil, frame: frame, depth: depth, vp: vp)
+            updateDebug("LiDAR (prev box \(missedFrames)/\(maxMissedFrames))")
+        } else {
+            // No detection at all: fall back to center 35% (tight, to avoid table)
+            lastDetection = nil; missedFrames = 0
+            let inset: CGFloat = 0.325
+            let centerBox = CGRect(x: vp.width * inset, y: vp.height * inset,
+                                   width: vp.width * (1 - 2 * inset),
+                                   height: vp.height * (1 - 2 * inset))
+            measure3D(box: centerBox, samMask: nil, frame: frame, depth: depth, vp: vp)
+            updateDebug("LiDAR (center) \(modelStatusText)")
+        }
+
         scanInFlight = false
     }
 
