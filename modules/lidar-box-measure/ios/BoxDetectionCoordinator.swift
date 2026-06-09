@@ -86,13 +86,17 @@ final class BoxDetectionCoordinator: NSObject {
     // MARK: SAM segmentation
     private let sam = SAMInference()
 
-    // MARK: Gemini detection
+    // MARK: Gemini detection (kept for legacy Gemini path, not used in main flow)
     private let gemini          = GeminiDetector()
     private var cachedBox:        GeminiBox? = nil
     private var lastGeminiCall:   TimeInterval   = 0
     private let geminiInterval:   TimeInterval   = 2.5
     private var lastMeasureTime:  TimeInterval   = 0
     private let measureInterval:  TimeInterval   = 0.10
+
+    // MARK: ONNX YOLO (Boxer3D approach — yolo11n.onnx via ONNX Runtime)
+    private var onnxYolo: YOLODetector?
+    private var onnxYoloStatus = "yolo11n: loading..."
 
     // MARK: 2D overlay (CALayer)
     private let detectionLayer = CAShapeLayer()
@@ -140,6 +144,7 @@ final class BoxDetectionCoordinator: NSObject {
         self.onPlaneFound = onPlaneFound
         super.init()
         loadModel()
+        loadONNXModel()
         sam.load()
         setupLayers()
     }
@@ -200,6 +205,22 @@ final class BoxDetectionCoordinator: NSObject {
         modelStatusText = lastError.isEmpty ? "NOT LOADED" : "LOAD ERR: \(lastError)"
     }
 
+    // MARK: - ONNX YOLO (Boxer3D): load yolo11n.onnx from bundle
+    private func loadONNXModel() {
+        let bundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
+        for b in bundles {
+            guard let path = b.path(forResource: "yolo11n", ofType: "onnx") else { continue }
+            do {
+                onnxYolo = try YOLODetector(modelPath: path)
+                onnxYoloStatus = "yolo11n: OK ✓"
+                return
+            } catch {
+                onnxYoloStatus = "yolo11n ERR: \(error.localizedDescription)"
+            }
+        }
+        if onnxYolo == nil { onnxYoloStatus = "yolo11n.onnx: not found" }
+    }
+
     // MARK: - Layer setup
     private func setupLayers() {
         detectionLayer.fillColor   = UIColor.clear.cgColor
@@ -248,7 +269,56 @@ final class BoxDetectionCoordinator: NSObject {
         }
     }
 
-    // MARK: - Main pipeline: YOLO detection → LiDAR PCA measurement
+    // MARK: - Boxer3D image helpers
+
+    /// Convert camera pixel buffer to CHW float32 [0,1] for YOLO11n (center-crop → 640×640).
+    private func pixelBufferToCHW(_ buffer: CVPixelBuffer, size: Int = 640) -> [Float] {
+        var ci = CIImage(cvPixelBuffer: buffer)
+        let ctx = CIContext()
+        let w = ci.extent.width, h = ci.extent.height
+        let side = min(w, h)
+        ci = ci.cropped(to: CGRect(x: (w - side) / 2, y: (h - side) / 2,
+                                   width: side, height: side))
+        let scale = CGFloat(size) / side
+        let resized = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        var rgba = [UInt8](repeating: 0, count: size * size * 4)
+        ctx.render(resized, toBitmap: &rgba, rowBytes: size * 4,
+                   bounds: CGRect(x: resized.extent.origin.x, y: resized.extent.origin.y,
+                                  width: CGFloat(size), height: CGFloat(size)),
+                   format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        let n = size * size
+        var chw = [Float](repeating: 0, count: 3 * n)
+        for i in 0..<n {
+            chw[i]         = Float(rgba[i * 4])     / 255.0
+            chw[n + i]     = Float(rgba[i * 4 + 1]) / 255.0
+            chw[2 * n + i] = Float(rgba[i * 4 + 2]) / 255.0
+        }
+        return chw
+    }
+
+    /// Map YOLO box (640×640 center-cropped landscape space) → screen CGRect.
+    private func yoloBoxToScreenRect(_ box: YOLOBox, frame: ARFrame, vp: CGSize) -> CGRect {
+        let imgW = Float(frame.camera.imageResolution.width)
+        let imgH = Float(frame.camera.imageResolution.height)
+        let side = min(imgW, imgH)
+        let cropX = (imgW - side) / 2
+        let cropY = (imgH - side) / 2
+        let tx = frame.displayTransform(for: .portrait, viewportSize: vp)
+
+        func toScreen(_ px: Float, _ py: Float) -> CGPoint {
+            let nc = CGPoint(x: CGFloat((px / 640.0 * side + cropX) / imgW),
+                             y: CGFloat((py / 640.0 * side + cropY) / imgH))
+            let vn = nc.applying(tx)
+            return CGPoint(x: vn.x * vp.width, y: vn.y * vp.height)
+        }
+
+        let tl = toScreen(box.xmin, box.ymin)
+        let br = toScreen(box.xmax, box.ymax)
+        return CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                      width: abs(br.x - tl.x), height: abs(br.y - tl.y))
+    }
+
+    // MARK: - Main pipeline: ONNX YOLO (Boxer3D) → LiDAR PCA measurement
     private func measureFromCenter(frame: ARFrame, depth: ARDepthData) {
         guard let sv = sceneView else { return }
         attachLayersIfNeeded()
@@ -259,33 +329,56 @@ final class BoxDetectionCoordinator: NSObject {
         lastScanTime = frame.timestamp
         scanInFlight = true
 
-        let cx = vp.width / 2, cy = vp.height / 2
         let vpBounds = CGRect(origin: .zero, size: vp)
+        var detectedBox: CGRect? = nil
+        var detLabel = ""
 
-        if let det = detectClosestBox(in: frame.capturedImage, viewportSize: vp, cx: cx, cy: cy) {
-            // YOLO found a box: expand 5% to capture edge pixels, clamp to screen
-            let rect = det.screenRect(viewportSize: vp, modelSize: modelInputSize)
-            let expanded = rect.insetBy(dx: -rect.width * 0.05, dy: -rect.height * 0.05)
+        // 1. ONNX YOLO (Boxer3D approach) — yolo11n.onnx via ONNX Runtime + CoreML EP
+        if let yolo = onnxYolo,
+           let boxes = try? yolo.detect(image: pixelBufferToCHW(frame.capturedImage)),
+           let best = boxes.max(by: { $0.score < $1.score }) {
+            let raw = yoloBoxToScreenRect(best, frame: frame, vp: vp)
+            let expanded = raw.insetBy(dx: -raw.width * 0.05, dy: -raw.height * 0.05)
                               .intersection(vpBounds)
-            lastDetection = expanded
-            missedFrames = 0
-            drawDetectionRect(rect, label: "\(Int(det.score * 100))%", in: vp)
-            measure3D(box: expanded, samMask: nil, frame: frame, depth: depth, vp: vp)
-            updateDebug("YOLO+LiDAR \(modelStatusText)")
+            if expanded.width > 20 && expanded.height > 20 {
+                detectedBox = expanded
+                detLabel = "\(best.label) \(Int(best.score * 100))%"
+                drawDetectionRect(raw, label: detLabel, in: vp)
+            }
+        }
+
+        // 2. Fallback: CoreML YOLO (box_detector.mlpackage)
+        if detectedBox == nil {
+            let cx = vp.width / 2, cy = vp.height / 2
+            if let det = detectClosestBox(in: frame.capturedImage, viewportSize: vp, cx: cx, cy: cy) {
+                let raw = det.screenRect(viewportSize: vp, modelSize: modelInputSize)
+                let expanded = raw.insetBy(dx: -raw.width * 0.05, dy: -raw.height * 0.05)
+                                  .intersection(vpBounds)
+                if expanded.width > 20 && expanded.height > 20 {
+                    detectedBox = expanded
+                    detLabel = "CoreML \(Int(det.score * 100))%"
+                    drawDetectionRect(raw, label: detLabel, in: vp)
+                }
+            }
+        }
+
+        if let box = detectedBox {
+            lastDetection = box; missedFrames = 0
+            measure3D(box: box, samMask: nil, frame: frame, depth: depth, vp: vp)
+            updateDebug(detLabel)
         } else if let prev = lastDetection, missedFrames < maxMissedFrames {
-            // YOLO missed: reuse last known bounding box for a few frames
             missedFrames += 1
             measure3D(box: prev, samMask: nil, frame: frame, depth: depth, vp: vp)
-            updateDebug("LiDAR (prev box \(missedFrames)/\(maxMissedFrames))")
+            updateDebug("LiDAR prev \(missedFrames)/\(maxMissedFrames)")
         } else {
-            // No detection at all: fall back to center 35% (tight, to avoid table)
             lastDetection = nil; missedFrames = 0
+            // Tight center fallback (35%) to avoid table contamination
             let inset: CGFloat = 0.325
             let centerBox = CGRect(x: vp.width * inset, y: vp.height * inset,
                                    width: vp.width * (1 - 2 * inset),
                                    height: vp.height * (1 - 2 * inset))
             measure3D(box: centerBox, samMask: nil, frame: frame, depth: depth, vp: vp)
-            updateDebug("LiDAR (center) \(modelStatusText)")
+            updateDebug("\(onnxYoloStatus)")
         }
 
         scanInFlight = false
