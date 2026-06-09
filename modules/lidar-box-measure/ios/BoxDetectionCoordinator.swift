@@ -681,10 +681,12 @@ final class BoxDetectionCoordinator: NSObject {
         let camPos3 = SIMD3<Float>(frame.camera.transform.columns.3.x,
                                     frame.camera.transform.columns.3.y,
                                     frame.camera.transform.columns.3.z)
-        let frontPts3D = collectFrontFacePoints(centerD: centerD, yoloBox: box,
+        // Use inner 80% of YOLO box to avoid edge contamination from background
+        let innerBox = box.insetBy(dx: box.width * 0.10, dy: box.height * 0.10)
+        let frontPts3D = collectFrontFacePoints(centerD: centerD, yoloBox: innerBox,
                                                  samMask: samMask, frame: frame,
                                                  depth: depth, vp: vp)
-        guard frontPts3D.count >= 15 else { return }
+        guard frontPts3D.count >= 30 else { return }
 
         // 3. Medir cara frontal en 3D: PCA da los verdaderos ejes del plano de la cara
         let centroid3D = frontPts3D.reduce(.zero, +) / Float(frontPts3D.count)
@@ -709,6 +711,15 @@ final class BoxDetectionCoordinator: NSObject {
 
         let c = Double(maxR - minR) * 100
         var a = Double(maxU - minU) * 100
+
+        // Sanity check: clamp height to world-Y span of the collected points.
+        // If PCA's faceU drifts from vertical (e.g. table contamination), world-Y
+        // is the true height of the front-face cluster.
+        let worldYMin = frontPts3D.map { $0.y }.min()!
+        let worldYMax = frontPts3D.map { $0.y }.max()!
+        let worldYSpan = Double(worldYMax - worldYMin) * 100
+        if worldYSpan > 3 && a > worldYSpan * 1.4 { a = worldYSpan }
+
         // If floor plane is known, use it to cross-check height
         if let fy = floorWorldY {
             let topY = Double(max(tl.y, tr.y))
@@ -805,7 +816,7 @@ final class BoxDetectionCoordinator: NSObject {
         for dy in stride(from: dyS, through: dyE, by: step) {
             for dx in stride(from: dxS, through: dxE, by: step) {
                 let d = dptr[dy * dW + dx]
-                let depthTol: Float = samMask != nil ? 0.25 : 0.12
+                let depthTol: Float = samMask != nil ? 0.15 : 0.06
                 guard d > 0.02, d < 8.0, abs(d - centerD) < depthTol else { continue }
 
                 // Filtrar con polígono de Gemini o máscara SAM
