@@ -254,39 +254,23 @@ final class BoxDetectionCoordinator: NSObject {
         attachLayersIfNeeded()
         let vp = sv.bounds.size
 
-        // ── Por frame: medir con la caja cacheada de Gemini ─────────────────
-        if let box = cachedBox,
-           frame.timestamp - lastMeasureTime > measureInterval {
-            lastMeasureTime = frame.timestamp
-            measureWithBox(box, frame: frame, depth: depth, vp: vp)
-        }
-
-        // ── Periódico: llamar a Gemini cada geminiInterval segundos ──────────
         guard !scanInFlight,
-              frame.timestamp - lastGeminiCall > geminiInterval else { return }
-        lastGeminiCall = frame.timestamp
-        scanInFlight   = true
-        let pb = frame.capturedImage
+              frame.timestamp - lastScanTime > scanInterval else { return }
+        lastScanTime  = frame.timestamp
+        scanInFlight  = true
 
-        updateDebug("Gemini: detectando...")
+        // Use the center 70 % of the screen as the detection region.
+        // The user keeps the reticle on the box face; LiDAR depth-clustering
+        // inside this region finds the front face without any external API.
+        let inset: CGFloat = 0.15
+        let centerBox = CGRect(x: vp.width  * inset,
+                               y: vp.height * inset,
+                               width:  vp.width  * (1 - 2 * inset),
+                               height: vp.height * (1 - 2 * inset))
 
-        gemini.detectBox(pixelBuffer: pb) { [weak self] box in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                self.scanInFlight = false
-                if let b = box {
-                    self.cachedBox    = b
-                    self.missedFrames = 0
-                } else {
-                    self.missedFrames += 1
-                    if self.missedFrames > self.maxMissedFrames {
-                        self.cachedBox = nil
-                        self.clearDetectionLayer()
-                    }
-                }
-                self.updateDebug(self.gemini.status)
-            }
-        }
+        measure3D(box: centerBox, samMask: nil, frame: frame, depth: depth, vp: vp)
+        updateDebug("LiDAR scan")
+        scanInFlight = false
     }
 
     // MARK: - Medición: Gemini 8 vértices → wireframe 2D + PCA LiDAR para medidas
@@ -690,6 +674,9 @@ final class BoxDetectionCoordinator: NSObject {
         // 3. Medir cara frontal en 3D: PCA da los verdaderos ejes del plano de la cara
         let centroid3D = frontPts3D.reduce(.zero, +) / Float(frontPts3D.count)
         let (faceR, faceU, faceN) = computeFacePCA(frontPts3D, centroid: centroid3D, camPos: camPos3)
+
+        // Reject floor/ceiling: normal must be mostly horizontal (|Y| < 0.65)
+        guard abs(faceN.y) < 0.65 else { return }
 
         var minR: Float = .infinity, maxR: Float = -.infinity
         var minU: Float = .infinity, maxU: Float = -.infinity
