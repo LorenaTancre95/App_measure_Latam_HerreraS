@@ -87,7 +87,8 @@ final class BoxerNet {
     func predict(
         image: [Float],            // CHW flat array, len = 3 * 960 * 960
         depthMap: [[Float]],       // HxW depth in metres (0 = invalid)
-        intrinsics: simd_float3x3, // fx, fy, cx, cy from ARKit
+        intrinsics: simd_float3x3, // fx, fy, cx, cy scaled to imageSize×imageSize
+        imageResolution: CGSize,   // original camera image size (landscape)
         cameraTransform: simd_float4x4,
         boxes2D: [Box2D],
         confidenceThreshold: Float = 0.3
@@ -117,7 +118,7 @@ final class BoxerNet {
         // 2. Build SDP patches (median LiDAR depth per 16x16 patch).
         let sdpPatches = buildSDPPatches(
             depthMap: depthMap,
-            fx: fx, fy: fy, cx: cx, cy: cy
+            imageResolution: imageResolution
         )
 
         // 3. Normalise 2D boxes.
@@ -256,7 +257,7 @@ final class BoxerNet {
     /// Project LiDAR depth to 960x960 image, compute median depth per 16x16 patch.
     private func buildSDPPatches(
         depthMap: [[Float]],
-        fx: Float, fy: Float, cx: Float, cy: Float
+        imageResolution: CGSize
     ) -> [Float] {
         let S = Self.imageSize
         let P = Self.patchSize
@@ -272,26 +273,24 @@ final class BoxerNet {
         }
         let depthW = depthMap[0].count
 
-        // Scale factors from depth map to 960x960.
-        let scaleX = Float(S) / Float(depthW)
-        let scaleY = Float(S) / Float(depthH)
+        let imgW = Float(imageResolution.width)
+        let imgH = Float(imageResolution.height)
+        let side = min(imgW, imgH)
+        let ox = (imgW - side) / 2
+        let oy = (imgH - side) / 2
+        let cropScale = Float(S) / side
+        let imgScaleX = imgW / Float(depthW)
+        let imgScaleY = imgH / Float(depthH)
 
-        // Scale intrinsics to 960x960.
-        let fxS = fx * scaleX
-        let fyS = fy * scaleY
-        let cxS = cx * scaleX
-        let cyS = cy * scaleY
-
-        // For each depth pixel, project to 960x960 and assign to a patch.
         let step = max(1, Int(sqrt(Float(depthH * depthW) / 20000.0)))
         for v in stride(from: 0, to: depthH, by: step) {
             for u in stride(from: 0, to: depthW, by: step) {
                 let z = depthMap[v][u]
                 guard z > 0 else { continue }
 
-                // Pixel in 960x960 space.
-                let px = Float(u) * scaleX
-                let py = Float(v) * scaleY
+                let px = (Float(u) * imgScaleX - ox) * cropScale
+                let py = (Float(v) * imgScaleY - oy) * cropScale
+                guard px >= 0, px < Float(S), py >= 0, py < Float(S) else { continue }
 
                 let pi = Int(py) / P
                 let pj = Int(px) / P

@@ -141,6 +141,7 @@ final class ARViewModel: ObservableObject {
         let conf = await MainActor.run { self.confidenceThreshold }
         let detections = try boxer.predict(
             image: boxerImage, depthMap: depthMap, intrinsics: intrinsics,
+            imageResolution: frame.camera.imageResolution,
             cameraTransform: frame.camera.transform, boxes2D: boxes2D,
             confidenceThreshold: conf
         )
