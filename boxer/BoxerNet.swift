@@ -65,9 +65,10 @@ final class BoxerNet {
     init(modelPath: String) throws {
         env = try ORTEnv(loggingLevel: .warning)
         let opts = try ORTSessionOptions()
-        // CoreML EP → Metal GPU / Neural Engine acceleration.
-        let coreMLOpts = ORTCoreMLExecutionProviderOptions()
-        try opts.appendCoreMLExecutionProvider(with: coreMLOpts)
+        // CoreML EP omitted: on-device ONNX→CoreML compilation of a 391 MB model
+        // spikes RAM to 800 MB+, causing jetsam kills before inference starts.
+        // CPU-only load is ~391 MB flat — no compilation phase.
+        try opts.setIntraOpNumThreads(2)
         session = try ORTSession(env: env, modelPath: modelPath, sessionOptions: opts)
     }
 

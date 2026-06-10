@@ -47,21 +47,25 @@ final class ARViewModel: ObservableObject {
         }
 
         await MainActor.run { self.status = "Loading BoxerNet..." }
-        guard let boxerPath else {
-            await MainActor.run { self.status = "BoxerNet.onnx not found" }
-            return
-        }
-        let boxer: BoxerNet
-        do { boxer = try BoxerNet(modelPath: boxerPath) }
-        catch {
-            await MainActor.run { self.status = "BoxerNet failed: \(error.localizedDescription)" }
-            return
+
+        var boxer: BoxerNet? = nil
+        if let boxerPath {
+            do { boxer = try BoxerNet(modelPath: boxerPath) }
+            catch {
+                // BoxerNet failed (model too large or unsupported device).
+                // Fall back to YOLO-only mode — 3D lifting will be unavailable.
+                await MainActor.run {
+                    self.yoloDetector = yolo
+                    self.status = "YOLO only (BoxerNet no disponible: \(error.localizedDescription))"
+                }
+                return
+            }
         }
 
         await MainActor.run {
             self.yoloDetector = yolo
             self.boxerNet = boxer
-            self.status = "Ready — tap Detect 3D"
+            self.status = boxer != nil ? "Ready — tap Detect 3D" : "Ready — YOLO only (sin BoxerNet.onnx)"
         }
     }
 
@@ -69,7 +73,7 @@ final class ARViewModel: ObservableObject {
 
     func detectNow() {
         guard let sceneView, let frame = sceneView.session.currentFrame,
-              let boxerNet, let yoloDetector else {
+              let yoloDetector else {
             status = "Not ready"; return
         }
         guard frame.sceneDepth != nil else {
@@ -79,9 +83,10 @@ final class ARViewModel: ObservableObject {
         isProcessing = true
         status = "Detecting..."
 
+        let capturedBoxerNet = boxerNet
         Task.detached {
             do {
-                let results = try await self.runPipeline(frame: frame, boxer: boxerNet, yolo: yoloDetector)
+                let results = try await self.runPipeline(frame: frame, boxer: capturedBoxerNet, yolo: yoloDetector)
                 await MainActor.run {
                     self.placeBoxes(results, in: sceneView)
                     self.isProcessing = false
@@ -96,13 +101,10 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func runPipeline(
-        frame: ARFrame, boxer: BoxerNet, yolo: YOLODetector
+        frame: ARFrame, boxer: BoxerNet?, yolo: YOLODetector
     ) async throws -> [Detection3D] {
-        // 1. Convert camera image to CHW float arrays.
-        let (boxerImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: BoxerNet.imageSize)
+        // 1. YOLO detection (640×640).
         let (yoloImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
-
-        // 2. YOLO 2D detection — keep top 3.
         let yoloBoxes = try yolo.detect(image: yoloImage, imageWidth: 640, imageHeight: 640)
         guard !yoloBoxes.isEmpty else {
             await MainActor.run { self.status = "No objects detected" }
@@ -110,7 +112,16 @@ final class ARViewModel: ObservableObject {
         }
         let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(3))
 
+        // 2. If BoxerNet is unavailable, report detections without 3D lifting.
+        guard let boxer else {
+            await MainActor.run {
+                self.status = "\(topBoxes.count) objeto(s) — BoxerNet no disponible"
+            }
+            return []
+        }
+
         // 3. Scale YOLO boxes (640 → 960) for BoxerNet.
+        let (boxerImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: BoxerNet.imageSize)
         let scale = Float(BoxerNet.imageSize) / 640.0
         let boxes2D = topBoxes.map { box in
             Box2D(xmin: box.xmin * scale, ymin: box.ymin * scale,
@@ -118,7 +129,7 @@ final class ARViewModel: ObservableObject {
                   label: box.label, score: box.score)
         }
 
-        // 4. Extract LiDAR depth + scale intrinsics for center-cropped image.
+        // 4. Extract LiDAR depth + scale intrinsics.
         let depthMap = extractDepthMap(frame.sceneDepth!.depthMap)
         let intrinsics = scaleIntrinsicsWithCrop(
             frame.camera.intrinsics,
