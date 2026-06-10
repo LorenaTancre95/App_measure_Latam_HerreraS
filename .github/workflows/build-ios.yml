@@ -69,12 +69,22 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            | xcpretty || cat /tmp/xcodebuild.log
+            SKIP_INSTALL=NO \
+            INSTALL_PATH=/Applications \
+            2>&1 | tee /tmp/xcodebuild.log | xcpretty; exit ${PIPESTATUS[0]}
 
       # ── Package IPA ──────────────────────────────────────────────────
       - name: Package IPA
         run: |
-          APP=$(find "$RUNNER_TEMP/boxer.xcarchive/Products/Applications" -name "*.app" | head -1)
+          echo "=== Archive tree ==="
+          find "$RUNNER_TEMP/boxer.xcarchive" -maxdepth 4 | sort
+
+          APP=$(find "$RUNNER_TEMP/boxer.xcarchive" -name "*.app" | head -1)
+          if [ -z "$APP" ]; then
+            echo "ERROR: no .app found in xcarchive"
+            exit 1
+          fi
+          echo "Packaging: $APP"
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
