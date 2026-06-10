@@ -24,8 +24,8 @@ jobs:
       - name: Download models from Hugging Face
         if: steps.cache-models.outputs.cache-hit != 'true'
         run: |
-          pip install -q huggingface_hub
-          huggingface-cli download Barath/boxer3d \
+          pip install -q "huggingface_hub[cli]"
+          hf download Barath/boxer3d \
             yolo11n.onnx BoxerNet.onnx \
             --local-dir boxer/models-cache
 
