@@ -1,0 +1,90 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── Models (391 MB BoxerNet + 10 MB yolo11n) ──────────────────────
+      - name: Cache ONNX models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: boxer/models-cache
+          key: boxer3d-models-v1
+
+      - name: Download models from Hugging Face
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          pip install -q huggingface_hub
+          huggingface-cli download Barath/boxer3d \
+            yolo11n.onnx BoxerNet.onnx \
+            --local-dir boxer/models-cache
+
+      - name: Copy models into boxer/ for build
+        run: |
+          cp boxer/models-cache/yolo11n.onnx boxer/yolo11n.onnx
+          cp boxer/models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
+
+      # ── Xcode / SPM ──────────────────────────────────────────────────
+      - name: Select latest Xcode
+        run: |
+          # Pick newest Xcode available on this runner
+          XCODE=$(ls /Applications | grep 'Xcode' | sort -V | tail -1)
+          sudo xcode-select -s "/Applications/$XCODE/Contents/Developer"
+          xcodebuild -version
+
+      - name: Cache SPM packages
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData/SourcePackages
+          key: spm-${{ hashFiles('boxer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
+          restore-keys: spm-
+
+      - name: Resolve SPM dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies \
+            -project boxer.xcodeproj \
+            -scheme boxer \
+            -clonedSourcePackagesDirPath ~/Library/Developer/Xcode/DerivedData/SourcePackages
+
+      # ── Build ─────────────────────────────────────────────────────────
+      - name: Build archive (unsigned)
+        run: |
+          xcodebuild archive \
+            -project boxer.xcodeproj \
+            -scheme boxer \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/boxer.xcarchive" \
+            -clonedSourcePackagesDirPath ~/Library/Developer/Xcode/DerivedData/SourcePackages \
+            IPHONEOS_DEPLOYMENT_TARGET=17.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            | xcpretty || cat /tmp/xcodebuild.log
+
+      # ── Package IPA ──────────────────────────────────────────────────
+      - name: Package IPA
+        run: |
+          APP=$(find "$RUNNER_TEMP/boxer.xcarchive/Products/Applications" -name "*.app" | head -1)
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -r "$RUNNER_TEMP/Boxer3D.ipa" Payload
+          echo "IPA size: $(du -sh "$RUNNER_TEMP/Boxer3D.ipa" | cut -f1)"
+
+      # ── Upload artifact ───────────────────────────────────────────────
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Boxer3D-IPA
+          path: ${{ runner.temp }}/Boxer3D.ipa
+          retention-days: 30
