@@ -154,10 +154,11 @@ final class ARViewModel: ObservableObject {
 
     private func placeBoxes(_ detections: [Detection3D], in sceneView: ARSCNView) {
         clearBoxes()
-
+        let anchors = sceneView.session.currentFrame?.anchors ?? []
         let colors: [UIColor] = [.systemRed, .systemGreen, .systemBlue]
 
-        for (i, det) in detections.enumerated() {
+        for (i, rawDet) in detections.enumerated() {
+            let det = snapToGroundPlane(rawDet, anchors: anchors)
             let color = colors[i % colors.count]
 
             // Semi-transparent fill.
@@ -189,6 +190,44 @@ final class ARViewModel: ObservableObject {
                 label: det.label ?? "object", size: det.size, confidence: det.confidence
             ))
         }
+    }
+
+    /// Snaps the box bottom face to the nearest horizontal ARKit plane within 25 cm.
+    /// Fixes the vertical float caused by BoxerNet depth uncertainty.
+    private func snapToGroundPlane(_ det: Detection3D, anchors: [ARAnchor]) -> Detection3D {
+        let boxBottomY = det.center.y - det.size.y / 2
+
+        var bestPlaneY: Float? = nil
+        var bestDist: Float = 0.25  // max snap range: 25 cm
+
+        for anchor in anchors {
+            guard let plane = anchor as? ARPlaneAnchor,
+                  plane.alignment == .horizontal else { continue }
+
+            let planeY = anchor.transform.columns.3.y
+            guard planeY < det.center.y else { continue }  // skip planes above box
+
+            let dist = abs(planeY - boxBottomY)
+            if dist < bestDist {
+                bestDist = dist
+                bestPlaneY = planeY
+            }
+        }
+
+        guard let planeY = bestPlaneY else { return det }
+
+        let newCenterY = planeY + det.size.y / 2
+        var newTransform = det.worldTransform
+        newTransform.columns.3.y = newCenterY
+
+        return Detection3D(
+            center: simd_float3(det.center.x, newCenterY, det.center.z),
+            size: det.size,
+            yaw: det.yaw,
+            confidence: det.confidence,
+            worldTransform: newTransform,
+            label: det.label
+        )
     }
 
     private func addWireframe(to parent: SCNNode, size: simd_float3, color: UIColor, radius: Float) {
