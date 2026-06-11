@@ -146,7 +146,15 @@ final class ARViewModel: ObservableObject {
             confidenceThreshold: conf
         )
 
-        await MainActor.run { self.status = "Ready" }
+        // Debug: show YOLO 2D bbox in status (640×640 coords)
+        if let b = topBoxes.first {
+            let bw = b.xmax - b.xmin
+            let bh = b.ymax - b.ymin
+            await MainActor.run {
+                self.status = String(format: "bbox %.0f×%.0f (%.2f:1) conf %.2f",
+                                     bw, bh, bw/bh, b.score)
+            }
+        }
         return detections
     }
 
