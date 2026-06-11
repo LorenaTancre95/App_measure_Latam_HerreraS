@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/boxer-models-cache
-          key: boxer3d-models-v3
+          key: boxer3d-models-v4
 
       - name: Download and convert models
         if: steps.cache-models.outputs.cache-hit != 'true'
@@ -27,13 +27,9 @@ jobs:
           pip install -q "huggingface_hub[cli]" ultralytics
           mkdir -p /tmp/boxer-models-cache
 
-          # YOLO11s trained on single class "box" (leeyunjai/yolo11-box-detect)
-          hf download leeyunjai/yolo11-box-detect box-11s.pt \
-            --local-dir /tmp/boxer-models-cache
-
-          # Export .pt → ONNX (produces box-11s.onnx in the same dir)
+          # Standard yolo11n COCO from Ultralytics (auto-downloaded)
           cd /tmp/boxer-models-cache
-          yolo export model=box-11s.pt format=onnx imgsz=640 simplify=True
+          yolo export model=yolo11n.pt format=onnx imgsz=640 simplify=True
 
           # BoxerNet 3D lifting model
           cd /tmp
@@ -42,7 +38,7 @@ jobs:
 
       - name: Copy models into boxer/ for build
         run: |
-          cp /tmp/boxer-models-cache/box-11s.onnx boxer/yolo11n.onnx
+          cp /tmp/boxer-models-cache/yolo11n.onnx boxer/yolo11n.onnx
           cp /tmp/boxer-models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
 
       # ── Xcode / SPM ──────────────────────────────────────────────────
