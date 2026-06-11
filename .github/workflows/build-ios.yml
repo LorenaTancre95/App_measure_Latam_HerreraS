@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/boxer-models-cache
-          key: boxer3d-models-v5
+          key: boxer3d-models-v6
 
       - name: Download and convert models
         if: steps.cache-models.outputs.cache-hit != 'true'
@@ -27,13 +27,11 @@ jobs:
           pip install -q "huggingface_hub[cli]" ultralytics
           mkdir -p /tmp/boxer-models-cache
 
-          # YOLO11s trained on single class "box" (leeyunjai/yolo11-box-detect)
-          hf download leeyunjai/yolo11-box-detect box-11s.pt \
-            --local-dir /tmp/boxer-models-cache
-
-          # Export .pt → ONNX (produces box-11s.onnx in the same dir)
+          # Custom trained model (21k images, 1 class: caja)
+          pip install -q ultralytics
+          cp models_yolo/best_box.pt /tmp/boxer-models-cache/best_box.pt
           cd /tmp/boxer-models-cache
-          yolo export model=box-11s.pt format=onnx imgsz=640 simplify=True
+          yolo export model=best_box.pt format=onnx imgsz=640 simplify=True
 
           # BoxerNet 3D lifting model
           cd /tmp
