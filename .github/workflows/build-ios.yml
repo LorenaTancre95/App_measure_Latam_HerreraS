@@ -13,31 +13,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Models (391 MB BoxerNet + 10 MB yolo11n) ──────────────────────
+      # ── Models ────────────────────────────────────────────────────────
       - name: Cache ONNX models
         id: cache-models
         uses: actions/cache@v4
         with:
           path: /tmp/boxer-models-cache
-          key: boxer3d-models-v1
+          key: boxer3d-models-v3
 
-      - name: Download models from Hugging Face
+      - name: Download and convert models
         if: steps.cache-models.outputs.cache-hit != 'true'
         run: |
-          pip install -q "huggingface_hub[cli]"
-          hf download Barath/boxer3d \
-            yolo11n.onnx BoxerNet.onnx \
+          pip install -q "huggingface_hub[cli]" ultralytics
+          mkdir -p /tmp/boxer-models-cache
+
+          # YOLO11s trained on single class "box" (leeyunjai/yolo11-box-detect)
+          hf download leeyunjai/yolo11-box-detect box-11s.pt \
+            --local-dir /tmp/boxer-models-cache
+
+          # Export .pt → ONNX (produces box-11s.onnx in the same dir)
+          cd /tmp/boxer-models-cache
+          yolo export model=box-11s.pt format=onnx imgsz=640 simplify=True
+
+          # BoxerNet 3D lifting model
+          cd /tmp
+          hf download Barath/boxer3d BoxerNet.onnx \
             --local-dir /tmp/boxer-models-cache
 
       - name: Copy models into boxer/ for build
         run: |
-          cp /tmp/boxer-models-cache/yolo11n.onnx boxer/yolo11n.onnx
+          cp /tmp/boxer-models-cache/box-11s.onnx boxer/yolo11n.onnx
           cp /tmp/boxer-models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
 
       # ── Xcode / SPM ──────────────────────────────────────────────────
       - name: Select latest Xcode
         run: |
-          # Pick newest Xcode available on this runner
           XCODE=$(ls /Applications | grep 'Xcode' | sort -V | tail -1)
           sudo xcode-select -s "/Applications/$XCODE/Contents/Developer"
           xcodebuild -version
@@ -76,15 +86,8 @@ jobs:
       # ── Package IPA ──────────────────────────────────────────────────
       - name: Package IPA
         run: |
-          echo "=== Archive tree ==="
-          find "$RUNNER_TEMP/boxer.xcarchive" -maxdepth 4 | sort
-
           APP=$(find "$RUNNER_TEMP/boxer.xcarchive" -name "*.app" | head -1)
-          if [ -z "$APP" ]; then
-            echo "ERROR: no .app found in xcarchive"
-            exit 1
-          fi
-          echo "Packaging: $APP"
+          if [ -z "$APP" ]; then echo "ERROR: no .app found"; exit 1; fi
           mkdir -p "$RUNNER_TEMP/ipa/Payload"
           cp -r "$APP" "$RUNNER_TEMP/ipa/Payload/"
           cd "$RUNNER_TEMP/ipa"
