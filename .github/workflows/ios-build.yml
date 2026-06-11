@@ -129,7 +129,7 @@ jobs:
               print('PATCH Podfile: pod LidarBoxMeasure ausente — adicionando...')
               podfile = re.sub(
                   r'(use_expo_modules!)',
-                  r"\1\n  pod 'LidarBoxMeasure', :path => '../modules/lidar-box-measure'\n  pod 'onnxruntime-objc'",
+                  r"\1\n  pod 'LidarBoxMeasure', :path => '../modules/lidar-box-measure'\n  pod 'onnxruntime-objc', :modular_headers => true",
                   podfile, count=1
               )
               with open('ios/Podfile', 'w') as f:
@@ -140,7 +140,7 @@ jobs:
               if 'onnxruntime-objc' not in podfile:
                   podfile = re.sub(
                       r"(pod 'LidarBoxMeasure'[^\n]*)",
-                      r"\1\n  pod 'onnxruntime-objc'",
+                      r"\1\n  pod 'onnxruntime-objc', :modular_headers => true",
                       podfile, count=1
                   )
                   with open('ios/Podfile', 'w') as f:
@@ -208,6 +208,16 @@ jobs:
           cd ios
           pod install --repo-update 2>&1 | tee /tmp/pod_install.log
           exit ${PIPESTATUS[0]}
+
+      - name: Diagnosticar módulo onnxruntime post-install
+        if: always()
+        run: |
+          echo "=== module maps de onnxruntime ==="
+          find ios/Pods -name "*.modulemap" 2>/dev/null | xargs grep -l "onnx\|OnnxRuntime\|OnnxRuntimeBindings" 2>/dev/null | head -10 | while read f; do
+            echo "--- $f ---"; cat "$f"
+          done
+          echo "=== xcframeworks instalados ==="
+          find ios/Pods -name "*.xcframework" -type d 2>/dev/null | head -10
         env:
           NO_FLIPPER: 1
 
