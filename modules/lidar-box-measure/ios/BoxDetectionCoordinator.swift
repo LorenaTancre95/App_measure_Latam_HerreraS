@@ -83,6 +83,10 @@ final class BoxDetectionCoordinator: NSObject {
     private let modelInputSize: CGFloat = 640
     private var modelStatusText = "YOLO: loading..."
 
+    // MARK: BoxerNet (ONNX, CPU-only)
+    private var boxerNet: BoxerNetInference?
+    private var boxerNetStatus = "BoxerNet: not loaded"
+
     // MARK: Vision rectangle request (finds precise box face corners)
     private let vnRectRequest: VNDetectRectanglesRequest = {
         let r = VNDetectRectanglesRequest()
@@ -210,6 +214,32 @@ final class BoxDetectionCoordinator: NSObject {
             }
         }
         modelStatusText = lastError.isEmpty ? "NOT LOADED" : "LOAD ERR: \(lastError)"
+        loadBoxerNet()
+    }
+
+    private func loadBoxerNet() {
+        let onnxName = "BoxerNet"
+        var searchBundles: [Bundle] = [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)]
+        for bName in ["LidarBoxMeasure", "LidarBoxMeasureResources"] {
+            for parent in [Bundle.main, Bundle(for: BoxDetectionCoordinator.self)] {
+                if let u = parent.url(forResource: bName, withExtension: "bundle"),
+                   let b = Bundle(url: u) { searchBundles.append(b) }
+            }
+        }
+        for b in searchBundles {
+            let url = URL(fileURLWithPath: b.bundlePath).appendingPathComponent("\(onnxName).onnx")
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            do {
+                boxerNet = try BoxerNetInference(modelPath: url.path)
+                boxerNetStatus = "BoxerNet OK"
+                return
+            } catch {
+                boxerNetStatus = "BoxerNet ERR: \(error.localizedDescription)"
+            }
+        }
+        if boxerNet == nil && boxerNetStatus == "BoxerNet: not loaded" {
+            boxerNetStatus = "BoxerNet.onnx not found"
+        }
     }
 
     // MARK: - Layer setup
@@ -282,13 +312,16 @@ final class BoxDetectionCoordinator: NSObject {
             missedFrames = 0
             drawDetectionRect(raw, label: "\(Int(det.score * 100))%", in: vp)
 
-            // Try precise Vision rectangle → direct LiDAR corners; fall back to PCA
-            if let rectObs = findBestRectangle(in: frame.capturedImage, within: expanded, viewportSize: vp),
-               measureFromRect(rectObs, frame: frame, depth: depth, vp: vp) {
+            // BoxerNet path (best quality — exact 3D box from neural network)
+            let yoloBox640 = det   // already in 640×640 coords
+            if measureWithBoxerNet(yoloDet: yoloBox640, frame: frame, depth: depth, vp: vp) {
+                updateDebug("YOLO \(Int(det.score * 100))% + BoxerNet · \(boxerNetStatus)")
+            } else if let rectObs = findBestRectangle(in: frame.capturedImage, within: expanded, viewportSize: vp),
+                      measureFromRect(rectObs, frame: frame, depth: depth, vp: vp) {
                 updateDebug("YOLO \(Int(det.score * 100))% + Rect · \(modelStatusText)")
             } else {
                 measure3D(box: expanded, samMask: nil, frame: frame, depth: depth, vp: vp)
-                updateDebug("YOLO \(Int(det.score * 100))% · \(modelStatusText)")
+                updateDebug("YOLO \(Int(det.score * 100))% PCA · \(modelStatusText)")
             }
         } else if let prev = lastDetection, missedFrames < maxMissedFrames {
             missedFrames += 1
@@ -910,6 +943,93 @@ final class BoxDetectionCoordinator: NSObject {
         if faceU.y < 0 { faceU = -faceU }
         if simd_dot(simd_cross(faceR, faceU), e3) < 0 { faceR = -faceR }
         return (faceR, faceU, e3)
+    }
+
+    // MARK: - BoxerNet 3D measurement
+
+    /// Run BoxerNet on the YOLO detection. Returns true if a detection was produced.
+    @discardableResult
+    private func measureWithBoxerNet(yoloDet: YOLOPrediction,
+                                      frame: ARFrame,
+                                      depth: ARDepthData,
+                                      vp: CGSize) -> Bool {
+        guard let boxer = boxerNet,
+              let depthData = frame.sceneDepth else { return false }
+
+        // 1. Prepare 960×960 image
+        let image960 = pixelBufferToCHW(frame.capturedImage, targetSize: BoxerNetInference.imageSize)
+
+        // 2. Scale YOLO 640-coords → 960-coords
+        let scale = Float(BoxerNetInference.imageSize) / Float(modelInputSize)
+        let box2D = Box2D(
+            xmin: yoloDet.x1 * scale, ymin: yoloDet.y1 * scale,
+            xmax: yoloDet.x2 * scale, ymax: yoloDet.y2 * scale,
+            label: "caja", score: yoloDet.score
+        )
+
+        // 3. Depth map + intrinsics scaled for center-crop 960×960
+        let depthMap  = extractDepthMap(depthData.depthMap)
+        let intrinsics = scaleIntrinsicsForBoxerNet(
+            frame.camera.intrinsics,
+            imageResolution: frame.camera.imageResolution,
+            toSize: BoxerNetInference.imageSize
+        )
+
+        // 4. Run BoxerNet (CPU, ~1s)
+        let detections: [Detection3D]
+        do {
+            detections = try boxer.predict(
+                image: image960, depthMap: depthMap, intrinsics: intrinsics,
+                cameraTransform: frame.camera.transform,
+                boxes2D: [box2D], confidenceThreshold: 0.25
+            )
+        } catch {
+            boxerNetStatus = "BoxerNet infer ERR: \(error.localizedDescription)"
+            return false
+        }
+        guard let det = detections.first else { return false }
+
+        // 5. Build 8 world-space corners from BoxerNet center+size+worldTransform
+        let hw = det.size.x / 2, hh = det.size.y / 2, hd = det.size.z / 2
+        let localCorners: [simd_float3] = [
+            simd_float3(-hw, -hh, -hd), simd_float3( hw, -hh, -hd),
+            simd_float3(-hw,  hh, -hd), simd_float3( hw,  hh, -hd),
+            simd_float3(-hw, -hh,  hd), simd_float3( hw, -hh,  hd),
+            simd_float3(-hw,  hh,  hd), simd_float3( hw,  hh,  hd),
+        ]
+        func w(_ lc: simd_float3) -> simd_float3 {
+            let v = det.worldTransform * simd_float4(lc.x, lc.y, lc.z, 1)
+            return simd_float3(v.x, v.y, v.z)
+        }
+        // Front face: bl=0, br=1, tl=2, tr=3 / Back face: bbl=4, bbr=5, btl=6, btr=7
+        let bl = w(localCorners[0]), br = w(localCorners[1])
+        let tl = w(localCorners[2]), tr = w(localCorners[3])
+        let bbl = w(localCorners[4]), bbr = w(localCorners[5])
+        let btl = w(localCorners[6]), btr = w(localCorners[7])
+
+        // 6. Measurements in cm
+        let comprimento = Double(det.size.x) * 100
+        let altura      = Double(det.size.y) * 100
+        let largura     = Double(det.size.z) * 100
+        guard comprimento > 2, altura > 2, largura > 2 else { return false }
+
+        // 7. EMA smoothing
+        let α = smoothAlpha
+        smoothBL  = smoothBL.map  { α*bl  + (1-α)*$0 } ?? bl
+        smoothBR  = smoothBR.map  { α*br  + (1-α)*$0 } ?? br
+        smoothTL  = smoothTL.map  { α*tl  + (1-α)*$0 } ?? tl
+        smoothTR  = smoothTR.map  { α*tr  + (1-α)*$0 } ?? tr
+        smoothBBL = smoothBBL.map { α*bbl + (1-α)*$0 } ?? bbl
+        smoothBBR = smoothBBR.map { α*bbr + (1-α)*$0 } ?? bbr
+        smoothBTL = smoothBTL.map { α*btl + (1-α)*$0 } ?? btl
+        smoothBTR = smoothBTR.map { α*btr + (1-α)*$0 } ?? btr
+
+        let m = NativeMeasurement(comprimento: comprimento, largura: largura, altura: altura)
+        addToBuffer(m)
+        updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!,
+                      bbl: smoothBBL!, bbr: smoothBBR!, btl: smoothBTL!, btr: smoothBTR!,
+                      measurement: m)
+        return true
     }
 
     // MARK: - Vision rectangle helpers
