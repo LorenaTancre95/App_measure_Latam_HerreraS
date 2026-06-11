@@ -83,6 +83,18 @@ final class BoxDetectionCoordinator: NSObject {
     private let modelInputSize: CGFloat = 640
     private var modelStatusText = "YOLO: loading..."
 
+    // MARK: Vision rectangle request (finds precise box face corners)
+    private let vnRectRequest: VNDetectRectanglesRequest = {
+        let r = VNDetectRectanglesRequest()
+        r.minimumAspectRatio    = 0.12
+        r.maximumAspectRatio    = 1.0
+        r.minimumSize           = 0.06
+        r.maximumObservations   = 8
+        r.minimumConfidence     = 0.35
+        r.quadratureTolerance   = 25
+        return r
+    }()
+
     // MARK: SAM segmentation
     private let sam = SAMInference()
 
@@ -269,12 +281,24 @@ final class BoxDetectionCoordinator: NSObject {
             lastDetection = expanded
             missedFrames = 0
             drawDetectionRect(raw, label: "\(Int(det.score * 100))%", in: vp)
-            measure3D(box: expanded, samMask: nil, frame: frame, depth: depth, vp: vp)
-            updateDebug("YOLO \(Int(det.score * 100))% · \(modelStatusText)")
+
+            // Try precise Vision rectangle → direct LiDAR corners; fall back to PCA
+            if let rectObs = findBestRectangle(in: frame.capturedImage, within: expanded, viewportSize: vp),
+               measureFromRect(rectObs, frame: frame, depth: depth, vp: vp) {
+                updateDebug("YOLO \(Int(det.score * 100))% + Rect · \(modelStatusText)")
+            } else {
+                measure3D(box: expanded, samMask: nil, frame: frame, depth: depth, vp: vp)
+                updateDebug("YOLO \(Int(det.score * 100))% · \(modelStatusText)")
+            }
         } else if let prev = lastDetection, missedFrames < maxMissedFrames {
             missedFrames += 1
-            measure3D(box: prev, samMask: nil, frame: frame, depth: depth, vp: vp)
-            updateDebug("LiDAR prev \(missedFrames)/\(maxMissedFrames)")
+            if let rectObs = findBestRectangle(in: frame.capturedImage, within: prev, viewportSize: vp),
+               measureFromRect(rectObs, frame: frame, depth: depth, vp: vp) {
+                updateDebug("Rect prev \(missedFrames)/\(maxMissedFrames)")
+            } else {
+                measure3D(box: prev, samMask: nil, frame: frame, depth: depth, vp: vp)
+                updateDebug("LiDAR prev \(missedFrames)/\(maxMissedFrames)")
+            }
         } else {
             lastDetection = nil; missedFrames = 0
             let inset: CGFloat = 0.325
@@ -888,6 +912,193 @@ final class BoxDetectionCoordinator: NSObject {
         return (faceR, faceU, e3)
     }
 
+    // MARK: - Vision rectangle helpers
+
+    /// Finds the best-matching VNRectangleObservation whose center lies inside yoloBBox (screen coords).
+    private func findBestRectangle(in pixelBuffer: CVPixelBuffer,
+                                    within yoloBBox: CGRect,
+                                    viewportSize vp: CGSize) -> VNRectangleObservation? {
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right, options: [:])
+        try? handler.perform([vnRectRequest])
+        guard let results = vnRectRequest.results as? [VNRectangleObservation] else { return nil }
+
+        // Vision BL-origin normalized → screen TL-origin
+        func obsCenterScreen(_ obs: VNRectangleObservation) -> CGPoint {
+            let bb = obs.boundingBox
+            return CGPoint(x: (bb.minX + bb.maxX) / 2 * vp.width,
+                           y: (1.0 - (bb.minY + bb.maxY) / 2) * vp.height)
+        }
+
+        return results
+            .filter { yoloBBox.contains(obsCenterScreen($0)) }
+            .max(by: { $0.boundingBox.area < $1.boundingBox.area })
+    }
+
+    /// Read LiDAR depth at a screen point and reproject to world space.
+    private func worldPointAtScreenPt(_ screenPt: CGPoint,
+                                       frame: ARFrame,
+                                       depth: ARDepthData,
+                                       vp: CGSize) -> SIMD3<Float>? {
+        let inv = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        let nc  = CGPoint(x: screenPt.x / vp.width, y: screenPt.y / vp.height).applying(inv)
+        let dm  = depth.depthMap
+        let dW  = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
+        let sx  = max(0, min(dW - 1, Int(nc.x * CGFloat(dW))))
+        let sy  = max(0, min(dH - 1, Int(nc.y * CGFloat(dH))))
+
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dm, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(dm) else { return nil }
+        let depthVal = base.assumingMemoryBound(to: Float32.self)[sy * dW + sx]
+        guard depthVal > 0.05, depthVal < 8.0 else { return nil }
+
+        let intr = frame.camera.intrinsics
+        let iW   = Float(frame.camera.imageResolution.width)
+        let iH   = Float(frame.camera.imageResolution.height)
+        let imgX = Float(sx) / Float(dW) * iW
+        let imgY = Float(sy) / Float(dH) * iH
+        let xCam = (imgX - intr[2][0]) / intr[0][0] * depthVal
+        let yCam = (imgY - intr[2][1]) / intr[1][1] * depthVal
+        let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, -depthVal, 1)
+        return SIMD3<Float>(pt.x, pt.y, pt.z)
+    }
+
+    /// Average LiDAR depth at several neighbor offsets around screenPt (more robust than single pixel).
+    private func worldPointNeighborhood(_ screenPt: CGPoint,
+                                         frame: ARFrame,
+                                         depth: ARDepthData,
+                                         vp: CGSize,
+                                         radius: CGFloat = 6) -> SIMD3<Float>? {
+        let offsets: [CGFloat] = [-radius, 0, radius]
+        var depths: [Float] = []
+        let dm  = depth.depthMap
+        let dW  = CVPixelBufferGetWidth(dm), dH = CVPixelBufferGetHeight(dm)
+        let inv = frame.displayTransform(for: .portrait, viewportSize: vp).inverted()
+        CVPixelBufferLockBaseAddress(dm, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dm, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(dm) else { return nil }
+        let ptr = base.assumingMemoryBound(to: Float32.self)
+        for dy in offsets {
+            for dx in offsets {
+                let nc = CGPoint(x: (screenPt.x+dx) / vp.width,
+                                 y: (screenPt.y+dy) / vp.height).applying(inv)
+                let sx = max(0, min(dW-1, Int(nc.x * CGFloat(dW))))
+                let sy = max(0, min(dH-1, Int(nc.y * CGFloat(dH))))
+                let v = ptr[sy * dW + sx]
+                if v > 0.05, v < 8.0 { depths.append(v) }
+            }
+        }
+        guard depths.count >= 3 else { return nil }
+        let depthVal = depths.sorted()[depths.count / 4]   // lower-quartile → front face
+        let nc = CGPoint(x: screenPt.x / vp.width, y: screenPt.y / vp.height).applying(inv)
+        let sx = max(0, min(dW-1, Int(nc.x * CGFloat(dW))))
+        let sy = max(0, min(dH-1, Int(nc.y * CGFloat(dH))))
+        let intr = frame.camera.intrinsics
+        let iW   = Float(frame.camera.imageResolution.width)
+        let iH   = Float(frame.camera.imageResolution.height)
+        let imgX = Float(sx) / Float(dW) * iW
+        let imgY = Float(sy) / Float(dH) * iH
+        let xCam = (imgX - intr[2][0]) / intr[0][0] * depthVal
+        let yCam = (imgY - intr[2][1]) / intr[1][1] * depthVal
+        let pt   = frame.camera.transform * SIMD4<Float>(xCam, yCam, -depthVal, 1)
+        return SIMD3<Float>(pt.x, pt.y, pt.z)
+    }
+
+    /// Measure box using Vision rectangle corners directly projected to 3D with LiDAR.
+    /// Returns true if measurement was emitted.
+    @discardableResult
+    private func measureFromRect(_ obs: VNRectangleObservation,
+                                  frame: ARFrame,
+                                  depth: ARDepthData,
+                                  vp: CGSize) -> Bool {
+        // Vision normalized (BL-origin) → screen (TL-origin)
+        func toScreen(_ p: CGPoint) -> CGPoint {
+            CGPoint(x: p.x * vp.width, y: (1.0 - p.y) * vp.height)
+        }
+        let sBL = toScreen(obs.bottomLeft)
+        let sBR = toScreen(obs.bottomRight)
+        let sTL = toScreen(obs.topLeft)
+        let sTR = toScreen(obs.topRight)
+
+        guard
+            let wBL = worldPointNeighborhood(sBL, frame: frame, depth: depth, vp: vp),
+            let wBR = worldPointNeighborhood(sBR, frame: frame, depth: depth, vp: vp),
+            let wTL = worldPointNeighborhood(sTL, frame: frame, depth: depth, vp: vp),
+            let wTR = worldPointNeighborhood(sTR, frame: frame, depth: depth, vp: vp)
+        else { return false }
+
+        let c = Double(simd_distance(wBL, wBR)) * 100
+        var a = Double(simd_distance(wBL, wTL)) * 100
+        guard c > 3, c < 300, a > 3, a < 300 else { return false }
+
+        // Estimate box depth: LiDAR samples deeper than the front face
+        let screenBox = CGRect(x: min(sBL.x, sTL.x), y: min(sTL.y, sTR.y),
+                               width: max(sBR.x - sBL.x, sTR.x - sTL.x),
+                               height: max(sBL.y - sTL.y, sBR.y - sTR.y)).standardized
+        let centerD = sampleDepth(at: CGPoint(x: screenBox.midX, y: screenBox.midY),
+                                   frame: frame, depth: depth, vp: vp) ?? 1.0
+        let allD: [Float] = stride(from: 0, through: 1, by: 0.1).flatMap { fx -> [Float] in
+            stride(from: 0, through: 1, by: 0.15).compactMap { fy -> Float? in
+                let pt = CGPoint(x: screenBox.minX + screenBox.width * CGFloat(fx),
+                                 y: screenBox.minY + screenBox.height * CGFloat(fy))
+                return sampleDepth(at: pt, frame: frame, depth: depth, vp: vp)
+            }
+        }
+        let deeper = allD.filter { $0 > centerD + 0.05 && $0 < centerD + 0.70 }.sorted()
+        let depthEst: Float
+        if deeper.count >= 4 {
+            depthEst = max(deeper[deeper.count * 3 / 4] - centerD, 0.03)
+        } else {
+            depthEst = Float(min(c, a) / 100.0) * 0.70
+        }
+        let l = max(Double(depthEst) * 100, 3.0)
+
+        // Extrude back face along face normal (away from camera)
+        let faceRight = simd_normalize(wBR - wBL)
+        var depthDir  = SIMD3<Float>(-faceRight.z, 0, faceRight.x)
+        let camPos    = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                     frame.camera.transform.columns.3.y,
+                                     frame.camera.transform.columns.3.z)
+        let faceCenter = (wBL + wBR + wTL + wTR) / 4
+        if simd_dot(depthDir, simd_normalize(camPos - faceCenter)) > 0 { depthDir = -depthDir }
+
+        let ext = depthDir * Float(l / 100)
+        var bl = wBL, br = wBR, tl = wTL, tr = wTR
+        var bbl = bl + ext, bbr = br + ext, btl = tl + ext, btr = tr + ext
+
+        // Floor snap
+        if let fy = floorWorldY {
+            let bottomY = min(bl.y, br.y)
+            let snap = fy - bottomY
+            if abs(snap) < 0.25 {
+                bl.y  += snap; br.y  += snap
+                tl.y  += snap; tr.y  += snap
+                bbl.y += snap; bbr.y += snap
+                btl.y += snap; btr.y += snap
+                a = Double(max(tl.y, tr.y) - fy) * 100
+            }
+        }
+        guard a > 3 else { return false }
+
+        // EMA smoothing
+        let α = smoothAlpha
+        smoothBL  = smoothBL.map  { α*bl  + (1-α)*$0 } ?? bl
+        smoothBR  = smoothBR.map  { α*br  + (1-α)*$0 } ?? br
+        smoothTL  = smoothTL.map  { α*tl  + (1-α)*$0 } ?? tl
+        smoothTR  = smoothTR.map  { α*tr  + (1-α)*$0 } ?? tr
+        smoothBBL = smoothBBL.map { α*bbl + (1-α)*$0 } ?? bbl
+        smoothBBR = smoothBBR.map { α*bbr + (1-α)*$0 } ?? bbr
+        smoothBTL = smoothBTL.map { α*btl + (1-α)*$0 } ?? btl
+        smoothBTR = smoothBTR.map { α*btr + (1-α)*$0 } ?? btr
+
+        let m = NativeMeasurement(comprimento: c, largura: l, altura: a)
+        addToBuffer(m)
+        updateOverlay(bl: smoothBL!, br: smoothBR!, tl: smoothTL!, tr: smoothTR!,
+                      bbl: smoothBBL!, bbr: smoothBBR!, btl: smoothBTL!, btr: smoothBTR!,
+                      measurement: m)
+        return true
+    }
+
     // MARK: - LiDAR helpers (fallback)
     private func sampleDepth(at screenPt: CGPoint, frame: ARFrame,
                               depth: ARDepthData, vp: CGSize) -> Float? {
@@ -1047,6 +1258,11 @@ final class BoxDetectionCoordinator: NSObject {
     }
 
     func clearManualPoints() { manualPoints.removeAll() }
+}
+
+// MARK: - CGRect area
+private extension CGRect {
+    var area: CGFloat { width * height }
 }
 
 // MARK: - YOLOPrediction screen coordinates
