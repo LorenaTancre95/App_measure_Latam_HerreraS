@@ -15,9 +15,12 @@ struct ContentView: View {
             ARViewContainer(viewModel: viewModel)
 
             // YOLO 2D detection overlay (debug)
-            Canvas { ctx, _ in
-                for (bbox, _) in viewModel.debugBBoxes {
-                    ctx.stroke(Path(bbox), with: .color(.yellow.opacity(0.9)), lineWidth: 3)
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(viewModel.debugBBoxes.enumerated()), id: \.offset) { _, item in
+                    Rectangle()
+                        .stroke(Color.yellow, lineWidth: 4)
+                        .frame(width: item.rect.width, height: item.rect.height)
+                        .offset(x: item.rect.origin.x, y: item.rect.origin.y)
                 }
             }
             .ignoresSafeArea()

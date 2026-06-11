@@ -130,7 +130,14 @@ final class ARViewModel: ObservableObject {
             return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
                            width: abs(br.x - tl.x), height: abs(br.y - tl.y)), box.score)
         }
-        await MainActor.run { self.debugBBoxes = screenBoxes }
+        await MainActor.run {
+            self.debugBBoxes = screenBoxes
+            if let f = screenBoxes.first {
+                self.status = String(format: "screen (%.0f,%.0f) %.0fx%.0f",
+                                     f.rect.origin.x, f.rect.origin.y,
+                                     f.rect.width, f.rect.height)
+            }
+        }
 
         // 2. If BoxerNet is unavailable, report detections without 3D lifting.
         guard let boxer else {
