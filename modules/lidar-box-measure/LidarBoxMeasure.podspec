@@ -11,8 +11,6 @@ Pod::Spec.new do |s|
   s.authors        = { 'coki0291' => 'slherrera91@gmail.com' }
   s.platform       = :ios, '15.0'
   s.source         = { :path => '.' }
-  s.static_framework = true
-
   s.dependency 'ExpoModulesCore'
   s.dependency 'onnxruntime-objc', '>= 1.16.0'
 
