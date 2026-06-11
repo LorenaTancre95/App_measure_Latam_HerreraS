@@ -14,14 +14,13 @@ Pod::Spec.new do |s|
   s.static_framework = true
 
   s.dependency 'ExpoModulesCore'
-  s.dependency 'onnxruntime-objc', '~> 1.20'
+  s.dependency 'onnxruntime-objc', '>= 1.16.0'
 
   s.source_files = 'ios/**/*.{swift,m,mm}'
   s.resources    = ['ios/box_detector.mlpackage',
                     'ios/sam_encoder.mlpackage',
                     'ios/sam_decoder.mlpackage',
-                    'ios/BoxerNet.onnx',
-                    'ios/Models/*.onnx']
+                    'ios/BoxerNet.onnx']
   s.frameworks   = ['ARKit', 'SceneKit', 'AVFoundation', 'CoreML', 'Vision']
 
   s.pod_target_xcconfig = {
