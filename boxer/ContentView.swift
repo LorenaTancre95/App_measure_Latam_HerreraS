@@ -14,6 +14,15 @@ struct ContentView: View {
         ZStack {
             ARViewContainer(viewModel: viewModel)
 
+            // YOLO 2D detection overlay (debug)
+            Canvas { ctx, _ in
+                for (bbox, _) in viewModel.debugBBoxes {
+                    ctx.stroke(Path(bbox), with: .color(.yellow.opacity(0.9)), lineWidth: 3)
+                }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
             // Top spacer (removed status bar)
             VStack { Spacer() }
 

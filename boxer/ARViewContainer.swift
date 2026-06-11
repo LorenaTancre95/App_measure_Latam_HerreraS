@@ -21,5 +21,7 @@ struct ARViewContainer: UIViewRepresentable {
         return sceneView
     }
 
-    func updateUIView(_ uiView: ARSCNView, context: Context) {}
+    func updateUIView(_ uiView: ARSCNView, context: Context) {
+        viewModel.viewportSize = uiView.bounds.size
+    }
 }

@@ -17,8 +17,10 @@ final class ARViewModel: ObservableObject {
     @Published var isProcessing: Bool = false
     @Published var detections: [DetectionInfo] = []
     @Published var confidenceThreshold: Float = 0.3
+    @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
 
     var sceneView: ARSCNView?
+    var viewportSize: CGSize = UIScreen.main.bounds.size
     private var boxerNet: BoxerNet?
     private var yoloDetector: YOLODetector?
     private var boxNodes: [SCNNode] = []
@@ -111,6 +113,24 @@ final class ARViewModel: ObservableObject {
             return []
         }
         let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(3))
+
+        // Show YOLO 2D bboxes as screen-space overlay for debugging.
+        let vp = await MainActor.run { self.viewportSize }
+        let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
+        let res = frame.camera.imageResolution
+        let imgW = Float(res.width), imgH = Float(res.height)
+        let side = min(imgW, imgH)
+        let ox = (imgW - side) / 2, oy = (imgH - side) / 2
+        let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
+            func pt(_ x: Float, _ y: Float) -> CGPoint {
+                CGPoint(x: CGFloat((x / 640 * side + ox) / imgW),
+                        y: CGFloat((y / 640 * side + oy) / imgH)).applying(displayT)
+            }
+            let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
+            return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                           width: abs(br.x - tl.x), height: abs(br.y - tl.y)), box.score)
+        }
+        await MainActor.run { self.debugBBoxes = screenBoxes }
 
         // 2. If BoxerNet is unavailable, report detections without 3D lifting.
         guard let boxer else {
@@ -248,6 +268,7 @@ final class ARViewModel: ObservableObject {
         boxNodes.forEach { $0.removeFromParentNode() }
         boxNodes.removeAll()
         detections.removeAll()
+        debugBBoxes.removeAll()
     }
 }
 
