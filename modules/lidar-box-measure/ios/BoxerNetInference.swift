@@ -6,7 +6,7 @@ import Foundation
 import Accelerate
 import ARKit
 import simd
-import OnnxRuntimeBindings
+import onnxruntime_objc
 
 // MARK: - Data Types
 
