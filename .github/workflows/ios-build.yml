@@ -129,23 +129,31 @@ jobs:
               print('PATCH Podfile: pod LidarBoxMeasure ausente — adicionando...')
               podfile = re.sub(
                   r'(use_expo_modules!)',
-                  r"\1\n  pod 'LidarBoxMeasure', :path => '../modules/lidar-box-measure'\n  pod 'onnxruntime-objc'",
+                  r"\1\n  pod 'LidarBoxMeasure', :path => '../modules/lidar-box-measure'\n  pod 'onnxruntime-objc', :modular_headers => true",
                   podfile, count=1
               )
               with open('ios/Podfile', 'w') as f:
                   f.write(podfile)
               print('PATCH Podfile OK')
           else:
-              # Ensure onnxruntime-objc is also explicit even if LidarBoxMeasure already present
+              # Asegurar que onnxruntime-objc esté con modular_headers
               if 'onnxruntime-objc' not in podfile:
                   podfile = re.sub(
                       r"(pod 'LidarBoxMeasure'[^\n]*)",
-                      r"\1\n  pod 'onnxruntime-objc'",
+                      r"\1\n  pod 'onnxruntime-objc', :modular_headers => true",
                       podfile, count=1
                   )
                   with open('ios/Podfile', 'w') as f:
                       f.write(podfile)
-                  print('PATCH Podfile: adicionado onnxruntime-objc')
+                  print('PATCH Podfile: adicionado onnxruntime-objc con modular_headers')
+              elif ':modular_headers => true' not in podfile:
+                  podfile = podfile.replace(
+                      "pod 'onnxruntime-objc'",
+                      "pod 'onnxruntime-objc', :modular_headers => true"
+                  )
+                  with open('ios/Podfile', 'w') as f:
+                      f.write(podfile)
+                  print('PATCH Podfile: agregado modular_headers a onnxruntime-objc')
               print('LidarBoxMeasure ja esta no Podfile OK')
           PYEOF
 
