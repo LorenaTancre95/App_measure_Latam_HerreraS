@@ -16,7 +16,7 @@ final class ARViewModel: ObservableObject {
     @Published var status: String = "Initializing..."
     @Published var isProcessing: Bool = false
     @Published var detections: [DetectionInfo] = []
-    @Published var confidenceThreshold: Float = 0.8
+    @Published var confidenceThreshold: Float = 0.3
 
     var sceneView: ARSCNView?
     private var boxerNet: BoxerNet?
