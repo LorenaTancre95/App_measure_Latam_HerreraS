@@ -38,7 +38,7 @@ struct ContentView: View {
                             ForEach(Array(viewModel.detections.enumerated()), id: \.element.id) { i, det in
                                 DetectionCard(detection: det, color: boxColor(i))
                             }
-                            Button(action: { viewModel.clearBoxes() }) {
+                            Button(action: { viewModel.clearAll() }) {
                                 HStack(spacing: 6) {
                                     Image(systemName: "trash")
                                         .font(.system(size: 12))

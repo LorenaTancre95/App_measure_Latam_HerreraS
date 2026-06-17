@@ -275,6 +275,11 @@ final class ARViewModel: ObservableObject {
         boxNodes.forEach { $0.removeFromParentNode() }
         boxNodes.removeAll()
         detections.removeAll()
+        // debugBBoxes kept intentionally so 2D overlay stays visible alongside 3D box
+    }
+
+    func clearAll() {
+        clearBoxes()
         debugBBoxes.removeAll()
     }
 }
