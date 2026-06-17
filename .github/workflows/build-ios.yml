@@ -19,7 +19,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /tmp/boxer-models-cache
-          key: boxer3d-models-v8
+          key: boxer3d-models-v9
 
       - name: Download models
         if: steps.cache-models.outputs.cache-hit != 'true'
@@ -27,8 +27,8 @@ jobs:
           pip install -q "huggingface_hub[cli]"
           mkdir -p /tmp/boxer-models-cache
 
-          # Use pre-exported YOLOv8n ONNX directly (80-class COCO)
-          cp models_yolo/yolov8n.onnx /tmp/boxer-models-cache/yolov8n.onnx
+          # Use pre-exported ONNX directly (no conversion needed)
+          cp models_yolo/best.onnx /tmp/boxer-models-cache/best.onnx
 
           # BoxerNet 3D lifting model
           hf download Barath/boxer3d BoxerNet.onnx \
@@ -37,7 +37,7 @@ jobs:
       - name: Copy models into boxer/ for build
         run: |
           ls /tmp/boxer-models-cache/
-          cp /tmp/boxer-models-cache/yolov8n.onnx boxer/yolo11n.onnx
+          cp /tmp/boxer-models-cache/best.onnx boxer/yolo11n.onnx
           cp /tmp/boxer-models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
 
       # ── Xcode / SPM ──────────────────────────────────────────────────

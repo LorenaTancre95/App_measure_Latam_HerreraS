@@ -11,24 +11,12 @@ struct YOLOBox {
     let score: Float
 }
 
-/// YOLO ONNX inference wrapper (supports 1-class custom models and 80-class COCO).
+/// YOLO ONNX inference wrapper.
 final class YOLODetector {
     private let session: ORTSession
     private let env: ORTEnv
 
-    static let classNames: [String] = [
-        "person","bicycle","car","motorcycle","airplane","bus","train","truck","boat",
-        "traffic light","fire hydrant","stop sign","parking meter","bench","bird","cat",
-        "dog","horse","sheep","cow","elephant","bear","zebra","giraffe","backpack",
-        "umbrella","handbag","tie","suitcase","frisbee","skis","snowboard","sports ball",
-        "kite","baseball bat","baseball glove","skateboard","surfboard","tennis racket",
-        "bottle","wine glass","cup","fork","knife","spoon","bowl","banana","apple",
-        "sandwich","orange","broccoli","carrot","hot dog","pizza","donut","cake","chair",
-        "couch","potted plant","bed","dining table","toilet","tv","laptop","mouse",
-        "remote","keyboard","cell phone","microwave","oven","toaster","sink",
-        "refrigerator","book","clock","vase","scissors","teddy bear","hair drier",
-        "toothbrush"
-    ]
+    static let classNames: [String] = ["caja"]
 
     init(modelPath: String) throws {
         env = try ORTEnv(loggingLevel: .warning)
@@ -69,7 +57,7 @@ final class YOLODetector {
         let outputData = try outputs["output0"]!.tensorData() as Data
         let values = outputData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
 
-        let numClasses = Self.classNames.count
+        let numClasses = 1
         let numAnchors = 8400
         let stride = numAnchors
 
