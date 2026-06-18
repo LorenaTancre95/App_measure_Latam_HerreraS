@@ -70,32 +70,32 @@ struct BoxMeasurer2 {
         let height = yMax - yMin
         guard height > 0.02 else { return nil }
 
-        // 4. PCA on XZ footprint.
+        // 4. Orientation from 2D YOLO bbox horizontal direction.
+        //    Unproject left/right bbox edges at dFront → width axis in 3D XZ.
+        //    This is stable even when box dimensions are similar (PCA flips axes).
+        let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let sideo = min(bufWo, bufHo)
+        let oxo = (bufWo-sideo)/2, oyo = (bufHo-sideo)/2
+        let midVo = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sideo + oyo
+        let leftUo  = yoloBox.xmin / 640 * sideo + oxo
+        let rightUo = yoloBox.xmax / 640 * sideo + oxo
+        let intro = frame.camera.intrinsics
+        let fxo = intro[0][0], fyo = intro[1][1], cxo = intro[2][0], cyo = intro[2][1]
+        func edge3D(_ u: Float, _ v: Float) -> simd_float3 {
+            let cam = simd_float4((u-cxo)/fxo*dFront, (v-cyo)/fyo*dFront, -dFront, 1)
+            let w = frame.camera.transform * cam; return simd_float3(w.x/w.w, 0, w.z/w.w)
+        }
+        let wL3 = edge3D(leftUo, midVo), wR3 = edge3D(rightUo, midVo)
+        guard simd_distance(wL3, wR3) > 0.01 else { return nil }
+        let widthVec = simd_normalize(wR3 - wL3)
+        let axX = widthVec.x, axZ = widthVec.z
+        let pxX = -axZ, pxZ = axX   // depth axis (perpendicular to width)
+
+        // Project floor-removed pts onto 2D-anchored axes to measure sizes.
         let n = Float(pts.count)
         let xMean = pts.map { $0.x }.reduce(0, +) / n
         let zMean = pts.map { $0.z }.reduce(0, +) / n
-
-        var c00: Float = 0, c01: Float = 0, c11: Float = 0
-        for p in pts {
-            let dx = p.x - xMean, dz = p.z - zMean
-            c00 += dx*dx; c01 += dx*dz; c11 += dz*dz
-        }
-        c00 /= n; c01 /= n; c11 /= n
-
-        let trace = c00 + c11
-        let disc  = sqrt(max(0, trace*trace/4 - (c00*c11 - c01*c01)))
-        let lam1  = trace/2 + disc
-
-        var axX: Float, axZ: Float
-        if abs(c01) > 1e-6 {
-            let e = lam1 - c11; let len = sqrt(e*e + c01*c01)
-            axX = e/len; axZ = c01/len
-        } else {
-            axX = c00 >= c11 ? 1 : 0; axZ = c00 >= c11 ? 0 : 1
-        }
-        let pxX = -axZ, pxZ = axX   // perpendicular axis in XZ
-
-        // Project all pts onto both XZ axes, then use 3rd–97th percentile to reject outliers.
         var pVals: [Float] = []; var qVals: [Float] = []
         for p in pts {
             let dx = p.x - xMean, dz = p.z - zMean
@@ -107,8 +107,8 @@ struct BoxMeasurer2 {
         let pMin = pVals[lo], pMax = pVals[hi]
         let qMin = qVals[lo], qMax = qVals[hi]
 
-        let widthA = pMax - pMin   // larger PCA axis
-        let widthB = qMax - qMin   // smaller PCA axis (depth if box at angle)
+        let widthA = pMax - pMin
+        let widthB = qMax - qMin
         guard widthA > 0.02 else { return nil }
 
         // 5. If box is viewed nearly face-on, widthB is the noise band of the
