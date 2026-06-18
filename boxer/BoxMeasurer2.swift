@@ -54,9 +54,11 @@ struct BoxMeasurer2 {
         let pts = raw.filter { $0.y > floorThresh }
         guard pts.count >= minPoints else { return nil }
 
-        // 3. Height from Y extent of floor-removed cloud.
-        let yMin = pts.map { $0.y }.min()!
-        let yMax = pts.map { $0.y }.max()!
+        // 3. Height from Y extent (3rd–97th percentile to reject outliers).
+        var ySorted = pts.map { $0.y }; ySorted.sort()
+        let yLo = Int(Float(ySorted.count)*0.03), yHi = Int(Float(ySorted.count)*0.97)
+        let yMin = ySorted[yLo]
+        let yMax = ySorted[yHi]
         let height = yMax - yMin
         guard height > 0.02 else { return nil }
 
@@ -85,15 +87,17 @@ struct BoxMeasurer2 {
         }
         let pxX = -axZ, pxZ = axX   // perpendicular axis in XZ
 
-        // Project all pts onto both XZ axes.
-        var pMin: Float = .greatestFiniteMagnitude, pMax: Float = -.greatestFiniteMagnitude
-        var qMin: Float = .greatestFiniteMagnitude, qMax: Float = -.greatestFiniteMagnitude
+        // Project all pts onto both XZ axes, then use 3rd–97th percentile to reject outliers.
+        var pVals: [Float] = []; var qVals: [Float] = []
         for p in pts {
             let dx = p.x - xMean, dz = p.z - zMean
-            let pp = dx*axX + dz*axZ, qq = dx*pxX + dz*pxZ
-            pMin = min(pMin,pp); pMax = max(pMax,pp)
-            qMin = min(qMin,qq); qMax = max(qMax,qq)
+            pVals.append(dx*axX + dz*axZ)
+            qVals.append(dx*pxX + dz*pxZ)
         }
+        pVals.sort(); qVals.sort()
+        let lo = Int(Float(pVals.count)*0.03), hi = Int(Float(pVals.count)*0.97)
+        let pMin = pVals[lo], pMax = pVals[hi]
+        let qMin = qVals[lo], qMax = qVals[hi]
 
         let widthA = pMax - pMin   // larger PCA axis
         let widthB = qMax - qMin   // smaller PCA axis (depth if box at angle)
@@ -151,8 +155,12 @@ struct BoxMeasurer2 {
 
         let side = min(bufW, bufH)
         let ox = (bufW-side)/2, oy = (bufH-side)/2
-        let bx0 = yoloBox.xmin/640*side+ox, by0 = yoloBox.ymin/640*side+oy
-        let bx1 = yoloBox.xmax/640*side+ox, by1 = yoloBox.ymax/640*side+oy
+        let bxRaw0 = yoloBox.xmin/640*side+ox, byRaw0 = yoloBox.ymin/640*side+oy
+        let bxRaw1 = yoloBox.xmax/640*side+ox, byRaw1 = yoloBox.ymax/640*side+oy
+        // Shrink bbox by 8% on each side to avoid edge spill (floor/wall at borders)
+        let shrinkX = (bxRaw1-bxRaw0)*0.08, shrinkY = (byRaw1-byRaw0)*0.08
+        let bx0 = bxRaw0+shrinkX, by0 = byRaw0+shrinkY
+        let bx1 = bxRaw1-shrinkX, by1 = byRaw1-shrinkY
 
         let px0 = max(0, Int(bx0/bufW*Float(dW))), py0 = max(0, Int(by0/bufH*Float(dH)))
         let px1 = min(dW-1, Int(bx1/bufW*Float(dW))), py1 = min(dH-1, Int(by1/bufH*Float(dH)))
@@ -172,7 +180,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.55   // include up to 55 cm behind front face
+        let dCut = dFront + 0.30   // include up to 30 cm behind front face
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics
