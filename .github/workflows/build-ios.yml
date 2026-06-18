@@ -15,26 +15,9 @@ jobs:
 
       # ── Models ────────────────────────────────────────────────────────
       # best.onnx is in the repo at models_yolo/ — just copy it.
-      # BoxerNet is large; cache it from HuggingFace.
-      - name: Cache BoxerNet
-        id: cache-models
-        uses: actions/cache@v4
-        with:
-          path: /tmp/boxer-models-cache
-          key: boxer3d-boxernet-v1
-
-      - name: Download BoxerNet
-        if: steps.cache-models.outputs.cache-hit != 'true'
-        run: |
-          pip install -q "huggingface_hub[cli]"
-          mkdir -p /tmp/boxer-models-cache
-          hf download Barath/boxer3d BoxerNet.onnx \
-            --local-dir /tmp/boxer-models-cache
-
-      - name: Copy models into boxer/ for build
+      - name: Copy YOLO model into boxer/ for build
         run: |
           cp models_yolo/best.onnx boxer/best.onnx
-          cp /tmp/boxer-models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
 
       # ── Xcode / SPM ──────────────────────────────────────────────────
       - name: Select latest Xcode
