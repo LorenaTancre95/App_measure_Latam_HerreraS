@@ -123,10 +123,22 @@ struct BoxMeasurer2 {
         }
 
         // 6. Build gravity-aligned world transform.
-        let pc = (pMin+pMax)/2, qc = (qMin+qMax)/2
-        let cx = xMean + pc*axX + qc*pxX
-        let cz = zMean + pc*axZ + qc*pxZ
-        let center = simd_float3(cx, (yMin+yMax)/2, cz)
+        // Center XZ: project the YOLO bbox center at mid-depth using camera intrinsics.
+        // This avoids PCA centroid bias (near face has more LiDAR points → centroid shifts forward).
+        let bufWc = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufHc = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let sidec = min(bufWc, bufHc)
+        let oxc = (bufWc-sidec)/2, oyc = (bufHc-sidec)/2
+        let imgMidX = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sidec + oxc
+        let imgMidY = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sidec + oyc
+        let intr = frame.camera.intrinsics
+        let midD = dFront + depthEstimate/2
+        let camC = simd_float4(
+            (imgMidX - intr[2][0]) / intr[0][0] * midD,
+            (imgMidY - intr[2][1]) / intr[1][1] * midD,
+            -midD, 1)
+        let wc = frame.camera.transform * camC
+        let center = simd_float3(wc.x/wc.w, (yMin+yMax)/2, wc.z/wc.w)
 
         let yaw = atan2(axZ, axX)
         let cosY = cos(yaw), sinY = sin(yaw)
@@ -188,7 +200,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.30   // include up to 30 cm behind front face
+        let dCut = dFront + 0.40   // include up to 40 cm behind front face
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics
