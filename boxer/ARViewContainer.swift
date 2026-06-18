@@ -14,6 +14,9 @@ struct ARViewContainer: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         config.frameSemantics = [.sceneDepth]
         config.planeDetection = [.horizontal, .vertical]
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            config.sceneReconstruction = .mesh
+        }
 
         sceneView.session.run(config)
         viewModel.setup(sceneView: sceneView)
