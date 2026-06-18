@@ -33,12 +33,13 @@ final class ARViewModel: ObservableObject {
     // MARK: - Model Loading
 
     nonisolated private func loadModelsInBackground() async {
-        let yoloPath = Bundle.main.path(forResource: "yolo11n", ofType: "onnx")
+        // best.onnx = custom 1-class "caja" detector (models_yolo/best.onnx, 100 epochs).
+        let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx")
         let boxerPath = Bundle.main.path(forResource: "BoxerNet", ofType: "onnx")
 
         await MainActor.run { self.status = "Loading YOLO..." }
         guard let yoloPath else {
-            await MainActor.run { self.status = "yolo11n.onnx not found" }
+            await MainActor.run { self.status = "best.onnx not found in bundle" }
             return
         }
         let yolo: YOLODetector
@@ -139,49 +140,104 @@ final class ARViewModel: ObservableObject {
             }
         }
 
-        // 2. If BoxerNet is unavailable, report detections without 3D lifting.
+        // 2. Floor ROI filter — keep only detections whose LiDAR center is
+        //    0–1.5 m above the lowest ARKit horizontal plane (the floor).
+        //    If no floor has been detected yet, keep all boxes.
+        let bufW = CVPixelBufferGetWidth(frame.capturedImage)
+        let bufH = CVPixelBufferGetHeight(frame.capturedImage)
+        let depthPixelBuffer = frame.sceneDepth!.depthMap
+        let depthW = CVPixelBufferGetWidth(depthPixelBuffer)
+        let depthH = CVPixelBufferGetHeight(depthPixelBuffer)
+        let rawDepth = extractDepthMap(depthPixelBuffer)
+
+        let floorY: Float? = frame.anchors
+            .compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal }
+            .map { Float($0.transform.columns.3.y) }
+            .min()
+
+        let roiBoxes: [YOLOBox] = topBoxes.filter { box in
+            // Map YOLO center (640×640) → landscape buffer pixels.
+            let bside = min(Float(bufW), Float(bufH))
+            let bOx = (Float(bufW) - bside) / 2
+            let bOy = (Float(bufH) - bside) / 2
+            let imgX = (box.xmin + box.xmax) / 2 / 640.0 * bside + bOx
+            let imgY = (box.ymin + box.ymax) / 2 / 640.0 * bside + bOy
+
+            // Sample LiDAR depth at that pixel.
+            let dx = Int(imgX / Float(bufW) * Float(depthW))
+            let dy = Int(imgY / Float(bufH) * Float(depthH))
+            guard dx >= 0, dx < depthW, dy >= 0, dy < depthH else { return true }
+            let depth = rawDepth[dy][dx]
+            guard depth > 0.1, depth < 8.0 else { return true }
+
+            // Unproject to world space using camera intrinsics (landscape buffer coords).
+            let intr = frame.camera.intrinsics
+            let camPt = simd_float4(
+                (imgX - intr[2][0]) / intr[0][0] * depth,
+                (imgY - intr[2][1]) / intr[1][1] * depth,
+                -depth,   // ARKit camera: –Z forward
+                1
+            )
+            let worldPt = frame.camera.transform * camPt
+            let worldY = worldPt.y / worldPt.w
+
+            // If floor is known, filter by height above floor.
+            if let floor = floorY {
+                let h = worldY - floor
+                return h >= -0.05 && h <= 1.8   // −5 cm tolerance … 1.8 m max box height
+            }
+            return true   // no floor detected yet — allow everything
+        }
+
+        let filteredBoxes = roiBoxes.isEmpty ? topBoxes : roiBoxes
+
+        await MainActor.run {
+            if let floor = floorY {
+                let kept = filteredBoxes.count
+                let total = topBoxes.count
+                if kept < total {
+                    self.status = "ROI: \(kept)/\(total) cajas sobre el piso"
+                }
+            }
+        }
+
+        // 3. If BoxerNet is unavailable, report detections without 3D lifting.
         guard let boxer else {
             await MainActor.run {
-                self.status = "\(topBoxes.count) objeto(s) — BoxerNet no disponible"
+                self.status = "\(filteredBoxes.count) objeto(s) — BoxerNet no disponible"
             }
             return []
         }
 
-        // 3. Scale YOLO boxes (640 → 960) for BoxerNet.
+        // 4. Scale filtered boxes (640 → 960) for BoxerNet.
         let (boxerImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: BoxerNet.imageSize)
         let scale = Float(BoxerNet.imageSize) / 640.0
-        let boxes2D = topBoxes.map { box in
+        let boxes2D = filteredBoxes.map { box in
             Box2D(xmin: box.xmin * scale, ymin: box.ymin * scale,
                   xmax: box.xmax * scale, ymax: box.ymax * scale,
                   label: box.label, score: box.score)
         }
 
-        // 4. Extract LiDAR depth + scale intrinsics.
-        // Use pixel buffer dimensions (always landscape) — camera.imageResolution
-        // can report portrait-swapped dimensions when phone is held in portrait mode,
-        // which would corrupt the center-crop offset and intrinsics scaling.
-        let bufW = CVPixelBufferGetWidth(frame.capturedImage)
-        let bufH = CVPixelBufferGetHeight(frame.capturedImage)
+        // 5. Scale intrinsics for BoxerNet (reuses bufW/bufH/rawDepth from ROI step).
         let bufferSize = CGSize(width: bufW, height: bufH)
-
-        let depthMap = extractDepthMap(frame.sceneDepth!.depthMap)
         let intrinsics = scaleIntrinsicsWithCrop(
             frame.camera.intrinsics,
             from: bufferSize,
             toSize: BoxerNet.imageSize
         )
 
-        // 5. BoxerNet 3D lifting.
+        // 6. BoxerNet 3D lifting.
         let conf = await MainActor.run { self.confidenceThreshold }
         let detections = try boxer.predict(
-            image: boxerImage, depthMap: depthMap, intrinsics: intrinsics,
+            image: boxerImage, depthMap: rawDepth, intrinsics: intrinsics,
             imageResolution: bufferSize,
             cameraTransform: frame.camera.transform, boxes2D: boxes2D,
             confidenceThreshold: conf
         )
 
-        // Debug: show YOLO 2D bbox in status (640×640 coords)
-        if let b = topBoxes.first {
+        // Debug: show bbox of first kept detection.
+        if let b = filteredBoxes.first {
             let bw = b.xmax - b.xmin
             let bh = b.ymax - b.ymin
             await MainActor.run {
