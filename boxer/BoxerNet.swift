@@ -116,10 +116,7 @@ final class BoxerNet {
         let T_vc = T_wv.inverse * T_wc
 
         // 2. Build SDP patches (median LiDAR depth per 16x16 patch).
-        let sdpPatches = buildSDPPatches(
-            depthMap: depthMap,
-            imageResolution: imageResolution
-        )
+        let sdpPatches = buildSDPPatches(depthMap: depthMap)
 
         // 3. Normalise 2D boxes.
         let W = Float(Self.imageSize)
@@ -256,8 +253,7 @@ final class BoxerNet {
 
     /// Project LiDAR depth to 960x960 image, compute median depth per 16x16 patch.
     private func buildSDPPatches(
-        depthMap: [[Float]],
-        imageResolution: CGSize
+        depthMap: [[Float]]
     ) -> [Float] {
         let S = Self.imageSize
         let P = Self.patchSize
@@ -273,14 +269,9 @@ final class BoxerNet {
         }
         let depthW = depthMap[0].count
 
-        let imgW = Float(imageResolution.width)
-        let imgH = Float(imageResolution.height)
-        let side = min(imgW, imgH)
-        let ox = (imgW - side) / 2
-        let oy = (imgH - side) / 2
-        let cropScale = Float(S) / side
-        let imgScaleX = imgW / Float(depthW)
-        let imgScaleY = imgH / Float(depthH)
+        // Simple scaling from depth map to 960x960 (matches BoxerNet training preprocessing).
+        let scaleX = Float(S) / Float(depthW)
+        let scaleY = Float(S) / Float(depthH)
 
         let step = max(1, Int(sqrt(Float(depthH * depthW) / 20000.0)))
         for v in stride(from: 0, to: depthH, by: step) {
@@ -288,9 +279,8 @@ final class BoxerNet {
                 let z = depthMap[v][u]
                 guard z > 0 else { continue }
 
-                let px = (Float(u) * imgScaleX - ox) * cropScale
-                let py = (Float(v) * imgScaleY - oy) * cropScale
-                guard px >= 0, px < Float(S), py >= 0, py < Float(S) else { continue }
+                let px = Float(u) * scaleX
+                let py = Float(v) * scaleY
 
                 let pi = Int(py) / P
                 let pj = Int(px) / P
