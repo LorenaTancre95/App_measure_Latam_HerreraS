@@ -13,10 +13,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ── Model ─────────────────────────────────────────────────────────
-      # best.onnx is committed to models_yolo/ — just copy it in.
-      - name: Copy YOLO model into boxer/ for build
-        run: cp models_yolo/best.onnx boxer/best.onnx
+      # ── Models ────────────────────────────────────────────────────────
+      - name: Cache ONNX models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: /tmp/boxer-models-cache
+          key: boxer3d-models-v10
+
+      - name: Download models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          pip install -q "huggingface_hub[cli]" ultralytics
+          mkdir -p /tmp/boxer-models-cache
+
+          # Standard yolo11n COCO (auto-downloaded by Ultralytics)
+          cd /tmp/boxer-models-cache
+          yolo export model=yolo11n.pt format=onnx imgsz=640 simplify=True
+
+          # BoxerNet 3D lifting model
+          hf download Barath/boxer3d BoxerNet.onnx \
+            --local-dir /tmp/boxer-models-cache
+
+      - name: Copy models into boxer/ for build
+        run: |
+          cp /tmp/boxer-models-cache/yolo11n.onnx boxer/yolo11n.onnx
+          cp /tmp/boxer-models-cache/BoxerNet.onnx boxer/BoxerNet.onnx
 
       # ── Xcode / SPM ──────────────────────────────────────────────────
       - name: Select latest Xcode

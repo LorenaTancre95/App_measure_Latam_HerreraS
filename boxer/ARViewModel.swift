@@ -21,6 +21,7 @@ final class ARViewModel: ObservableObject {
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
+    private var boxerNet: BoxerNet?
     private var yoloDetector: YOLODetector?
     private var boxNodes: [SCNNode] = []
 
@@ -32,25 +33,41 @@ final class ARViewModel: ObservableObject {
     // MARK: - Model Loading
 
     nonisolated private func loadModelsInBackground() async {
-        // best.onnx bundled as "best" (1-class caja detector, 100 epochs).
-        let modelPath = Bundle.main.path(forResource: "best", ofType: "onnx")
-            ?? Bundle.main.path(forResource: "yolo11n", ofType: "onnx")
+        let yoloPath = Bundle.main.path(forResource: "yolo11n", ofType: "onnx")
+        let boxerPath = Bundle.main.path(forResource: "BoxerNet", ofType: "onnx")
 
         await MainActor.run { self.status = "Loading YOLO..." }
-        guard let modelPath else {
-            await MainActor.run { self.status = "best.onnx not found in bundle" }
+        guard let yoloPath else {
+            await MainActor.run { self.status = "yolo11n.onnx not found" }
             return
         }
         let yolo: YOLODetector
-        do { yolo = try YOLODetector(modelPath: modelPath) }
+        do { yolo = try YOLODetector(modelPath: yoloPath) }
         catch {
             await MainActor.run { self.status = "YOLO failed: \(error.localizedDescription)" }
             return
         }
 
+        await MainActor.run { self.status = "Loading BoxerNet..." }
+
+        var boxer: BoxerNet? = nil
+        if let boxerPath {
+            do { boxer = try BoxerNet(modelPath: boxerPath) }
+            catch {
+                // BoxerNet failed (model too large or unsupported device).
+                // Fall back to YOLO-only mode — 3D lifting will be unavailable.
+                await MainActor.run {
+                    self.yoloDetector = yolo
+                    self.status = "YOLO only (BoxerNet no disponible: \(error.localizedDescription))"
+                }
+                return
+            }
+        }
+
         await MainActor.run {
             self.yoloDetector = yolo
-            self.status = "Ready — tap Detect 3D"
+            self.boxerNet = boxer
+            self.status = boxer != nil ? "Ready — tap Detect 3D" : "Ready — YOLO only (sin BoxerNet.onnx)"
         }
     }
 
@@ -68,9 +85,10 @@ final class ARViewModel: ObservableObject {
         isProcessing = true
         status = "Detecting..."
 
+        let capturedBoxerNet = boxerNet
         Task.detached {
             do {
-                let results = try await self.runPipeline(frame: frame, yolo: yoloDetector)
+                let results = try await self.runPipeline(frame: frame, boxer: capturedBoxerNet, yolo: yoloDetector)
                 await MainActor.run {
                     self.placeBoxes(results, in: sceneView)
                     self.isProcessing = false
@@ -85,56 +103,93 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func runPipeline(
-        frame: ARFrame, yolo: YOLODetector
+        frame: ARFrame, boxer: BoxerNet?, yolo: YOLODetector
     ) async throws -> [Detection3D] {
-        // 1. YOLO detection (640×640 square crop).
+        // 1. YOLO detection (640×640).
         let (yoloImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
-        let confThreshold = await MainActor.run { self.confidenceThreshold }
-        let yoloBoxes = try yolo.detect(
-            image: yoloImage, imageWidth: 640, imageHeight: 640,
-            confThreshold: confThreshold
-        )
+        let yoloBoxes = try yolo.detect(image: yoloImage, imageWidth: 640, imageHeight: 640)
         guard !yoloBoxes.isEmpty else {
-            await MainActor.run { self.status = "No cajas detected" }
+            await MainActor.run { self.status = "No objects detected" }
             return []
         }
         let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(3))
 
-        // 2. Show YOLO 2D bboxes as screen-space overlay for debugging.
+        // Show YOLO 2D bboxes as screen-space overlay for debugging.
         let vp = await MainActor.run { self.viewportSize }
         let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
-        let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
-        let side = min(bufW, bufH)
-        let ox = (bufW - side) / 2, oy = (bufH - side) / 2
+        let res = frame.camera.imageResolution
+        let imgW = Float(res.width), imgH = Float(res.height)
+        let side = min(imgW, imgH)
+        let ox = (imgW - side) / 2, oy = (imgH - side) / 2
         let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
             func pt(_ x: Float, _ y: Float) -> CGPoint {
-                CGPoint(x: CGFloat((x / 640 * side + ox) / bufW),
-                        y: CGFloat((y / 640 * side + oy) / bufH)).applying(displayT)
+                CGPoint(x: CGFloat((x / 640 * side + ox) / imgW),
+                        y: CGFloat((y / 640 * side + oy) / imgH)).applying(displayT)
             }
             let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
             return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
                            width: abs(br.x - tl.x), height: abs(br.y - tl.y)), box.score)
         }
-        await MainActor.run { self.debugBBoxes = screenBoxes }
-
-        // 3. Measure each box with ARMesh + PCA.
-        var results: [Detection3D] = []
-        for box in topBoxes {
-            await MainActor.run {
-                self.status = "Measuring \(box.label)..."
-            }
-            if let det = BoxMeasurer.measure(frame: frame, yoloBox: box) {
-                results.append(det)
+        await MainActor.run {
+            self.debugBBoxes = screenBoxes
+            if let f = screenBoxes.first {
+                self.status = String(format: "screen (%.0f,%.0f) %.0fx%.0f",
+                                     f.rect.origin.x, f.rect.origin.y,
+                                     f.rect.width, f.rect.height)
             }
         }
 
-        if results.isEmpty {
+        // 2. If BoxerNet is unavailable, report detections without 3D lifting.
+        guard let boxer else {
             await MainActor.run {
-                self.status = "Mesh vacío — mueve el teléfono para escanear primero"
+                self.status = "\(topBoxes.count) objeto(s) — BoxerNet no disponible"
+            }
+            return []
+        }
+
+        // 3. Scale YOLO boxes (640 → 960) for BoxerNet.
+        let (boxerImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: BoxerNet.imageSize)
+        let scale = Float(BoxerNet.imageSize) / 640.0
+        let boxes2D = topBoxes.map { box in
+            Box2D(xmin: box.xmin * scale, ymin: box.ymin * scale,
+                  xmax: box.xmax * scale, ymax: box.ymax * scale,
+                  label: box.label, score: box.score)
+        }
+
+        // 4. Extract LiDAR depth + scale intrinsics.
+        // Use pixel buffer dimensions (always landscape) — camera.imageResolution
+        // can report portrait-swapped dimensions when phone is held in portrait mode,
+        // which would corrupt the center-crop offset and intrinsics scaling.
+        let bufW = CVPixelBufferGetWidth(frame.capturedImage)
+        let bufH = CVPixelBufferGetHeight(frame.capturedImage)
+        let bufferSize = CGSize(width: bufW, height: bufH)
+
+        let depthMap = extractDepthMap(frame.sceneDepth!.depthMap)
+        let intrinsics = scaleIntrinsicsWithCrop(
+            frame.camera.intrinsics,
+            from: bufferSize,
+            toSize: BoxerNet.imageSize
+        )
+
+        // 5. BoxerNet 3D lifting.
+        let conf = await MainActor.run { self.confidenceThreshold }
+        let detections = try boxer.predict(
+            image: boxerImage, depthMap: depthMap, intrinsics: intrinsics,
+            imageResolution: bufferSize,
+            cameraTransform: frame.camera.transform, boxes2D: boxes2D,
+            confidenceThreshold: conf
+        )
+
+        // Debug: show YOLO 2D bbox in status (640×640 coords)
+        if let b = topBoxes.first {
+            let bw = b.xmax - b.xmin
+            let bh = b.ymax - b.ymin
+            await MainActor.run {
+                self.status = String(format: "bbox %.0f×%.0f (%.2f:1) conf %.2f",
+                                     bw, bh, bw/bh, b.score)
             }
         }
-        return results
+        return detections
     }
 
     // MARK: - 3D Box Rendering
@@ -161,7 +216,7 @@ final class ARViewModel: ObservableObject {
             addWireframe(to: node, size: det.size, color: color, radius: 0.003)
 
             // Floating label.
-            let label = det.label ?? "caja"
+            let label = det.label ?? "object"
             let sizeStr = String(format: "%.0fx%.0fx%.0f cm",
                                  det.size.x * 100, det.size.y * 100, det.size.z * 100)
             addLabel("\(label)\n\(sizeStr)", to: node, offset: det.size.y / 2 + 0.03)
@@ -170,15 +225,9 @@ final class ARViewModel: ObservableObject {
             boxNodes.append(node)
         }
 
-        let summary = detections.map { det in
-            String(format: "%.0fx%.0fx%.0f cm",
-                   det.size.x * 100, det.size.y * 100, det.size.z * 100)
-        }.joined(separator: " | ")
-        status = detections.isEmpty ? "Sin detecciones" : summary
-
         detections.forEach { det in
             self.detections.append(DetectionInfo(
-                label: det.label ?? "caja", size: det.size, confidence: det.confidence
+                label: det.label ?? "object", size: det.size, confidence: det.confidence
             ))
         }
     }
@@ -233,6 +282,7 @@ final class ARViewModel: ObservableObject {
         boxNodes.forEach { $0.removeFromParentNode() }
         boxNodes.removeAll()
         detections.removeAll()
+        // debugBBoxes kept intentionally so 2D overlay stays visible alongside 3D box
     }
 
     func clearAll() {
@@ -245,7 +295,7 @@ final class ARViewModel: ObservableObject {
 
 func pixelBufferToFloatArray(
     _ pixelBuffer: CVPixelBuffer,
-    targetSize: Int = 640
+    targetSize: Int = BoxerNet.imageSize
 ) -> ([Float], Int, Int) {
     var ciImage = CIImage(cvPixelBuffer: pixelBuffer)
     let context = CIContext()
@@ -276,4 +326,36 @@ func pixelBufferToFloatArray(
         result[2 * n + i] = Float(rgba[i * 4 + 2]) / 255.0
     }
     return (result, targetSize, targetSize)
+}
+
+func extractDepthMap(_ depthBuffer: CVPixelBuffer) -> [[Float]] {
+    CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+    defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+
+    let h = CVPixelBufferGetHeight(depthBuffer)
+    let w = CVPixelBufferGetWidth(depthBuffer)
+    let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
+    let base = CVPixelBufferGetBaseAddress(depthBuffer)!
+
+    var result = [[Float]](repeating: [Float](repeating: 0, count: w), count: h)
+    for y in 0..<h {
+        let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: Float32.self)
+        for x in 0..<w { result[y][x] = row[x] }
+    }
+    return result
+}
+
+func scaleIntrinsicsWithCrop(
+    _ intrinsics: simd_float3x3, from: CGSize, toSize: Int
+) -> simd_float3x3 {
+    let w = Float(from.width), h = Float(from.height)
+    let side = min(w, h)
+    let scale = Float(toSize) / side
+
+    var s = intrinsics
+    s[0][0] *= scale                                     // fx
+    s[1][1] *= scale                                     // fy
+    s[2][0] = (intrinsics[2][0] - (w - side) / 2) * scale  // cx
+    s[2][1] = (intrinsics[2][1] - (h - side) / 2) * scale  // cy
+    return s
 }
