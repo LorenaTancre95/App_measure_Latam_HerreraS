@@ -36,37 +36,33 @@ struct BoxMeasurer2 {
         guard raw.count >= minPoints else { return nil }
 
         // 2. Floor removal — the critical step.
-        let floorY: Float? = frame.anchors
+        // rawYMin ≈ floor level (box sits on floor; lowest visible point in depth slice).
+        let rawYMin = raw.map { $0.y }.min()!
+
+        let anchorFloorY: Float? = frame.anchors
             .compactMap { $0 as? ARPlaneAnchor }
             .filter { $0.alignment == .horizontal }
             .map { Float($0.transform.columns.3.y) }.min()
 
-        let floorThresh: Float
-        if let floor = floorY {
-            floorThresh = floor + 0.04   // 4 cm above detected floor plane
+        // Use ARPlaneAnchor only if it's within 8 cm of rawYMin.
+        // If the anchor is much higher (e.g., ARKit detected the box top face as a
+        // horizontal plane), rawYMin is more reliable.
+        let reliableFloorY: Float
+        if let anchor = anchorFloorY, anchor <= rawYMin + 0.08 {
+            reliableFloorY = anchor
         } else {
-            // No floor plane yet: remove bottom 8% of the Y range as a heuristic.
-            let ys = raw.map { $0.y }
-            let yMin = ys.min()!, yRange = ys.max()! - yMin
-            floorThresh = yMin + yRange * 0.08
+            reliableFloorY = rawYMin
         }
 
+        let floorThresh = reliableFloorY + 0.04
         let pts = raw.filter { $0.y > floorThresh }
         guard pts.count >= minPoints else { return nil }
 
         // 3. Height = top of cloud (97th percentile Y) minus floor level.
-        //    The box bottom is the floor — LiDAR doesn't see it. Using yMin of the
-        //    cloud would give near-zero height when only the top face is visible.
         var ySorted = pts.map { $0.y }; ySorted.sort()
         let yTop = ySorted[Int(Float(ySorted.count)*0.97)]
-        let yMin: Float
+        let yMin = reliableFloorY
         let yMax = yTop
-        if let floor = floorY {
-            yMin = floor
-        } else {
-            // Heuristic: treat 3rd percentile of remaining pts as box bottom
-            yMin = ySorted[Int(Float(ySorted.count)*0.03)]
-        }
         let height = yMax - yMin
         guard height > 0.02 else { return nil }
 
