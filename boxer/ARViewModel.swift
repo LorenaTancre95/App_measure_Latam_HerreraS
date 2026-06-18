@@ -157,10 +157,17 @@ final class ARViewModel: ObservableObject {
         }
 
         // 4. Extract LiDAR depth + scale intrinsics.
+        // Use pixel buffer dimensions (always landscape) — camera.imageResolution
+        // can report portrait-swapped dimensions when phone is held in portrait mode,
+        // which would corrupt the center-crop offset and intrinsics scaling.
+        let bufW = CVPixelBufferGetWidth(frame.capturedImage)
+        let bufH = CVPixelBufferGetHeight(frame.capturedImage)
+        let bufferSize = CGSize(width: bufW, height: bufH)
+
         let depthMap = extractDepthMap(frame.sceneDepth!.depthMap)
         let intrinsics = scaleIntrinsicsWithCrop(
             frame.camera.intrinsics,
-            from: frame.camera.imageResolution,
+            from: bufferSize,
             toSize: BoxerNet.imageSize
         )
 
@@ -168,7 +175,7 @@ final class ARViewModel: ObservableObject {
         let conf = await MainActor.run { self.confidenceThreshold }
         let detections = try boxer.predict(
             image: boxerImage, depthMap: depthMap, intrinsics: intrinsics,
-            imageResolution: frame.camera.imageResolution,
+            imageResolution: bufferSize,
             cameraTransform: frame.camera.transform, boxes2D: boxes2D,
             confidenceThreshold: conf
         )
