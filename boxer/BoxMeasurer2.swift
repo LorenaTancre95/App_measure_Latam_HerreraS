@@ -54,11 +54,19 @@ struct BoxMeasurer2 {
         let pts = raw.filter { $0.y > floorThresh }
         guard pts.count >= minPoints else { return nil }
 
-        // 3. Height from Y extent (3rd–97th percentile to reject outliers).
+        // 3. Height = top of cloud (97th percentile Y) minus floor level.
+        //    The box bottom is the floor — LiDAR doesn't see it. Using yMin of the
+        //    cloud would give near-zero height when only the top face is visible.
         var ySorted = pts.map { $0.y }; ySorted.sort()
-        let yLo = Int(Float(ySorted.count)*0.03), yHi = Int(Float(ySorted.count)*0.97)
-        let yMin = ySorted[yLo]
-        let yMax = ySorted[yHi]
+        let yTop = ySorted[Int(Float(ySorted.count)*0.97)]
+        let yMin: Float
+        let yMax = yTop
+        if let floor = floorY {
+            yMin = floor
+        } else {
+            // Heuristic: treat 3rd percentile of remaining pts as box bottom
+            yMin = ySorted[Int(Float(ySorted.count)*0.03)]
+        }
         let height = yMax - yMin
         guard height > 0.02 else { return nil }
 
@@ -95,7 +103,7 @@ struct BoxMeasurer2 {
             qVals.append(dx*pxX + dz*pxZ)
         }
         pVals.sort(); qVals.sort()
-        let lo = Int(Float(pVals.count)*0.03), hi = Int(Float(pVals.count)*0.97)
+        let lo = Int(Float(pVals.count)*0.01), hi = Int(Float(pVals.count)*0.99)
         let pMin = pVals[lo], pMax = pVals[hi]
         let qMin = qVals[lo], qMax = qVals[hi]
 
@@ -157,8 +165,8 @@ struct BoxMeasurer2 {
         let ox = (bufW-side)/2, oy = (bufH-side)/2
         let bxRaw0 = yoloBox.xmin/640*side+ox, byRaw0 = yoloBox.ymin/640*side+oy
         let bxRaw1 = yoloBox.xmax/640*side+ox, byRaw1 = yoloBox.ymax/640*side+oy
-        // Shrink bbox by 8% on each side to avoid edge spill (floor/wall at borders)
-        let shrinkX = (bxRaw1-bxRaw0)*0.08, shrinkY = (byRaw1-byRaw0)*0.08
+        // Shrink bbox by 5% on each side to avoid edge spill (floor/wall at borders)
+        let shrinkX = (bxRaw1-bxRaw0)*0.05, shrinkY = (byRaw1-byRaw0)*0.05
         let bx0 = bxRaw0+shrinkX, by0 = byRaw0+shrinkY
         let bx1 = bxRaw1-shrinkX, by1 = byRaw1-shrinkY
 
