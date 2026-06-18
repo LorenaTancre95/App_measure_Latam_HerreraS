@@ -187,18 +187,32 @@ struct BoxMeasurer2 {
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
         let rb = CVPixelBufferGetBytesPerRow(depthBuffer)
 
-        // Pass 1: front depth (10th percentile).
+        // Lock confidence map: only use medium/high confidence depth pixels.
+        // Low-confidence pixels (noisy at startup) are skipped to improve first-shot accuracy.
+        let confBuffer = frame.sceneDepth?.confidenceMap
+        if let c = confBuffer { CVPixelBufferLockBaseAddress(c, .readOnly) }
+        defer { if let c = confBuffer { CVPixelBufferUnlockBaseAddress(c, .readOnly) } }
+        let confBase = confBuffer.flatMap { CVPixelBufferGetBaseAddress($0) }
+        let confRB = confBuffer.map { CVPixelBufferGetBytesPerRow($0) } ?? 0
+
+        // Pass 1: front depth (10th percentile) from medium/high-confidence pixels only.
         var allD: [Float] = []
         for py in py0...py1 {
             let row = base.advanced(by: py*rb).assumingMemoryBound(to: Float32.self)
-            for px in px0...px1 { let d = row[px]; if d > 0.1 && d < 7 { allD.append(d) } }
+            for px in px0...px1 {
+                if let cb = confBase {
+                    let conf = cb.advanced(by: py*confRB + px).assumingMemoryBound(to: UInt8.self).pointee
+                    guard conf >= 1 else { continue }  // skip ARConfidenceLevel.low
+                }
+                let d = row[px]; if d > 0.1 && d < 7 { allD.append(d) }
+            }
         }
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
         let dCut = dFront + 0.40   // include up to 40 cm behind front face
 
-        // Pass 2: unproject surface points.
+        // Pass 2: unproject medium/high-confidence surface points.
         let intr = frame.camera.intrinsics
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
         let T = frame.camera.transform
@@ -207,6 +221,10 @@ struct BoxMeasurer2 {
         for py in py0...py1 {
             let row = base.advanced(by: py*rb).assumingMemoryBound(to: Float32.self)
             for px in px0...px1 {
+                if let cb = confBase {
+                    let conf = cb.advanced(by: py*confRB + px).assumingMemoryBound(to: UInt8.self).pointee
+                    guard conf >= 1 else { continue }
+                }
                 let d = row[px]
                 guard d >= dFront-0.03, d <= dCut else { continue }
                 let ix = Float(px)/Float(dW)*bufW, iy = Float(py)/Float(dH)*bufH

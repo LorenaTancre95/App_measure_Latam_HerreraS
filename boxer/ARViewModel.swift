@@ -53,7 +53,9 @@ final class ARViewModel: ObservableObject {
         guard let sceneView, let frame = sceneView.session.currentFrame,
               let yoloDetector else { status = "Not ready"; return }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
-        isProcessing = true; status = "Detecting..."
+        let hasFloor = frame.anchors.contains { ($0 as? ARPlaneAnchor)?.alignment == .horizontal }
+        isProcessing = true
+        status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
         Task.detached {
             do {
                 let results = try await self.runPipeline(frame: frame, yolo: yoloDetector)
