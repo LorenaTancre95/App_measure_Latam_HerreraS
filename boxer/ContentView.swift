@@ -18,10 +18,24 @@ struct ContentView: View {
             ZStack(alignment: .topLeading) {
                 ForEach(Array(viewModel.debugBBoxes.enumerated()), id: \.offset) { _, item in
                     Rectangle()
-                        .stroke(Color.yellow, lineWidth: 4)
+                        .stroke(Color.yellow, lineWidth: 2)
                         .frame(width: item.rect.width, height: item.rect.height)
                         .offset(x: item.rect.origin.x, y: item.rect.origin.y)
                 }
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+
+            // Viewfinder overlay
+            GeometryReader { geo in
+                let vf = viewModel.viewfinderNorm
+                let rect = CGRect(
+                    x: vf.minX * geo.size.width,
+                    y: vf.minY * geo.size.height,
+                    width: vf.width * geo.size.width,
+                    height: vf.height * geo.size.height
+                )
+                ViewfinderOverlay(rect: rect)
             }
             .ignoresSafeArea()
             .allowsHitTesting(false)
@@ -142,4 +156,43 @@ struct DetectionCard: View {
 func boxColor(_ index: Int) -> Color {
     let colors: [Color] = [.red, .green, .blue]
     return colors[index % colors.count]
+}
+
+// MARK: - Viewfinder
+
+struct ViewfinderOverlay: View {
+    let rect: CGRect
+
+    var body: some View {
+        Canvas { ctx, _ in
+            let corner: CGFloat = 28
+            let lw: CGFloat = 3
+
+            // Dim area outside the viewfinder.
+            var outer = Path()
+            outer.addRect(CGRect(x: 0, y: 0, width: 9999, height: 9999))
+            outer.addRoundedRect(in: rect, cornerSize: CGSize(width: 6, height: 6))
+            ctx.fill(outer, with: .color(.black.opacity(0.35)))
+
+            // Corner brackets.
+            var p = Path()
+            let corners: [(CGPoint, CGFloat, CGFloat)] = [
+                (CGPoint(x: rect.minX, y: rect.minY),  1,  1),
+                (CGPoint(x: rect.maxX, y: rect.minY), -1,  1),
+                (CGPoint(x: rect.maxX, y: rect.maxY), -1, -1),
+                (CGPoint(x: rect.minX, y: rect.maxY),  1, -1),
+            ]
+            for (origin, dx, dy) in corners {
+                p.move(to: CGPoint(x: origin.x + dx * corner, y: origin.y))
+                p.addLine(to: origin)
+                p.addLine(to: CGPoint(x: origin.x, y: origin.y + dy * corner))
+            }
+            ctx.stroke(p, with: .color(.white), style: StrokeStyle(lineWidth: lw, lineCap: .round))
+
+            // Crosshair dot in center.
+            let cx = rect.midX, cy = rect.midY
+            let dot = Path(ellipseIn: CGRect(x: cx - 3, y: cy - 3, width: 6, height: 6))
+            ctx.fill(dot, with: .color(.white.opacity(0.6)))
+        }
+    }
 }

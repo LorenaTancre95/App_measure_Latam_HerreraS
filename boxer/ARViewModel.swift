@@ -21,6 +21,8 @@ final class ARViewModel: ObservableObject {
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
+    /// Viewfinder in normalized screen coords [0,1]. UI and filter use this.
+    let viewfinderNorm = CGRect(x: 0.1, y: 0.18, width: 0.8, height: 0.64)
     private var boxerNet: BoxerNet?
     private var yoloDetector: YOLODetector?
     private var boxNodes: [SCNNode] = []
@@ -131,16 +133,25 @@ final class ARViewModel: ObservableObject {
             return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
                            width: abs(br.x - tl.x), height: abs(br.y - tl.y)), box.score)
         }
+        await MainActor.run { self.debugBBoxes = screenBoxes }
+
+        // 2. Viewfinder filter — only keep boxes whose projected center
+        //    falls inside the viewfinder rectangle.
+        let vfNorm = await MainActor.run { self.viewfinderNorm }
+        let vfRect = CGRect(x: vfNorm.minX * vp.width,  y: vfNorm.minY * vp.height,
+                            width: vfNorm.width * vp.width, height: vfNorm.height * vp.height)
+        let afterVF: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { (box, screen) in
+            vfRect.contains(CGPoint(x: screen.rect.midX, y: screen.rect.midY)) ? box : nil
+        }
+        let vfBoxes = afterVF.isEmpty ? topBoxes : afterVF  // fallback: all boxes if none in VF
+
         await MainActor.run {
-            self.debugBBoxes = screenBoxes
-            if let f = screenBoxes.first {
-                self.status = String(format: "screen (%.0f,%.0f) %.0fx%.0f",
-                                     f.rect.origin.x, f.rect.origin.y,
-                                     f.rect.width, f.rect.height)
+            if afterVF.isEmpty {
+                self.status = "Apuntá la caja al viewfinder"
             }
         }
 
-        // 2. Floor ROI filter — keep only detections whose LiDAR center is
+        // 3. Floor ROI filter — keep only detections whose LiDAR center is
         //    0–1.5 m above the lowest ARKit horizontal plane (the floor).
         //    If no floor has been detected yet, keep all boxes.
         let bufW = CVPixelBufferGetWidth(frame.capturedImage)
@@ -156,7 +167,7 @@ final class ARViewModel: ObservableObject {
             .map { Float($0.transform.columns.3.y) }
             .min()
 
-        let roiBoxes: [YOLOBox] = topBoxes.filter { box in
+        let roiBoxes: [YOLOBox] = vfBoxes.filter { box in
             // Map YOLO center (640×640) → landscape buffer pixels.
             let bside = min(Float(bufW), Float(bufH))
             let bOx = (Float(bufW) - bside) / 2
@@ -190,12 +201,12 @@ final class ARViewModel: ObservableObject {
             return true   // no floor detected yet — allow everything
         }
 
-        let filteredBoxes = roiBoxes.isEmpty ? topBoxes : roiBoxes
+        let filteredBoxes = roiBoxes.isEmpty ? vfBoxes : roiBoxes
 
         await MainActor.run {
             if let floor = floorY {
                 let kept = filteredBoxes.count
-                let total = topBoxes.count
+                let total = vfBoxes.count
                 if kept < total {
                     self.status = "ROI: \(kept)/\(total) cajas sobre el piso"
                 }
