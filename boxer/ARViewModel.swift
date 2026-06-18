@@ -107,12 +107,13 @@ final class ARViewModel: ObservableObject {
     ) async throws -> [Detection3D] {
         // 1. YOLO detection (640×640).
         let (yoloImage, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
-        let yoloBoxes = try yolo.detect(image: yoloImage, imageWidth: 640, imageHeight: 640)
+        let yoloBoxes = try yolo.detect(image: yoloImage, imageWidth: 640, imageHeight: 640,
+                                        confThreshold: 0.45)
         guard !yoloBoxes.isEmpty else {
             await MainActor.run { self.status = "No objects detected" }
             return []
         }
-        let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(3))
+        let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(1))
 
         // Show YOLO 2D bboxes as screen-space overlay for debugging.
         let vp = await MainActor.run { self.viewportSize }
