@@ -94,31 +94,44 @@ struct BoxMeasurer2 {
         }
         // PCA secondary (perpendicular): (-ax1Z, ax1X)
 
-        // 2D bbox horizontal direction → disambiguate which PCA axis is "width"
+        // 2D bbox LONGER-dimension direction → disambiguate which PCA axis is "width".
+        // Use the longer 2D bbox edge (horizontal if wide, vertical if tall) so the
+        // disambiguation works regardless of how the box is oriented in the image.
         let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let sideo = min(bufWo, bufHo)
         let oxo = (bufWo-sideo)/2, oyo = (bufHo-sideo)/2
+        let midUo = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sideo + oxo
         let midVo = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sideo + oyo
-        let leftUo  = yoloBox.xmin / 640 * sideo + oxo
-        let rightUo = yoloBox.xmax / 640 * sideo + oxo
         let intro = frame.camera.intrinsics
         let fxo = intro[0][0], fyo = intro[1][1], cxo = intro[2][0], cyo = intro[2][1]
         func edge3D(_ u: Float, _ v: Float) -> simd_float3 {
             let cam = simd_float4((u-cxo)/fxo*dFront, (v-cyo)/fyo*dFront, -dFront, 1)
             let w = frame.camera.transform * cam; return simd_float3(w.x/w.w, 0, w.z/w.w)
         }
+        let bbox2DW = yoloBox.xmax - yoloBox.xmin
+        let bbox2DH = yoloBox.ymax - yoloBox.ymin
         let bboxVec: simd_float3 = {
-            let wL = edge3D(leftUo, midVo), wR = edge3D(rightUo, midVo)
-            return simd_distance(wL, wR) > 0.01 ? simd_normalize(wR - wL) : simd_float3(1,0,0)
+            if bbox2DW >= bbox2DH {
+                // Wider than tall: left→right edge gives the primary horizontal axis
+                let pA = edge3D(yoloBox.xmin/640*sideo+oxo, midVo)
+                let pB = edge3D(yoloBox.xmax/640*sideo+oxo, midVo)
+                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(1,0,0)
+            } else {
+                // Taller than wide: top→bottom edge gives the primary vertical axis
+                let pA = edge3D(midUo, yoloBox.ymin/640*sideo+oyo)
+                let pB = edge3D(midUo, yoloBox.ymax/640*sideo+oyo)
+                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(0,0,1)
+            }
         }()
 
-        // Dot products: how well each PCA axis aligns with 2D-bbox horizontal direction
-        let dot1 = abs(ax1X * bboxVec.x + ax1Z * bboxVec.z)    // primary vs bbox
-        let dot2 = abs(-ax1Z * bboxVec.x + ax1X * bboxVec.z)   // secondary vs bbox
-        // "Width" = the PCA axis that best aligns with the image-horizontal bbox direction
-        let axX: Float = dot1 >= dot2 ? ax1X : -ax1Z
-        let axZ: Float = dot1 >= dot2 ? ax1Z :  ax1X
+        // Dot products: alignment of each PCA axis with the 2D long-dimension direction.
+        let dot1 = abs(ax1X * bboxVec.x + ax1Z * bboxVec.z)    // primary vs bbox long dim
+        let dot2 = abs(-ax1Z * bboxVec.x + ax1X * bboxVec.z)   // secondary vs bbox long dim
+        // Switch to secondary only if it's clearly better (15% margin) — avoids jitter
+        // when both are similar (box at 45°), which keeps the stable PCA primary as width.
+        let axX: Float = dot2 > dot1 * 1.15 ? -ax1Z : ax1X
+        let axZ: Float = dot2 > dot1 * 1.15 ?  ax1X : ax1Z
         let pxX: Float = -axZ
         let pxZ: Float =  axX
 
