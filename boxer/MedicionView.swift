@@ -118,15 +118,22 @@ struct MedicionView: View {
         .padding(.horizontal, 20)
     }
 
+    private var camposListos: Bool {
+        !cVal.isEmpty && !lVal.isEmpty && !aVal.isEmpty && !volsVal.isEmpty && !pesoUnitVal.isEmpty
+    }
+
     private var agregarBtn: some View {
-        Button(action: { showSheet = true }) {
+        Button(action: {
+            // Si todos los campos están llenos → agregar directo, sin sheet
+            if camposListos { agregarItem() } else { showSheet = true }
+        }) {
             HStack(spacing: 8) {
                 Image(systemName: "gearshape.fill")
                 Text("AGREGAR").font(.system(size: 15, weight: .heavy))
             }
             .foregroundColor(.white)
             .frame(maxWidth: .infinity).frame(height: 50)
-            .background(Color.latamCard)
+            .background(camposListos ? Color.green.opacity(0.8) : Color.latamCard)
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.latamCardBorder, lineWidth: 1))
             .cornerRadius(10)
         }
