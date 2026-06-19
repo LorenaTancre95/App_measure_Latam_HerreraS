@@ -60,9 +60,10 @@ struct MedicionView: View {
         .sheet(isPresented: $showSheet) { tipoSheet }
         .fullScreenCover(isPresented: $showCamera) {
             ARCameraWrapper { det in
-                cVal = String(format: "%.2f", det.size.x)
-                lVal = String(format: "%.2f", det.size.z)
-                aVal = String(format: "%.2f", det.size.y)
+                // AR devuelve metros → convertir a cm
+                cVal = String(format: "%.0f", det.size.x * 100)
+                lVal = String(format: "%.0f", det.size.z * 100)
+                aVal = String(format: "%.0f", det.size.y * 100)
                 if camTrigger == .unitario && !volsVal.isEmpty && !pesoUnitVal.isEmpty {
                     agregarItem()
                 }
@@ -93,9 +94,9 @@ struct MedicionView: View {
 
     private var dimensionesRow: some View {
         HStack(spacing: 8) {
-            MedicionField(label: "C (m)", value: $cVal)
-            MedicionField(label: "L (m)", value: $lVal)
-            MedicionField(label: "A (m)", value: $aVal)
+            MedicionField(label: "C (cm)", value: $cVal)
+            MedicionField(label: "L (cm)", value: $lVal)
+            MedicionField(label: "A (cm)", value: $aVal)
             Button(action: { camTrigger = .manual; showCamera = true }) {
                 Image(systemName: "camera.fill")
                     .font(.system(size: 20)).foregroundColor(.white)
@@ -109,8 +110,8 @@ struct MedicionView: View {
 
     private var pesosRow: some View {
         HStack(spacing: 8) {
-            MedicionField(label: "VOLS", value: $volsVal, keyboardType: .numberPad)
-            MedicionField(label: "PESO UNIT", value: $pesoUnitVal, keyboardType: .decimalPad)
+            MedicionField(label: "VOLS.", value: $volsVal, keyboardType: .numberPad)
+            MedicionField(label: "PESO UN.", value: $pesoUnitVal, keyboardType: .decimalPad)
             MedicionField(label: "PESO TOTAL", value: .constant(pesoTotalStr), enabled: false)
             Spacer().frame(width: 46)
         }
@@ -139,9 +140,9 @@ struct MedicionView: View {
             HStack {
                 Text("#").frame(width: 22, alignment: .center)
                 Text("VOLS").frame(maxWidth: .infinity)
-                Text("PESO UN").frame(maxWidth: .infinity)
+                Text("PESO UN.").frame(maxWidth: .infinity)
                 Text("PESO TOTAL").frame(maxWidth: .infinity)
-                Text("C+L+A").frame(maxWidth: .infinity)
+                Text("C•L•A").frame(maxWidth: .infinity)
             }
             .font(.system(size: 10, weight: .bold))
             .foregroundColor(.white.opacity(0.55))
