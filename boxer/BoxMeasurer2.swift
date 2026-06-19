@@ -64,7 +64,8 @@ struct BoxMeasurer2 {
         let yMin = reliableFloorY
         let yMax = yTop
         let height = yMax - yMin
-        guard height > 0.02 else { return nil }
+        // Sanity: height must be between 3 cm and 1.5 m.
+        guard height > 0.03, height < 1.5 else { return nil }
 
         // 4. Orientation: PCA on XZ footprint, disambiguated by 2D bbox direction.
         //    PCA gives accurate axis sizes from real 3D geometry.
@@ -134,7 +135,8 @@ struct BoxMeasurer2 {
 
         let widthA = pMax - pMin
         let widthB = qMax - qMin
-        guard widthA > 0.02 else { return nil }
+        // Sanity: each horizontal dimension must be between 3 cm and 2 m.
+        guard widthA > 0.03, widthA < 2.0 else { return nil }
 
         // 5. If box is viewed nearly face-on, widthB is the noise band of the
         //    front face depth — fall back to background sampling for depth.
@@ -146,6 +148,7 @@ struct BoxMeasurer2 {
         } else {
             depthEstimate = max(widthB, 0.05)
         }
+        guard depthEstimate < 2.0 else { return nil }
 
         // 6. Build gravity-aligned world transform.
         // Center XZ: project the YOLO bbox center at mid-depth using camera intrinsics.

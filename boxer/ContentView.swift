@@ -119,7 +119,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .disabled(viewModel.isProcessing)
+                .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                 .padding(.trailing, 20)
             }
         }

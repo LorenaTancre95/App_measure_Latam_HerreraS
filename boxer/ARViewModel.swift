@@ -76,7 +76,7 @@ final class ARViewModel: ObservableObject {
         guard !yoloBoxes.isEmpty else {
             await MainActor.run { self.status = "No cajas detectadas" }; return []
         }
-        let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(3))
+        let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
 
         // 2. Screen-space overlay.
         let vp = await MainActor.run { self.viewportSize }
@@ -93,22 +93,20 @@ final class ARViewModel: ObservableObject {
         }
         await MainActor.run { self.debugBBoxes = screenBoxes }
 
-        // 3. Viewfinder filter.
+        // 3. Viewfinder filter — keep only the single best box inside the viewfinder.
         let vfN = await MainActor.run { self.viewfinderNorm }
         let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height, width: vfN.width*vp.width, height: vfN.height*vp.height)
         let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
             vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
         }
-        let candidates = vfPassed.isEmpty ? topBoxes : vfPassed
+        guard let best = vfPassed.first ?? topBoxes.first else { return [] }
         if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
 
-        // 4. Measure with LiDAR + floor removal.
+        // 4. Measure the single best detection.
+        await MainActor.run { self.status = "Midiendo..." }
         var results: [Detection3D] = []
-        for box in candidates {
-            await MainActor.run { self.status = "Midiendo \(box.label)..." }
-            if let det = BoxMeasurer2.measure(frame: frame, yoloBox: box) {
-                results.append(det)
-            }
+        if let det = BoxMeasurer2.measure(frame: frame, yoloBox: best) {
+            results.append(det)
         }
 
         if results.isEmpty {
