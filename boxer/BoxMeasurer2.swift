@@ -68,11 +68,13 @@ struct BoxMeasurer2 {
         guard height > 0.03, height < 1.5 else { return nil }
 
         // 4. Minimum Bounding Rectangle (MBR) on XZ footprint → yaw + dimensions.
-        // Projects all box points to XZ, computes convex hull, then sweeps each hull
-        // edge angle to find the rectangle with minimum area. Works even when LiDAR
-        // only sees the top face — the XZ projection of a rectangular top face is
-        // still a rectangle, so MBR finds the correct orientation.
-        let xzPts = pts.map { SIMD2<Float>($0.x, $0.z) }
+        // Use only the top 30% of the cloud (highest Y) to focus on the flat top face:
+        // it's the cleanest LiDAR surface (no floor/background contamination) and its
+        // XZ projection is a clean rectangle aligned with the box edges.
+        let topThresh = yMax - height * 0.30
+        let topFacePts = pts.filter { $0.y > topThresh }
+        let xzSrc = topFacePts.count >= 15 ? topFacePts : pts
+        let xzPts = xzSrc.map { SIMD2<Float>($0.x, $0.z) }
         let hull = convexHull2D(xzPts)
         var bestAngle: Float = 0
         if hull.count >= 3 {
