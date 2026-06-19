@@ -190,7 +190,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.40   // include up to 40 cm behind front face
+        let dCut = dFront + 0.22   // include up to 22 cm behind front face (avoids far background)
 
         // Pass 2: unproject medium/high-confidence surface points.
         let intr = frame.camera.intrinsics
@@ -234,7 +234,7 @@ struct BoxMeasurer2 {
         let req = VNDetectRectanglesRequest()
         req.maximumObservations = 3
         req.minimumConfidence   = 0.35
-        req.minimumAspectRatio  = 0.20
+        req.minimumAspectRatio  = 0.35   // reject floor planks (very elongated)
         req.regionOfInterest    = roi
 
         let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage,
