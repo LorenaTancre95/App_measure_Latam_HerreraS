@@ -9,6 +9,8 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var viewModel = ARViewModel()
+    /// Cuando se pasa este callback, ContentView muestra USAR/REMEDIAR en lugar del modo standalone.
+    var onConfirm: ((DetectionInfo) -> Void)?
 
     var body: some View {
         ZStack {
@@ -43,8 +45,47 @@ struct ContentView: View {
             // Top spacer (removed status bar)
             VStack { Spacer() }
 
-            // Detection cards at bottom left
-            if !viewModel.detections.isEmpty {
+            // Modo integrado: USAR / REMEDIAR
+            if let confirm = onConfirm, !viewModel.detections.isEmpty {
+                VStack {
+                    Spacer()
+                    VStack(spacing: 10) {
+                        // Tarjeta "Medición confirmada"
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
+                            Text("Medición confirmada")
+                                .font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
+                            Spacer()
+                            let d = viewModel.detections[0]
+                            Text(String(format: "%.0fx%.0fx%.0f cm",
+                                        d.size.x*100, d.size.y*100, d.size.z*100))
+                                .font(.system(size: 12, design: .monospaced)).foregroundColor(.white.opacity(0.8))
+                        }
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(.black.opacity(0.65)).cornerRadius(10)
+
+                        HStack(spacing: 12) {
+                            Button(action: { viewModel.clearAll() }) {
+                                Text("REMEDIAR")
+                                    .font(.system(size: 14, weight: .bold)).foregroundColor(.white)
+                                    .frame(maxWidth: .infinity).frame(height: 46)
+                                    .background(.white.opacity(0.15)).cornerRadius(10)
+                                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.3), lineWidth: 1))
+                            }
+                            Button(action: { confirm(viewModel.detections[0]) }) {
+                                Text("USAR")
+                                    .font(.system(size: 14, weight: .heavy)).foregroundColor(.white)
+                                    .frame(maxWidth: .infinity).frame(height: 46)
+                                    .background(Color.green).cornerRadius(10)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 16).padding(.bottom, 24)
+                }
+            }
+
+            // Modo standalone: tarjetas de detección
+            if onConfirm == nil, !viewModel.detections.isEmpty {
                 VStack {
                     Spacer()
                     HStack {
@@ -54,16 +95,12 @@ struct ContentView: View {
                             }
                             Button(action: { viewModel.clearAll() }) {
                                 HStack(spacing: 6) {
-                                    Image(systemName: "trash")
-                                        .font(.system(size: 12))
-                                    Text("Clear all")
-                                        .font(.system(size: 13, weight: .medium))
+                                    Image(systemName: "trash").font(.system(size: 12))
+                                    Text("Limpiar").font(.system(size: 13, weight: .medium))
                                 }
                                 .foregroundColor(.white)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(.red.opacity(0.7))
-                                .cornerRadius(6)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(.red.opacity(0.7)).cornerRadius(6)
                             }
                         }
                         .padding(.leading, 16)

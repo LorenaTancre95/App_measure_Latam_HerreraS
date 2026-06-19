@@ -1,18 +1,24 @@
-//
-//  boxerApp.swift
-//  boxer
-//
-//  Created by Bharath Kumar Adinarayan on 09.04.26.
-//
-
 import SwiftUI
 
 @main
 struct boxerApp: App {
+    @StateObject private var appState = AppState()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
-                .ignoresSafeArea()
+            NavigationStack(path: $appState.path) {
+                HomeView()
+                    .navigationDestination(for: AppRoute.self) { route in
+                        switch route {
+                        case .minuta:
+                            MinutaView()
+                        case .medicion(let numero):
+                            MedicionView(minuta: numero)
+                        }
+                    }
+            }
+            .environmentObject(appState)
+            .preferredColorScheme(.dark)
         }
     }
 }
