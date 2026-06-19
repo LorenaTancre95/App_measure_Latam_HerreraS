@@ -70,77 +70,68 @@ struct BoxMeasurer2 {
         // 4. Orientation: PCA on XZ footprint, disambiguated by 2D bbox direction.
         //    PCA gives accurate axis sizes from real 3D geometry.
         //    The 2D bbox horizontal direction (unproject left/right edges) tells us
-        //    RANSAC on vertical face points finds the dominant flat face (the box's front or
-        //    side face). Its normal gives the exact yaw. Fallback to PCA+2D-bbox if RANSAC
-        //    doesn't find a confident plane (e.g. box is viewed only from directly above).
+        //    which PCA axis is "width" vs "depth" — stable for any box orientation.
         let n = Float(pts.count)
         let xMean = pts.map { $0.x }.reduce(0, +) / n
         let zMean = pts.map { $0.z }.reduce(0, +) / n
 
-        // --- RANSAC: find dominant vertical plane in XZ among face (non-top) points ---
-        let topFaceThresh = yMax - 0.04   // ignore top 4 cm → isolate vertical faces
-        let facePts = pts.filter { $0.y < topFaceThresh }
-        var bestNX: Float = 0, bestNZ: Float = 0, bestInliers = 0
-        if facePts.count >= 8 {
-            let inlierDist: Float = 0.025  // 2.5 cm
-            for _ in 0..<100 {
-                let i = Int.random(in: 0..<facePts.count)
-                let j = Int.random(in: 0..<facePts.count)
-                guard i != j else { continue }
-                let abx = facePts[j].x - facePts[i].x
-                let abz = facePts[j].z - facePts[i].z
-                let len = sqrt(abx*abx + abz*abz)
-                guard len > 0.01 else { continue }
-                let nx = -abz/len, nz = abx/len   // normal to the segment in XZ
-                let d = nx*facePts[i].x + nz*facePts[i].z
-                var count = 0
-                for p in facePts { if abs(nx*p.x + nz*p.z - d) < inlierDist { count += 1 } }
-                if count > bestInliers { bestInliers = count; bestNX = nx; bestNZ = nz }
-            }
+        var c00: Float = 0, c01: Float = 0, c11: Float = 0
+        for p in pts {
+            let dx = p.x - xMean, dz = p.z - zMean
+            c00 += dx*dx; c01 += dx*dz; c11 += dz*dz
         }
-        let ransacOK = bestInliers >= max(8, facePts.count / 3)
+        c00 /= n; c01 /= n; c11 /= n
+        let trace = c00 + c11
+        let disc = sqrt(max(0, trace*trace/4 - (c00*c11 - c01*c01)))
+        let lam1 = trace/2 + disc
 
-        // --- PCA fallback: needed when RANSAC can't find a confident plane ---
-        var ax1X: Float = 1, ax1Z: Float = 0
-        if !ransacOK {
-            var c00: Float = 0, c01: Float = 0, c11: Float = 0
-            for p in pts { let dx = p.x-xMean, dz = p.z-zMean; c00+=dx*dx; c01+=dx*dz; c11+=dz*dz }
-            c00/=n; c01/=n; c11/=n
-            let trace=c00+c11, disc=sqrt(max(0,trace*trace/4-(c00*c11-c01*c01))), lam1=trace/2+disc
-            if abs(c01) > 1e-6 { let e=lam1-c11; let l=sqrt(e*e+c01*c01); ax1X=e/l; ax1Z=c01/l }
-            else { ax1X = c00 >= c11 ? 1 : 0; ax1Z = c00 >= c11 ? 0 : 1 }
-            // Disambiguate PCA axis using 2D bbox longer dimension direction
-            let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
-            let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
-            let sideo = min(bufWo, bufHo)
-            let oxo = (bufWo-sideo)/2, oyo = (bufHo-sideo)/2
-            let midUo = (yoloBox.xmin+yoloBox.xmax)/2/640*sideo+oxo
-            let midVo = (yoloBox.ymin+yoloBox.ymax)/2/640*sideo+oyo
-            let intro = frame.camera.intrinsics
-            let fxo=intro[0][0], fyo=intro[1][1], cxo=intro[2][0], cyo=intro[2][1]
-            func edge3D(_ u: Float, _ v: Float) -> simd_float3 {
-                let cam=simd_float4((u-cxo)/fxo*dFront,(v-cyo)/fyo*dFront,-dFront,1)
-                let w=frame.camera.transform*cam; return simd_float3(w.x/w.w,0,w.z/w.w)
-            }
-            let bboxVec: simd_float3 = {
-                let bw=yoloBox.xmax-yoloBox.xmin, bh=yoloBox.ymax-yoloBox.ymin
-                if bw >= bh {
-                    let pA=edge3D(yoloBox.xmin/640*sideo+oxo,midVo)
-                    let pB=edge3D(yoloBox.xmax/640*sideo+oxo,midVo)
-                    return simd_distance(pA,pB)>0.01 ? simd_normalize(pB-pA) : simd_float3(1,0,0)
-                } else {
-                    let pA=edge3D(midUo,yoloBox.ymin/640*sideo+oyo)
-                    let pB=edge3D(midUo,yoloBox.ymax/640*sideo+oyo)
-                    return simd_distance(pA,pB)>0.01 ? simd_normalize(pB-pA) : simd_float3(0,0,1)
-                }
-            }()
-            let d1=abs(ax1X*bboxVec.x+ax1Z*bboxVec.z), d2=abs(-ax1Z*bboxVec.x+ax1X*bboxVec.z)
-            if d2 > d1 * 1.15 { let tmp=ax1X; ax1X = -ax1Z; ax1Z = tmp }
+        var ax1X: Float, ax1Z: Float
+        if abs(c01) > 1e-6 {
+            let e = lam1 - c11; let len = sqrt(e*e + c01*c01)
+            ax1X = e/len; ax1Z = c01/len
+        } else {
+            ax1X = c00 >= c11 ? 1 : 0; ax1Z = c00 >= c11 ? 0 : 1
         }
+        // PCA secondary (perpendicular): (-ax1Z, ax1X)
 
-        // Width axis: perpendicular to RANSAC normal (= along box face); or PCA primary.
-        let axX: Float = ransacOK ? -bestNZ : ax1X
-        let axZ: Float = ransacOK ?  bestNX : ax1Z
+        // 2D bbox LONGER-dimension direction → disambiguate which PCA axis is "width".
+        // Use the longer 2D bbox edge (horizontal if wide, vertical if tall) so the
+        // disambiguation works regardless of how the box is oriented in the image.
+        let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let sideo = min(bufWo, bufHo)
+        let oxo = (bufWo-sideo)/2, oyo = (bufHo-sideo)/2
+        let midUo = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sideo + oxo
+        let midVo = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sideo + oyo
+        let intro = frame.camera.intrinsics
+        let fxo = intro[0][0], fyo = intro[1][1], cxo = intro[2][0], cyo = intro[2][1]
+        func edge3D(_ u: Float, _ v: Float) -> simd_float3 {
+            let cam = simd_float4((u-cxo)/fxo*dFront, (v-cyo)/fyo*dFront, -dFront, 1)
+            let w = frame.camera.transform * cam; return simd_float3(w.x/w.w, 0, w.z/w.w)
+        }
+        let bbox2DW = yoloBox.xmax - yoloBox.xmin
+        let bbox2DH = yoloBox.ymax - yoloBox.ymin
+        let bboxVec: simd_float3 = {
+            if bbox2DW >= bbox2DH {
+                // Wider than tall: left→right edge gives the primary horizontal axis
+                let pA = edge3D(yoloBox.xmin/640*sideo+oxo, midVo)
+                let pB = edge3D(yoloBox.xmax/640*sideo+oxo, midVo)
+                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(1,0,0)
+            } else {
+                // Taller than wide: top→bottom edge gives the primary vertical axis
+                let pA = edge3D(midUo, yoloBox.ymin/640*sideo+oyo)
+                let pB = edge3D(midUo, yoloBox.ymax/640*sideo+oyo)
+                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(0,0,1)
+            }
+        }()
+
+        // Dot products: alignment of each PCA axis with the 2D long-dimension direction.
+        let dot1 = abs(ax1X * bboxVec.x + ax1Z * bboxVec.z)    // primary vs bbox long dim
+        let dot2 = abs(-ax1Z * bboxVec.x + ax1X * bboxVec.z)   // secondary vs bbox long dim
+        // Switch to secondary only if it's clearly better (15% margin) — avoids jitter
+        // when both are similar (box at 45°), which keeps the stable PCA primary as width.
+        let axX: Float = dot2 > dot1 * 1.15 ? -ax1Z : ax1X
+        let axZ: Float = dot2 > dot1 * 1.15 ?  ax1X : ax1Z
         let pxX: Float = -axZ
         let pxZ: Float =  axX
 
