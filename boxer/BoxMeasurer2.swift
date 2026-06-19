@@ -66,9 +66,34 @@ struct BoxMeasurer2 {
         let height = yMax - yMin
         guard height > 0.02 else { return nil }
 
-        // 4. Orientation from 2D YOLO bbox horizontal direction.
-        //    Unproject left/right bbox edges at dFront → width axis in 3D XZ.
-        //    This is stable even when box dimensions are similar (PCA flips axes).
+        // 4. Orientation: PCA on XZ footprint, disambiguated by 2D bbox direction.
+        //    PCA gives accurate axis sizes from real 3D geometry.
+        //    The 2D bbox horizontal direction (unproject left/right edges) tells us
+        //    which PCA axis is "width" vs "depth" — stable for any box orientation.
+        let n = Float(pts.count)
+        let xMean = pts.map { $0.x }.reduce(0, +) / n
+        let zMean = pts.map { $0.z }.reduce(0, +) / n
+
+        var c00: Float = 0, c01: Float = 0, c11: Float = 0
+        for p in pts {
+            let dx = p.x - xMean, dz = p.z - zMean
+            c00 += dx*dx; c01 += dx*dz; c11 += dz*dz
+        }
+        c00 /= n; c01 /= n; c11 /= n
+        let trace = c00 + c11
+        let disc = sqrt(max(0, trace*trace/4 - (c00*c11 - c01*c01)))
+        let lam1 = trace/2 + disc
+
+        var ax1X: Float, ax1Z: Float
+        if abs(c01) > 1e-6 {
+            let e = lam1 - c11; let len = sqrt(e*e + c01*c01)
+            ax1X = e/len; ax1Z = c01/len
+        } else {
+            ax1X = c00 >= c11 ? 1 : 0; ax1Z = c00 >= c11 ? 0 : 1
+        }
+        // PCA secondary (perpendicular): (-ax1Z, ax1X)
+
+        // 2D bbox horizontal direction → disambiguate which PCA axis is "width"
         let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let sideo = min(bufWo, bufHo)
@@ -82,16 +107,20 @@ struct BoxMeasurer2 {
             let cam = simd_float4((u-cxo)/fxo*dFront, (v-cyo)/fyo*dFront, -dFront, 1)
             let w = frame.camera.transform * cam; return simd_float3(w.x/w.w, 0, w.z/w.w)
         }
-        let wL3 = edge3D(leftUo, midVo), wR3 = edge3D(rightUo, midVo)
-        guard simd_distance(wL3, wR3) > 0.01 else { return nil }
-        let widthVec = simd_normalize(wR3 - wL3)
-        let axX = widthVec.x, axZ = widthVec.z
-        let pxX = -axZ, pxZ = axX   // depth axis (perpendicular to width)
+        let bboxVec: simd_float3 = {
+            let wL = edge3D(leftUo, midVo), wR = edge3D(rightUo, midVo)
+            return simd_distance(wL, wR) > 0.01 ? simd_normalize(wR - wL) : simd_float3(1,0,0)
+        }()
 
-        // Project floor-removed pts onto 2D-anchored axes to measure sizes.
-        let n = Float(pts.count)
-        let xMean = pts.map { $0.x }.reduce(0, +) / n
-        let zMean = pts.map { $0.z }.reduce(0, +) / n
+        // Dot products: how well each PCA axis aligns with 2D-bbox horizontal direction
+        let dot1 = abs(ax1X * bboxVec.x + ax1Z * bboxVec.z)    // primary vs bbox
+        let dot2 = abs(-ax1Z * bboxVec.x + ax1X * bboxVec.z)   // secondary vs bbox
+        // "Width" = the PCA axis that best aligns with the image-horizontal bbox direction
+        let axX: Float = dot1 >= dot2 ? ax1X : -ax1Z
+        let axZ: Float = dot1 >= dot2 ? ax1Z :  ax1X
+        let pxX: Float = -axZ
+        let pxZ: Float =  axX
+
         var pVals: [Float] = []; var qVals: [Float] = []
         for p in pts {
             let dx = p.x - xMean, dz = p.z - zMean

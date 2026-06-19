@@ -91,7 +91,7 @@ struct ContentView: View {
                 .padding(.bottom, 30)
             }
 
-            // Capture button right centre + tip
+            // Capture button right centre + calibration state
             HStack {
                 Spacer()
                 Text(viewModel.status)
@@ -104,11 +104,14 @@ struct ContentView: View {
                             .fill(.white)
                             .frame(width: 70, height: 70)
                         Circle()
-                            .fill(viewModel.isProcessing ? .gray : .blue)
+                            .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
                             .frame(width: 60, height: 60)
                         if viewModel.isProcessing {
-                            ProgressView()
-                                .tint(.white)
+                            ProgressView().tint(.white)
+                        } else if !viewModel.isCalibrated {
+                            Image(systemName: "arrow.down.to.line")
+                                .font(.system(size: 22))
+                                .foregroundColor(.white)
                         } else {
                             Image(systemName: "cube.transparent.fill")
                                 .font(.system(size: 24))

@@ -18,6 +18,7 @@ final class ARViewModel: ObservableObject {
     @Published var detections: [DetectionInfo] = []
     @Published var confidenceThreshold: Float = 0.3
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
+    @Published var isCalibrated: Bool = false
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
@@ -45,7 +46,7 @@ final class ARViewModel: ObservableObject {
         }
         await MainActor.run {
             self.yoloDetector = yolo
-            self.status = "Ready — center box in viewfinder, tap Detect"
+            self.status = "Apuntá al piso para calibrar..."
         }
     }
 
@@ -166,6 +167,12 @@ final class ARViewModel: ObservableObject {
         t.firstMaterial?.diffuse.contents = UIColor.white; t.flatness = 0.1
         let n = SCNNode(geometry: t); n.position = SCNVector3(-0.06, offset, 0)
         n.constraints = [SCNBillboardConstraint()]; parent.addChildNode(n)
+    }
+
+    func floorDetected() {
+        guard !isCalibrated else { return }
+        isCalibrated = true
+        if !isProcessing { status = "Piso calibrado ✓ — apuntá la caja al visor" }
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
