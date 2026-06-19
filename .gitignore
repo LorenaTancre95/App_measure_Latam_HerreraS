@@ -15,4 +15,5 @@ DerivedData/
 # ONNX models (too large for git — use Git LFS or download script)
 *.onnx
 !models_yolo/*.onnx
+!boxer/best.onnx
 *.pyc
