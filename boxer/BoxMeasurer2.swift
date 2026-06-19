@@ -1,6 +1,7 @@
 import Foundation
 import ARKit
 import simd
+import Vision
 
 /// Geometric box measurement using LiDAR depth + explicit floor removal.
 ///
@@ -67,34 +68,11 @@ struct BoxMeasurer2 {
         // Sanity: height must be between 3 cm and 1.5 m.
         guard height > 0.03, height < 1.5 else { return nil }
 
-        // 4. Minimum Bounding Rectangle (MBR) on XZ footprint → yaw + dimensions.
-        // Use only the top 30% of the cloud (highest Y) to focus on the flat top face:
-        // it's the cleanest LiDAR surface (no floor/background contamination) and its
-        // XZ projection is a clean rectangle aligned with the box edges.
-        let topThresh = yMax - height * 0.30
-        let topFacePts = pts.filter { $0.y > topThresh }
-        let xzSrc = topFacePts.count >= 15 ? topFacePts : pts
-        let xzPts = xzSrc.map { SIMD2<Float>($0.x, $0.z) }
-        let hull = convexHull2D(xzPts)
-        var bestAngle: Float = 0
-        if hull.count >= 3 {
-            var bestArea: Float = .infinity
-            for i in 0..<hull.count {
-                let a = hull[i], b = hull[(i+1) % hull.count]
-                let angle = atan2(b.y - a.y, b.x - a.x)
-                let ca = cos(-angle), sa = sin(-angle)
-                var minU = Float.infinity, maxU = -Float.infinity
-                var minV = Float.infinity, maxV = -Float.infinity
-                for p in xzPts {
-                    let u = p.x*ca - p.y*sa
-                    let v = p.x*sa + p.y*ca
-                    minU = min(minU, u); maxU = max(maxU, u)
-                    minV = min(minV, v); maxV = max(maxV, v)
-                }
-                let area = (maxU - minU) * (maxV - minV)
-                if area < bestArea { bestArea = area; bestAngle = angle }
-            }
-        }
+        // 4. Yaw: Vision rectangle detection on RGB image (primary) → MBR fallback.
+        // Vision detects the box face as a quadrilateral in the image, giving a
+        // stable angle from the camera image instead of noisy LiDAR geometry.
+        let bestAngle: Float = visionYaw(frame: frame, yoloBox: yoloBox, dFront: dFront)
+            ?? mbrAngle(pts: pts, yMax: yMax, height: height)
 
         // Project pts onto MBR axes; use 1%-99% percentiles to suppress edge noise.
         let mbrCa = cos(-bestAngle), mbrSa = sin(-bestAngle)
@@ -236,6 +214,79 @@ struct BoxMeasurer2 {
             }
         }
         return pts
+    }
+
+    // MARK: - Vision rectangle detection for stable yaw
+
+    private static func visionYaw(frame: ARFrame, yoloBox: YOLOBox, dFront: Float) -> Float? {
+        let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let side = min(bufW, bufH)
+        let ox = (bufW-side)/2, oy = (bufH-side)/2
+
+        let bx0 = yoloBox.xmin/640*side+ox, by0 = yoloBox.ymin/640*side+oy
+        let bx1 = yoloBox.xmax/640*side+ox, by1 = yoloBox.ymax/640*side+oy
+
+        // Vision uses normalized coords with (0,0) at bottom-left.
+        let roi = CGRect(x: CGFloat(bx0/bufW),   y: CGFloat(1.0 - by1/bufH),
+                         width: CGFloat((bx1-bx0)/bufW), height: CGFloat((by1-by0)/bufH))
+
+        let req = VNDetectRectanglesRequest()
+        req.maximumObservations = 3
+        req.minimumConfidence   = 0.35
+        req.minimumAspectRatio  = 0.20
+        req.regionOfInterest    = roi
+
+        let handler = VNImageRequestHandler(cvPixelBuffer: frame.capturedImage,
+                                            orientation: .up, options: [:])
+        guard (try? handler.perform([req])) != nil,
+              let obs = (req.results as? [VNRectangleObservation])?.first else { return nil }
+
+        // Convert Vision normalized → pixel coords (flip Y).
+        let blX = Float(obs.bottomLeft.x)  * bufW
+        let blY = (1.0 - Float(obs.bottomLeft.y))  * bufH
+        let brX = Float(obs.bottomRight.x) * bufW
+        let brY = (1.0 - Float(obs.bottomRight.y)) * bufH
+
+        // Unproject both bottom corners at dFront → world XZ direction.
+        let intr = frame.camera.intrinsics
+        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+        func unproj3D(_ u: Float, _ v: Float) -> simd_float3 {
+            let c = simd_float4((u-cx)/fx*dFront, (v-cy)/fy*dFront, -dFront, 1)
+            let w = frame.camera.transform * c
+            return simd_float3(w.x/w.w, 0, w.z/w.w)
+        }
+        let P1 = unproj3D(blX, blY), P2 = unproj3D(brX, brY)
+        let diff = P2 - P1
+        guard simd_length(diff) > 0.02 else { return nil }
+        return atan2(diff.z, diff.x)
+    }
+
+    // MARK: - MBR fallback (top-30% of cloud)
+
+    private static func mbrAngle(pts: [simd_float3], yMax: Float, height: Float) -> Float {
+        let topThresh = yMax - height * 0.30
+        let topPts = pts.filter { $0.y > topThresh }
+        let src = topPts.count >= 15 ? topPts : pts
+        let xzPts = src.map { SIMD2<Float>($0.x, $0.z) }
+        let hull = convexHull2D(xzPts)
+        guard hull.count >= 3 else { return 0 }
+        var best: Float = 0, bestArea: Float = .infinity
+        for i in 0..<hull.count {
+            let a = hull[i], b = hull[(i+1) % hull.count]
+            let angle = atan2(b.y - a.y, b.x - a.x)
+            let ca = cos(-angle), sa = sin(-angle)
+            var minU = Float.infinity, maxU = -Float.infinity
+            var minV = Float.infinity, maxV = -Float.infinity
+            for p in xzPts {
+                let u = p.x*ca - p.y*sa, v = p.x*sa + p.y*ca
+                minU = min(minU, u); maxU = max(maxU, u)
+                minV = min(minV, v); maxV = max(maxV, v)
+            }
+            let area = (maxU - minU) * (maxV - minV)
+            if area < bestArea { bestArea = area; best = angle }
+        }
+        return best
     }
 
     // MARK: - Convex hull (Andrew's monotone chain, O(n log n))
