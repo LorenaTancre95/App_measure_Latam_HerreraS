@@ -67,97 +67,52 @@ struct BoxMeasurer2 {
         // Sanity: height must be between 3 cm and 1.5 m.
         guard height > 0.03, height < 1.5 else { return nil }
 
-        // 4. Orientation: PCA on XZ footprint, disambiguated by 2D bbox direction.
-        //    PCA gives accurate axis sizes from real 3D geometry.
-        //    The 2D bbox horizontal direction (unproject left/right edges) tells us
-        //    which PCA axis is "width" vs "depth" — stable for any box orientation.
-        let n = Float(pts.count)
-        let xMean = pts.map { $0.x }.reduce(0, +) / n
-        let zMean = pts.map { $0.z }.reduce(0, +) / n
-
-        var c00: Float = 0, c01: Float = 0, c11: Float = 0
-        for p in pts {
-            let dx = p.x - xMean, dz = p.z - zMean
-            c00 += dx*dx; c01 += dx*dz; c11 += dz*dz
-        }
-        c00 /= n; c01 /= n; c11 /= n
-        let trace = c00 + c11
-        let disc = sqrt(max(0, trace*trace/4 - (c00*c11 - c01*c01)))
-        let lam1 = trace/2 + disc
-
-        var ax1X: Float, ax1Z: Float
-        if abs(c01) > 1e-6 {
-            let e = lam1 - c11; let len = sqrt(e*e + c01*c01)
-            ax1X = e/len; ax1Z = c01/len
-        } else {
-            ax1X = c00 >= c11 ? 1 : 0; ax1Z = c00 >= c11 ? 0 : 1
-        }
-        // PCA secondary (perpendicular): (-ax1Z, ax1X)
-
-        // 2D bbox LONGER-dimension direction → disambiguate which PCA axis is "width".
-        // Use the longer 2D bbox edge (horizontal if wide, vertical if tall) so the
-        // disambiguation works regardless of how the box is oriented in the image.
-        let bufWo = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let bufHo = Float(CVPixelBufferGetHeight(frame.capturedImage))
-        let sideo = min(bufWo, bufHo)
-        let oxo = (bufWo-sideo)/2, oyo = (bufHo-sideo)/2
-        let midUo = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sideo + oxo
-        let midVo = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sideo + oyo
-        let intro = frame.camera.intrinsics
-        let fxo = intro[0][0], fyo = intro[1][1], cxo = intro[2][0], cyo = intro[2][1]
-        func edge3D(_ u: Float, _ v: Float) -> simd_float3 {
-            let cam = simd_float4((u-cxo)/fxo*dFront, (v-cyo)/fyo*dFront, -dFront, 1)
-            let w = frame.camera.transform * cam; return simd_float3(w.x/w.w, 0, w.z/w.w)
-        }
-        let bbox2DW = yoloBox.xmax - yoloBox.xmin
-        let bbox2DH = yoloBox.ymax - yoloBox.ymin
-        let bboxVec: simd_float3 = {
-            if bbox2DW >= bbox2DH {
-                // Wider than tall: left→right edge gives the primary horizontal axis
-                let pA = edge3D(yoloBox.xmin/640*sideo+oxo, midVo)
-                let pB = edge3D(yoloBox.xmax/640*sideo+oxo, midVo)
-                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(1,0,0)
-            } else {
-                // Taller than wide: top→bottom edge gives the primary vertical axis
-                let pA = edge3D(midUo, yoloBox.ymin/640*sideo+oyo)
-                let pB = edge3D(midUo, yoloBox.ymax/640*sideo+oyo)
-                return simd_distance(pA, pB) > 0.01 ? simd_normalize(pB - pA) : simd_float3(0,0,1)
+        // 4. Minimum Bounding Rectangle (MBR) on XZ footprint → yaw + dimensions.
+        // Projects all box points to XZ, computes convex hull, then sweeps each hull
+        // edge angle to find the rectangle with minimum area. Works even when LiDAR
+        // only sees the top face — the XZ projection of a rectangular top face is
+        // still a rectangle, so MBR finds the correct orientation.
+        let xzPts = pts.map { SIMD2<Float>($0.x, $0.z) }
+        let hull = convexHull2D(xzPts)
+        var bestAngle: Float = 0
+        if hull.count >= 3 {
+            var bestArea: Float = .infinity
+            for i in 0..<hull.count {
+                let a = hull[i], b = hull[(i+1) % hull.count]
+                let angle = atan2(b.y - a.y, b.x - a.x)
+                let ca = cos(-angle), sa = sin(-angle)
+                var minU = Float.infinity, maxU = -Float.infinity
+                var minV = Float.infinity, maxV = -Float.infinity
+                for p in xzPts {
+                    let u = p.x*ca - p.y*sa
+                    let v = p.x*sa + p.y*ca
+                    minU = min(minU, u); maxU = max(maxU, u)
+                    minV = min(minV, v); maxV = max(maxV, v)
+                }
+                let area = (maxU - minU) * (maxV - minV)
+                if area < bestArea { bestArea = area; bestAngle = angle }
             }
-        }()
-
-        // Dot products: alignment of each PCA axis with the 2D long-dimension direction.
-        let dot1 = abs(ax1X * bboxVec.x + ax1Z * bboxVec.z)    // primary vs bbox long dim
-        let dot2 = abs(-ax1Z * bboxVec.x + ax1X * bboxVec.z)   // secondary vs bbox long dim
-        // Switch to secondary only if it's clearly better (15% margin) — avoids jitter
-        // when both are similar (box at 45°), which keeps the stable PCA primary as width.
-        let axX: Float = dot2 > dot1 * 1.15 ? -ax1Z : ax1X
-        let axZ: Float = dot2 > dot1 * 1.15 ?  ax1X : ax1Z
-        let pxX: Float = -axZ
-        let pxZ: Float =  axX
-
-        var pVals: [Float] = []; var qVals: [Float] = []
-        for p in pts {
-            let dx = p.x - xMean, dz = p.z - zMean
-            pVals.append(dx*axX + dz*axZ)
-            qVals.append(dx*pxX + dz*pxZ)
         }
-        pVals.sort(); qVals.sort()
-        let lo = Int(Float(pVals.count)*0.01), hi = Int(Float(pVals.count)*0.99)
-        let pMin = pVals[lo], pMax = pVals[hi]
-        let qMin = qVals[lo], qMax = qVals[hi]
 
-        let widthA = pMax - pMin
-        let widthB = qMax - qMin
-        // Sanity: each horizontal dimension must be between 3 cm and 2 m.
+        // Project pts onto MBR axes; use 1%-99% percentiles to suppress edge noise.
+        let mbrCa = cos(-bestAngle), mbrSa = sin(-bestAngle)
+        var uVals: [Float] = [], vVals: [Float] = []
+        for p in pts {
+            uVals.append(p.x*mbrCa - p.z*mbrSa)
+            vVals.append(p.x*mbrSa + p.z*mbrCa)
+        }
+        uVals.sort(); vVals.sort()
+        let lo = Int(Float(uVals.count)*0.01), hi = Int(Float(uVals.count)*0.99)
+        let widthA = uVals[hi] - uVals[lo]
+        let widthB = vVals[hi] - vVals[lo]
         guard widthA > 0.03, widthA < 2.0 else { return nil }
 
-        // 5. If box is viewed nearly face-on, widthB is the noise band of the
-        //    front face depth — fall back to background sampling for depth.
+        // 5. If nearly face-on, widthB is the noise band of the front face —
+        //    fall back to background sampling for the depth dimension.
         let depthEstimate: Float
-        let minDepthRatio: Float = 0.20   // < 20% of width → probably face-on
+        let minDepthRatio: Float = 0.20
         if widthB < widthA * minDepthRatio {
-            depthEstimate = max(backgroundDepth(frame: frame, yoloBox: yoloBox, dFront: dFront),
-                                0.05)
+            depthEstimate = max(backgroundDepth(frame: frame, yoloBox: yoloBox, dFront: dFront), 0.05)
         } else {
             depthEstimate = max(widthB, 0.05)
         }
@@ -181,7 +136,7 @@ struct BoxMeasurer2 {
         let wc = frame.camera.transform * camC
         let center = simd_float3(wc.x/wc.w, (yMin+yMax)/2, wc.z/wc.w)
 
-        let yaw = atan2(axZ, axX)
+        let yaw = bestAngle
         let cosY = cos(yaw), sinY = sin(yaw)
         let worldTransform = simd_float4x4(
             simd_float4( cosY, 0, sinY, 0),
@@ -279,6 +234,32 @@ struct BoxMeasurer2 {
             }
         }
         return pts
+    }
+
+    // MARK: - Convex hull (Andrew's monotone chain, O(n log n))
+
+    private static func convexHull2D(_ points: [SIMD2<Float>]) -> [SIMD2<Float>] {
+        guard points.count >= 3 else { return points }
+        let sorted = points.sorted { $0.x < $1.x || ($0.x == $1.x && $0.y < $1.y) }
+        func cross(_ O: SIMD2<Float>, _ A: SIMD2<Float>, _ B: SIMD2<Float>) -> Float {
+            (A.x - O.x) * (B.y - O.y) - (A.y - O.y) * (B.x - O.x)
+        }
+        var lower: [SIMD2<Float>] = []
+        for p in sorted {
+            while lower.count >= 2 && cross(lower[lower.count-2], lower[lower.count-1], p) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(p)
+        }
+        var upper: [SIMD2<Float>] = []
+        for p in sorted.reversed() {
+            while upper.count >= 2 && cross(upper[upper.count-2], upper[upper.count-1], p) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(p)
+        }
+        lower.removeLast(); upper.removeLast()
+        return lower + upper
     }
 
     // MARK: - Background depth (fallback for face-on views)
