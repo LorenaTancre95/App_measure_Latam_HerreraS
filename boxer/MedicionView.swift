@@ -197,7 +197,7 @@ struct MedicionView: View {
     // MARK: - Botones finales
     private var botonesFinales: some View {
         VStack(spacing: 10) {
-            Button(action: { /* TODO: finalizar */ }) {
+            Button(action: finalizarMinuta) {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.square.fill")
                     Text("FINALIZAR").font(.system(size: 15, weight: .heavy))
@@ -205,9 +205,7 @@ struct MedicionView: View {
                 .foregroundColor(.white).frame(maxWidth: .infinity).frame(height: 50)
                 .background(Color.red).cornerRadius(10)
             }
-            Button(action: {
-                appState.path.removeAll()
-            }) {
+            Button(action: { appState.path = [.minuta] }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.counterclockwise")
                     Text("NUEVA MINUTA").font(.system(size: 14, weight: .medium))
@@ -259,6 +257,12 @@ struct MedicionView: View {
               c > 0, l > 0, a > 0, v > 0 else { return }
         items.append(MedicionItem(c: c, l: l, a: a, vols: v, pesoUnit: p))
         cVal = ""; lVal = ""; aVal = ""; volsVal = ""; pesoUnitVal = ""
+    }
+
+    private func finalizarMinuta() {
+        let record = MinutaRecord(numero: minuta, fecha: Date(), items: items)
+        appState.minutas.append(record)
+        appState.path.removeAll()
     }
 }
 

@@ -46,8 +46,10 @@ struct HomeView: View {
                     }
                     .buttonStyle(.plain)
 
-                    HomeCard(icon: "magnifyingglass", title: "CONSULTAR MINUTA")
-                        .opacity(0.5)
+                    NavigationLink(value: AppRoute.consultar) {
+                        HomeCard(icon: "magnifyingglass", title: "CONSULTAR MINUTA")
+                    }
+                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 20)
 

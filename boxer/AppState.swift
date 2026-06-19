@@ -12,6 +12,7 @@ extension Color {
 enum AppRoute: Hashable {
     case minuta
     case medicion(String)
+    case consultar
 }
 
 // MARK: - Modelo de ítem
@@ -28,9 +29,21 @@ struct MedicionItem: Identifiable {
     var cla: String { "\(Int(c))×\(Int(l))×\(Int(a))" }
 }
 
+// MARK: - Registro de una minuta finalizada
+struct MinutaRecord: Identifiable {
+    let id = UUID()
+    let numero: String
+    let fecha: Date
+    let items: [MedicionItem]
+    var totalVols: Int    { items.reduce(0) { $0 + $1.vols } }
+    var totalPesoReal: Double { items.reduce(0) { $0 + $1.pesoTotal } }
+    var totalPesoCubado: Double { items.reduce(0) { $0 + $1.pesoCubado } }
+}
+
 // MARK: - Estado global de la app
 class AppState: ObservableObject {
     @Published var path: [AppRoute] = []
-    @Published var userName: String = "Usuario"
-    @Published var userEmail: String = "usuario@latam.com"
+    @Published var userName: String = "Silvina Herrera"
+    @Published var userEmail: String = "silvinaherrera.acidlabs@latam.com"
+    @Published var minutas: [MinutaRecord] = []
 }

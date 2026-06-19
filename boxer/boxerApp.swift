@@ -14,6 +14,8 @@ struct boxerApp: App {
                             MinutaView()
                         case .medicion(let numero):
                             MedicionView(minuta: numero)
+                        case .consultar:
+                            ConsultarView()
                         }
                     }
             }
