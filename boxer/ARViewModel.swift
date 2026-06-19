@@ -59,60 +59,106 @@ final class ARViewModel: ObservableObject {
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
         Task.detached {
             do {
-                let results = try await self.runPipeline(frame: frame, yolo: yoloDetector)
-                await MainActor.run { self.placeBoxes(results, in: sceneView); self.isProcessing = false }
+                // ── YOLO: una sola vez sobre el frame actual ───────────
+                let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
+                let conf = await MainActor.run { self.confidenceThreshold }
+                let yoloBoxes = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
+                guard !yoloBoxes.isEmpty else {
+                    await MainActor.run { self.status = "No cajas detectadas"; self.isProcessing = false }
+                    return
+                }
+                let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
+
+                // ── Overlay 2D ─────────────────────────────────────────
+                let vp = await MainActor.run { self.viewportSize }
+                let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
+                let res = frame.camera.imageResolution
+                let imgW = Float(res.width), imgH = Float(res.height)
+                let side = min(imgW, imgH), ox = (imgW-side)/2, oy = (imgH-side)/2
+                let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
+                    func pt(_ x: Float, _ y: Float) -> CGPoint {
+                        CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
+                    }
+                    let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
+                    return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                                  width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
+                }
+                await MainActor.run { self.debugBBoxes = screenBoxes }
+
+                // ── Viewfinder filter ──────────────────────────────────
+                let vfN = await MainActor.run { self.viewfinderNorm }
+                let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
+                                 width: vfN.width*vp.width, height: vfN.height*vp.height)
+                let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
+                    vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
+                }
+                guard let best = vfPassed.first ?? topBoxes.first else {
+                    await MainActor.run { self.isProcessing = false }; return
+                }
+                if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
+
+                // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
+                // YOLO ya localizó la caja; ahora medimos 5 veces con LiDAR
+                // en frames consecutivos para promediar el ruido.
+                let nShots = 5
+                var shots: [Detection3D] = []
+                for i in 1...nShots {
+                    await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
+                    let f = await MainActor.run { self.sceneView?.session.currentFrame }
+                    if let f, f.sceneDepth != nil,
+                       let det = BoxMeasurer2.measure(frame: f, yoloBox: best) {
+                        shots.append(det)
+                    }
+                    if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
+                }
+
+                await MainActor.run {
+                    if shots.isEmpty {
+                        self.status = "Sin geometría — apuntá más de frente o acercate"
+                    } else if let sv = self.sceneView {
+                        self.placeBoxes([self.medianDetection(shots)], in: sv)
+                    }
+                    self.isProcessing = false
+                }
             } catch {
                 await MainActor.run { self.status = "Error: \(error.localizedDescription)"; self.isProcessing = false }
             }
         }
     }
 
-    nonisolated private func runPipeline(frame: ARFrame, yolo: YOLODetector) async throws -> [Detection3D] {
+    // Combina N mediciones tomando la mediana de cada dimensión y del ángulo.
+    private func medianDetection(_ dets: [Detection3D]) -> Detection3D {
+        let n = dets.count
+        let xs = dets.map { $0.size.x }.sorted()
+        let ys = dets.map { $0.size.y }.sorted()
+        let zs = dets.map { $0.size.z }.sorted()
+        let medSize = simd_float3(xs[n/2], ys[n/2], zs[n/2])
 
-        // 1. YOLO 2D detection.
-        let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
-        let conf = await MainActor.run { self.confidenceThreshold }
-        let yoloBoxes = try yolo.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
-        guard !yoloBoxes.isEmpty else {
-            await MainActor.run { self.status = "No cajas detectadas" }; return []
-        }
-        let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
+        let cx = dets.map { $0.center.x }.sorted()[n/2]
+        let cy = dets.map { $0.center.y }.sorted()[n/2]
+        let cz = dets.map { $0.center.z }.sorted()[n/2]
+        let center = simd_float3(cx, cy, cz)
 
-        // 2. Screen-space overlay.
-        let vp = await MainActor.run { self.viewportSize }
-        let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
-        let res = frame.camera.imageResolution
-        let imgW = Float(res.width), imgH = Float(res.height)
-        let side = min(imgW, imgH), ox = (imgW-side)/2, oy = (imgH-side)/2
-        let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
-            func pt(_ x: Float, _ y: Float) -> CGPoint {
-                CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
-            }
-            let tl = pt(box.xmin,box.ymin), br = pt(box.xmax,box.ymax)
-            return (CGRect(x:min(tl.x,br.x), y:min(tl.y,br.y), width:abs(br.x-tl.x), height:abs(br.y-tl.y)), box.score)
-        }
-        await MainActor.run { self.debugBBoxes = screenBoxes }
+        let medYaw = circularMedianAngle(dets.map { $0.yaw })
+        let cosY = cos(medYaw), sinY = sin(medYaw)
+        let worldTransform = simd_float4x4(
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
+            simd_float4(center.x, center.y, center.z, 1)
+        )
+        return Detection3D(center: center, size: medSize, yaw: medYaw,
+                           confidence: dets.map { $0.confidence }.reduce(0,+) / Float(n),
+                           worldTransform: worldTransform, label: dets.first?.label)
+    }
 
-        // 3. Viewfinder filter — keep only the single best box inside the viewfinder.
-        let vfN = await MainActor.run { self.viewfinderNorm }
-        let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height, width: vfN.width*vp.width, height: vfN.height*vp.height)
-        let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
-            vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
-        }
-        guard let best = vfPassed.first ?? topBoxes.first else { return [] }
-        if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
-
-        // 4. Measure the single best detection.
-        await MainActor.run { self.status = "Midiendo..." }
-        var results: [Detection3D] = []
-        if let det = BoxMeasurer2.measure(frame: frame, yoloBox: best) {
-            results.append(det)
-        }
-
-        if results.isEmpty {
-            await MainActor.run { self.status = "Sin geometría — apuntá más de frente o acercate" }
-        }
-        return results
+    // Mediana circular: promedia sin/cos, devuelve la muestra más cercana a ese ángulo medio.
+    private func circularMedianAngle(_ angles: [Float]) -> Float {
+        guard angles.count > 1 else { return angles.first ?? 0 }
+        let sinMean = angles.map { sin($0) }.reduce(0,+) / Float(angles.count)
+        let cosMean = angles.map { cos($0) }.reduce(0,+) / Float(angles.count)
+        let mean = atan2(sinMean, cosMean)
+        return angles.min(by: { abs($0 - mean) < abs($1 - mean) }) ?? mean
     }
 
     // MARK: - Rendering
