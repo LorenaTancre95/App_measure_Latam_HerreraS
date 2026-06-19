@@ -56,24 +56,8 @@ struct BoxMeasurer2 {
         }
 
         let floorThresh = reliableFloorY + 0.04
-        var pts = raw.filter { $0.y > floorThresh }
+        let pts = raw.filter { $0.y > floorThresh }
         guard pts.count >= minPoints else { return nil }
-
-        // 2b. XZ outlier removal: discard points more than 2σ from median in X or Z.
-        // Removes background spill when YOLO bbox extends past the box.
-        do {
-            let xs = pts.map { $0.x }.sorted()
-            let zs = pts.map { $0.z }.sorted()
-            let xMed = xs[xs.count / 2]
-            let zMed = zs[zs.count / 2]
-            let n = Float(pts.count)
-            let xVar = pts.map { ($0.x - xMed) * ($0.x - xMed) }.reduce(0, +) / n
-            let zVar = pts.map { ($0.z - zMed) * ($0.z - zMed) }.reduce(0, +) / n
-            let xSig = max(sqrt(xVar), 0.06)
-            let zSig = max(sqrt(zVar), 0.06)
-            pts = pts.filter { abs($0.x - xMed) < 2.2 * xSig && abs($0.z - zMed) < 2.2 * zSig }
-            guard pts.count >= minPoints else { return nil }
-        }
 
         // 3. Height = top of cloud (97th percentile Y) minus floor level.
         var ySorted = pts.map { $0.y }; ySorted.sort()
@@ -169,8 +153,8 @@ struct BoxMeasurer2 {
         let ox = (bufW-side)/2, oy = (bufH-side)/2
         let bxRaw0 = yoloBox.xmin/640*side+ox, byRaw0 = yoloBox.ymin/640*side+oy
         let bxRaw1 = yoloBox.xmax/640*side+ox, byRaw1 = yoloBox.ymax/640*side+oy
-        // Shrink bbox by 10% on each side to avoid edge spill (floor/wall at borders)
-        let shrinkX = (bxRaw1-bxRaw0)*0.10, shrinkY = (byRaw1-byRaw0)*0.10
+        // Shrink bbox by 5% on each side to avoid edge spill (floor/wall at borders)
+        let shrinkX = (bxRaw1-bxRaw0)*0.05, shrinkY = (byRaw1-byRaw0)*0.05
         let bx0 = bxRaw0+shrinkX, by0 = byRaw0+shrinkY
         let bx1 = bxRaw1-shrinkX, by1 = byRaw1-shrinkY
 
@@ -206,7 +190,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.15   // 15 cm behind front face — tighter to avoid floor/background spill
+        let dCut = dFront + 0.22   // include up to 22 cm behind front face (avoids far background)
 
         // Pass 2: unproject medium/high-confidence surface points.
         let intr = frame.camera.intrinsics
