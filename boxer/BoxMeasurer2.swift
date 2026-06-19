@@ -34,7 +34,7 @@ struct BoxMeasurer2 {
         var dFront: Float = 0
         let raw = unproject(frame: frame, yoloBox: yoloBox,
                             depthBuffer: depthBuffer, dFront: &dFront)
-        guard raw.count >= minPoints else { return nil }
+        guard raw.count >= 15 else { return nil }   // lowered from 30 → more detections
 
         // 2. Floor removal — the critical step.
         // rawYMin ≈ floor level (box sits on floor; lowest visible point in depth slice).
@@ -57,7 +57,7 @@ struct BoxMeasurer2 {
 
         let floorThresh = reliableFloorY + 0.04
         let pts = raw.filter { $0.y > floorThresh }
-        guard pts.count >= minPoints else { return nil }
+        guard pts.count >= 15 else { return nil }
 
         // 3. Height = top of cloud (97th percentile Y) minus floor level.
         var ySorted = pts.map { $0.y }; ySorted.sort()
@@ -99,22 +99,23 @@ struct BoxMeasurer2 {
         guard depthEstimate < 2.0 else { return nil }
 
         // 6. Build gravity-aligned world transform.
-        // Center XZ: project the YOLO bbox center at mid-depth using camera intrinsics.
-        // This avoids PCA centroid bias (near face has more LiDAR points → centroid shifts forward).
-        let bufWc = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let bufHc = Float(CVPixelBufferGetHeight(frame.capturedImage))
-        let sidec = min(bufWc, bufHc)
-        let oxc = (bufWc-sidec)/2, oyc = (bufHc-sidec)/2
-        let imgMidX = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sidec + oxc
-        let imgMidY = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sidec + oyc
-        let intr = frame.camera.intrinsics
-        let midD = dFront + depthEstimate/2
-        let camC = simd_float4(
-            (imgMidX - intr[2][0]) / intr[0][0] * midD,
-            (imgMidY - intr[2][1]) / intr[1][1] * midD,
-            -midD, 1)
-        let wc = frame.camera.transform * camC
-        let center = simd_float3(wc.x/wc.w, (yMin+yMax)/2, wc.z/wc.w)
+        // Centro XZ: centroide real de los puntos 3D en coordenadas mundo.
+        // Los puntos ya están en world space — evita errores de la proyección de cámara.
+        // El centroide está en la cara frontal de la caja; lo desplazamos
+        // hacia atrás (dirección cámara→caja) por depthEstimate/2.
+        let n = Float(pts.count)
+        let xMean = pts.map { $0.x }.reduce(0, +) / n
+        let zMean = pts.map { $0.z }.reduce(0, +) / n
+
+        // Dirección de la cámara hacia la caja en el plano XZ (normalizada).
+        let camCol2 = frame.camera.transform.columns.2   // columna Z de la cámara (-forward en ARKit)
+        let camFwdXZ = simd_normalize(simd_float2(-camCol2.x, -camCol2.z))
+
+        // Desplazar el centroide de la cara frontal al centro de la caja.
+        let xCenter = xMean + camFwdXZ.x * depthEstimate / 2
+        let zCenter = zMean + camFwdXZ.y * depthEstimate / 2
+
+        let center = simd_float3(xCenter, (yMin + yMax) / 2, zCenter)
 
         let yaw = bestAngle
         let cosY = cos(yaw), sinY = sin(yaw)
