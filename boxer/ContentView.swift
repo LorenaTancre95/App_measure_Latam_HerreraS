@@ -128,37 +128,60 @@ struct ContentView: View {
                 .padding(.bottom, 30)
             }
 
-            // Capture button right centre + calibration state
+            // Capture button right centre + mode toggle + calibration state
             HStack {
                 Spacer()
                 Text(viewModel.status)
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.white.opacity(0.8))
                     .padding(.trailing, 12)
-                Button(action: { viewModel.detectNow() }) {
-                    ZStack {
-                        Circle()
-                            .fill(.white)
-                            .frame(width: 70, height: 70)
-                        Circle()
-                            .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
-                            .frame(width: 60, height: 60)
-                        if viewModel.isProcessing {
-                            ProgressView().tint(.white)
-                        } else if !viewModel.isCalibrated {
-                            Image(systemName: "arrow.down.to.line")
-                                .font(.system(size: 22))
-                                .foregroundColor(.white)
-                        } else {
-                            Image(systemName: "cube.transparent.fill")
-                                .font(.system(size: 24))
-                                .foregroundColor(.white)
+                VStack(spacing: 8) {
+                    // CAJA / PALLET toggle
+                    HStack(spacing: 0) {
+                        modeButton("CAJA", mode: .box)
+                        modeButton("PALLET", mode: .pallet)
+                    }
+                    .background(.black.opacity(0.45))
+                    .cornerRadius(8)
+
+                    Button(action: { viewModel.detectNow() }) {
+                        ZStack {
+                            Circle()
+                                .fill(.white)
+                                .frame(width: 70, height: 70)
+                            Circle()
+                                .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
+                                .frame(width: 60, height: 60)
+                            if viewModel.isProcessing {
+                                ProgressView().tint(.white)
+                            } else if !viewModel.isCalibrated {
+                                Image(systemName: "arrow.down.to.line")
+                                    .font(.system(size: 22))
+                                    .foregroundColor(.white)
+                            } else {
+                                Image(systemName: viewModel.measureMode == .pallet ? "shippingbox.fill" : "cube.transparent.fill")
+                                    .font(.system(size: 24))
+                                    .foregroundColor(.white)
+                            }
                         }
                     }
+                    .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                 }
-                .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                 .padding(.trailing, 20)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func modeButton(_ title: String, mode: ARViewModel.MeasureMode) -> some View {
+        let active = viewModel.measureMode == mode
+        Button(action: { viewModel.measureMode = mode }) {
+            Text(title)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(active ? .black : .white.opacity(0.6))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(active ? Color.white : Color.clear)
+                .cornerRadius(7)
         }
     }
 }

@@ -19,11 +19,15 @@ final class ARViewModel: ObservableObject {
     @Published var confidenceThreshold: Float = 0.3
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
     @Published var isCalibrated: Bool = false
+    @Published var measureMode: MeasureMode = .box
+
+    enum MeasureMode { case box, pallet }
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
     let viewfinderNorm = CGRect(x: 0.1, y: 0.18, width: 0.8, height: 0.64)
     private var yoloDetector: YOLODetector?
+    private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
 
     func setup(sceneView: ARSCNView) {
@@ -44,16 +48,26 @@ final class ARViewModel: ObservableObject {
             await MainActor.run { self.status = "YOLO failed: \(error.localizedDescription)" }
             return
         }
+
+        // Load SAM (non-fatal: pallet mode won't be available if it fails)
+        let sam = try? SAMSegmenter()
+
         await MainActor.run {
             self.yoloDetector = yolo
+            self.samSegmenter = sam
             self.status = "Apuntá al piso para calibrar..."
         }
     }
 
     func detectNow() {
-        guard let sceneView, let frame = sceneView.session.currentFrame,
-              let yoloDetector else { status = "Not ready"; return }
+        guard let sceneView, let frame = sceneView.session.currentFrame else { status = "Not ready"; return }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
+
+        if measureMode == .pallet {
+            detectPallet(frame: frame, sceneView: sceneView); return
+        }
+
+        guard let yoloDetector else { status = "YOLO no cargado"; return }
         let hasFloor = frame.anchors.contains { ($0 as? ARPlaneAnchor)?.alignment == .horizontal }
         isProcessing = true
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
@@ -211,6 +225,52 @@ final class ARViewModel: ObservableObject {
         t.firstMaterial?.diffuse.contents = UIColor.white; t.flatness = 0.1
         let n = SCNNode(geometry: t); n.position = SCNVector3(-0.06, offset, 0)
         n.constraints = [SCNBillboardConstraint()]; parent.addChildNode(n)
+    }
+
+    // MARK: - Pallet mode (SAM segmentation + LiDAR bbox)
+
+    private func detectPallet(frame: ARFrame, sceneView: ARSCNView) {
+        guard let sam = samSegmenter else {
+            status = "SAM no disponible — revisá los modelos"; return
+        }
+        isProcessing = true
+        status = "Segmentando..."
+
+        Task.detached {
+            do {
+                // SAM prompt = centro del visor (centro de la imagen SAM 1024×1024)
+                let S = CGFloat(SAMSegmenter.imageSize)
+                let prompt = CGPoint(x: S / 2, y: S / 2)
+                let mask = try sam.segment(pixelBuffer: frame.capturedImage, promptPoint: prompt)
+
+                // Multi-shot: medir 3 veces con LiDAR y tomar mediana
+                let nShots = 3
+                var shots: [Detection3D] = []
+                for i in 1...nShots {
+                    await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
+                    let f = await MainActor.run { self.sceneView?.session.currentFrame }
+                    if let f, f.sceneDepth != nil,
+                       let det = PalletMeasurer.measure(frame: f, mask: mask) {
+                        shots.append(det)
+                    }
+                    if i < nShots { try? await Task.sleep(nanoseconds: 300_000_000) }
+                }
+
+                await MainActor.run {
+                    if shots.isEmpty {
+                        self.status = "Sin geometría — apuntá más cerca o acercate"
+                    } else {
+                        self.placeBoxes([self.medianDetection(shots)], in: sceneView)
+                    }
+                    self.isProcessing = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.status = "Error SAM: \(error.localizedDescription)"
+                    self.isProcessing = false
+                }
+            }
+        }
     }
 
     func floorDetected() {
