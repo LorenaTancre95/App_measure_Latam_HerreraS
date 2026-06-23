@@ -69,23 +69,35 @@ final class PalletDetector {
         let dPtr   = detArr.dataPointer.assumingMemoryBound(to: Float32.self)
         let mPtr   = maskArr.dataPointer.assumingMemoryBound(to: Float32.self)
 
-        var bestIdx  = -1
-        var bestConf = conf
+        // Centro del visor en espacio de imagen YOLO (640×640)
+        let cx = Float(PalletDetector.imageSize) / 2
+        let cy = Float(PalletDetector.imageSize) / 2
 
-        // Format A: [1, N, K] where K >= 5
+        var bestIdx  = -1
+        var bestDist = Float.greatestFiniteMagnitude
+
+        // Format A: [1, N, K] where K >= 5  →  [x1,y1,x2,y2,conf,...]
         if dShape.count == 3 && dShape[2] >= 5 {
             let N = dShape[1], K = dShape[2]
             for i in 0..<N {
                 let c = dPtr[i * K + 4]
-                if c > bestConf { bestConf = c; bestIdx = i }
+                guard c >= conf else { continue }
+                let midX = (dPtr[i * K + 0] + dPtr[i * K + 2]) / 2
+                let midY = (dPtr[i * K + 1] + dPtr[i * K + 3]) / 2
+                let dist = (midX - cx) * (midX - cx) + (midY - cy) * (midY - cy)
+                if dist < bestDist { bestDist = dist; bestIdx = i }
             }
         }
         // Format B: [1, K, N] transposed
         else if dShape.count == 3 && dShape[1] >= 5 {
-            let _ = dShape[1]; let N = dShape[2]
+            let N = dShape[2]
             for i in 0..<N {
                 let c = dPtr[4 * N + i]
-                if c > bestConf { bestConf = c; bestIdx = i }
+                guard c >= conf else { continue }
+                let midX = (dPtr[0 * N + i] + dPtr[2 * N + i]) / 2
+                let midY = (dPtr[1 * N + i] + dPtr[3 * N + i]) / 2
+                let dist = (midX - cx) * (midX - cx) + (midY - cy) * (midY - cy)
+                if dist < bestDist { bestDist = dist; bestIdx = i }
             }
         }
 
