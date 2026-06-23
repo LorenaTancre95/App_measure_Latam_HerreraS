@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import GoogleSignIn
 import UIKit
 
@@ -20,14 +21,16 @@ final class GoogleSignInManager: ObservableObject {
     }
 
     func signIn(presenting viewController: UIViewController) {
-        GIDSignIn.sharedInstance.signIn(withPresenting: viewController) { [weak self] result, error in
-            guard let self else { return }
-            if let error {
-                print("GoogleSignIn error: \(error.localizedDescription)")
-                return
+        GIDSignIn.sharedInstance.signIn(withPresenting: viewController) { result, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let error {
+                    print("GoogleSignIn error: \(error.localizedDescription)")
+                    return
+                }
+                self.isSignedIn = result?.user != nil
+                self.userEmail = result?.user.profile?.email
             }
-            self.isSignedIn = result?.user != nil
-            self.userEmail = result?.user.profile?.email
         }
     }
 
