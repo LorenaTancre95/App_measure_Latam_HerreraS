@@ -42,13 +42,7 @@ final class PalletDetector {
         guard let buf = outBuffer else { return nil }
         ctx.render(scaled, to: buf)
 
-        let constraint = model.modelDescription.inputDescriptionsByName["image"]?.imageConstraint
-        let imageValue: MLFeatureValue
-        if let c = constraint {
-            imageValue = try MLFeatureValue(pixelBuffer: buf, constraint: c)
-        } else {
-            imageValue = MLFeatureValue(pixelBuffer: buf)
-        }
+        let imageValue = MLFeatureValue(pixelBuffer: buf)
 
         let input  = try MLDictionaryFeatureProvider(dictionary: ["image": imageValue])
         let output = try autoreleasepool { try model.prediction(from: input) }
@@ -88,7 +82,7 @@ final class PalletDetector {
         }
         // Format B: [1, K, N] transposed
         else if dShape.count == 3 && dShape[1] >= 5 {
-            let K = dShape[1], N = dShape[2]
+            let _ = dShape[1]; let N = dShape[2]
             for i in 0..<N {
                 let c = dPtr[4 * N + i]
                 if c > bestConf { bestConf = c; bestIdx = i }

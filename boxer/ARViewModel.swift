@@ -250,9 +250,9 @@ final class ARViewModel: ObservableObject {
                 for i in 1...nShots {
                     await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                     let f = await MainActor.run { self.sceneView?.session.currentFrame }
-                    if let f, f.sceneDepth != nil,
-                       let det = PalletMeasurer.measure(frame: f, mask: mask) {
-                        shots.append(det)
+                    if let f, f.sceneDepth != nil {
+                        let det = await MainActor.run { PalletMeasurer.measure(frame: f, mask: mask) }
+                        if let det { shots.append(det) }
                     }
                     if i < nShots { try? await Task.sleep(nanoseconds: 300_000_000) }
                 }
