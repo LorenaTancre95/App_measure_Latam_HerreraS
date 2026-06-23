@@ -196,7 +196,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.40   // include up to 40 cm behind front face
+        let dCut = dFront + 1.00   // include up to 100 cm behind front face (cubre cajas grandes)
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics

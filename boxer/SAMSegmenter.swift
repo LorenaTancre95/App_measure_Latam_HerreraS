@@ -13,7 +13,7 @@ final class SAMSegmenter {
 
     init() throws {
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
+        config.computeUnits = .cpuOnly   // NeuralEngine puede disparar picos de RAM que iOS mata
 
         guard let encURL = Bundle.main.url(forResource: "sam_encoder", withExtension: "mlpackage")
                         ?? Bundle.main.url(forResource: "sam_encoder", withExtension: "mlmodelc")
@@ -69,7 +69,7 @@ final class SAMSegmenter {
         }
 
         let input  = try MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(multiArray: arr)])
-        let output = try encoder.prediction(from: input)
+        let output = try autoreleasepool { try encoder.prediction(from: input) }
 
         guard let emb = output.featureValue(for: "image_embeddings")?.multiArrayValue
         else { throw SAMError.outputMissing("image_embeddings") }
@@ -98,7 +98,7 @@ final class SAMSegmenter {
             "point_coords":     MLFeatureValue(multiArray: coords),
             "point_labels":     MLFeatureValue(multiArray: labels)
         ])
-        let output = try decoder.prediction(from: input)
+        let output = try autoreleasepool { try decoder.prediction(from: input) }
 
         guard let masksArr = output.featureValue(for: "masks")?.multiArrayValue
         else { throw SAMError.outputMissing("masks") }

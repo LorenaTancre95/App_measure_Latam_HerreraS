@@ -21,13 +21,13 @@ final class ARViewModel: ObservableObject {
     @Published var isCalibrated: Bool = false
     @Published var measureMode: MeasureMode = .box
 
-    enum MeasureMode { case box, pallet }
+    enum MeasureMode { case box, oversize }
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
     let viewfinderNorm = CGRect(x: 0.1, y: 0.18, width: 0.8, height: 0.64)
     private var yoloDetector: YOLODetector?
-    private var samSegmenter: SAMSegmenter?
+    private var palletDetector: PalletDetector?
     private var boxNodes: [SCNNode] = []
 
     func setup(sceneView: ARSCNView) {
@@ -49,12 +49,12 @@ final class ARViewModel: ObservableObject {
             return
         }
 
-        // Load SAM (non-fatal: pallet mode won't be available if it fails)
-        let sam = try? SAMSegmenter()
+        // Load PalletDetector (non-fatal: pallet mode won't be available if it fails)
+        let pallet = try? PalletDetector()
 
         await MainActor.run {
             self.yoloDetector = yolo
-            self.samSegmenter = sam
+            self.palletDetector = pallet
             self.status = "Apuntá al piso para calibrar..."
         }
     }
@@ -63,7 +63,7 @@ final class ARViewModel: ObservableObject {
         guard let sceneView, let frame = sceneView.session.currentFrame else { status = "Not ready"; return }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
 
-        if measureMode == .pallet {
+        if measureMode == .oversize {
             detectPallet(frame: frame, sceneView: sceneView); return
         }
 
@@ -230,18 +230,19 @@ final class ARViewModel: ObservableObject {
     // MARK: - Pallet mode (SAM segmentation + LiDAR bbox)
 
     private func detectPallet(frame: ARFrame, sceneView: ARSCNView) {
-        guard let sam = samSegmenter else {
-            status = "SAM no disponible — revisá los modelos"; return
+        guard let detector = palletDetector else {
+            status = "PalletDetector no disponible — revisá pallet_seg.mlpackage"; return
         }
         isProcessing = true
-        status = "Segmentando..."
+        status = "Detectando carga..."
 
         Task.detached {
             do {
-                // SAM prompt = centro del visor (centro de la imagen SAM 1024×1024)
-                let S = CGFloat(SAMSegmenter.imageSize)
-                let prompt = CGPoint(x: S / 2, y: S / 2)
-                let mask = try sam.segment(pixelBuffer: frame.capturedImage, promptPoint: prompt)
+                let conf = await MainActor.run { self.confidenceThreshold }
+                guard let mask = try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf) else {
+                    await MainActor.run { self.status = "No se detectó carga (bajá el umbral de confianza)"; self.isProcessing = false }
+                    return
+                }
 
                 // Multi-shot: medir 3 veces con LiDAR y tomar mediana
                 let nShots = 3

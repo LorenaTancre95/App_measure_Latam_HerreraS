@@ -139,7 +139,7 @@ struct ContentView: View {
                     // CAJA / PALLET toggle
                     HStack(spacing: 0) {
                         modeButton("CAJA", mode: .box)
-                        modeButton("PALLET", mode: .pallet)
+                        modeButton("OVERSIZE", mode: .oversize)
                     }
                     .background(.black.opacity(0.45))
                     .cornerRadius(8)
@@ -159,7 +159,7 @@ struct ContentView: View {
                                     .font(.system(size: 22))
                                     .foregroundColor(.white)
                             } else {
-                                Image(systemName: viewModel.measureMode == .pallet ? "shippingbox.fill" : "cube.transparent.fill")
+                                Image(systemName: viewModel.measureMode == .oversize ? "shippingbox.fill" : "cube.transparent.fill")
                                     .font(.system(size: 24))
                                     .foregroundColor(.white)
                             }
