@@ -20,8 +20,14 @@ final class GoogleSignInManager: ObservableObject {
         userEmail = user?.profile?.email
     }
 
+    private let driveScope = "https://www.googleapis.com/auth/drive.file"
+
     func signIn(presenting viewController: UIViewController) {
-        GIDSignIn.sharedInstance.signIn(withPresenting: viewController) { result, error in
+        GIDSignIn.sharedInstance.signIn(
+            withPresenting: viewController,
+            hint: nil,
+            additionalScopes: [driveScope]
+        ) { result, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let error {

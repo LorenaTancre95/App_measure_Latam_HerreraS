@@ -71,7 +71,10 @@ actor DriveUploader {
 
         let (createData, _) = try await URLSession.shared.data(for: createReq)
         let created = try JSONSerialization.jsonObject(with: createData) as? [String: Any]
-        guard let newID = created?["id"] as? String else { throw DriveError.folderCreateFailed }
+        guard let newID = created?["id"] as? String else {
+            let msg = String(data: createData, encoding: .utf8) ?? "unknown"
+            throw DriveError.uploadFailed("folder create: \(msg)")
+        }
         folderCache[cacheKey] = newID
         return newID
     }
