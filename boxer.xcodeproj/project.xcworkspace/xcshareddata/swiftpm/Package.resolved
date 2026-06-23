@@ -2,6 +2,15 @@
   "originHash" : "54a530a8a66c1ee0cc1c6dd34159a96243f09d436e10ae5178973082bff1ef28",
   "pins" : [
     {
+      "identity" : "googlesignin-ios",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/google/GoogleSignIn-iOS",
+      "state" : {
+        "revision" : "08d8dcecafb575f98879ffdbb8302c1b9ad65d19",
+        "version" : "9.2.0"
+      }
+    },
+    {
       "identity" : "onnxruntime-swift-package-manager",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",

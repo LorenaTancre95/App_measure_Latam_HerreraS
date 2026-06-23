@@ -6,9 +6,11 @@
 //
 
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @StateObject private var viewModel = ARViewModel()
+    @StateObject private var signInMgr = GoogleSignInManager.shared
     /// Cuando se pasa este callback, ContentView muestra USAR/REMEDIAR en lugar del modo standalone.
     var onConfirm: ((DetectionInfo) -> Void)?
 
@@ -166,6 +168,40 @@ struct ContentView: View {
                         }
                     }
                     .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
+
+                    // Botón de captura de foto para dataset
+                    Button(action: { viewModel.captureAndUpload() }) {
+                        Image(systemName: "camera.fill")
+                            .font(.system(size: 18))
+                            .foregroundColor(.white)
+                            .frame(width: 44, height: 44)
+                            .background(.black.opacity(0.5))
+                            .clipShape(Circle())
+                            .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
+                    }
+                    .disabled(viewModel.isProcessing)
+
+                    // Botón Google Sign-In (solo si no hay sesión)
+                    if !signInMgr.isSignedIn {
+                        Button(action: {
+                            if let vc = UIApplication.shared.connectedScenes
+                                .compactMap({ $0 as? UIWindowScene })
+                                .first?.windows.first?.rootViewController {
+                                signInMgr.signIn(presenting: vc)
+                            }
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "person.crop.circle.badge.plus")
+                                Text("Google")
+                                    .font(.system(size: 10, weight: .semibold))
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .background(.black.opacity(0.55))
+                            .cornerRadius(8)
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.3), lineWidth: 1))
+                        }
+                    }
                 }
                 .padding(.trailing, 20)
             }

@@ -1,4 +1,5 @@
 import SwiftUI
+import GoogleSignIn
 
 @main
 struct boxerApp: App {
@@ -21,6 +22,12 @@ struct boxerApp: App {
             }
             .environmentObject(appState)
             .preferredColorScheme(.dark)
+            .onOpenURL { url in
+                GIDSignIn.sharedInstance.handle(url)
+            }
+            .task {
+                GoogleSignInManager.shared.restorePreviousSignIn()
+            }
         }
     }
 }

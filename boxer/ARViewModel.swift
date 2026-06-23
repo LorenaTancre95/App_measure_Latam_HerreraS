@@ -282,6 +282,35 @@ final class ARViewModel: ObservableObject {
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
     func clearAll() { clearBoxes(); debugBBoxes.removeAll() }
+
+    // MARK: - Dataset capture
+
+    func captureAndUpload() {
+        guard let frame = sceneView?.session.currentFrame else { status = "Sin frame AR"; return }
+        guard !isProcessing else { return }
+        let mode = measureMode == .box ? "CAJA" : "OVERSIZE"
+        isProcessing = true
+        status = "Subiendo foto..."
+
+        Task.detached {
+            do {
+                let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
+                let ctx = CIContext()
+                guard let cg = ctx.createCGImage(ci, from: ci.extent) else { throw UploadError.imageConversionFailed }
+                let uiImg = UIImage(cgImage: cg)
+                guard let jpeg = uiImg.jpegData(compressionQuality: 0.85) else { throw UploadError.imageConversionFailed }
+                try await DriveUploader.shared.upload(imageData: jpeg, mode: mode)
+                await MainActor.run { self.status = "Foto subida a Drive ✓"; self.isProcessing = false }
+            } catch {
+                await MainActor.run { self.status = "Error subida: \(error.localizedDescription)"; self.isProcessing = false }
+            }
+        }
+    }
+
+    enum UploadError: LocalizedError {
+        case imageConversionFailed
+        var errorDescription: String? { "No se pudo convertir el frame a JPEG" }
+    }
 }
 
 // MARK: - Helpers
