@@ -181,23 +181,27 @@ struct ContentView: View {
                     }
                     .disabled(viewModel.isProcessing)
 
-                    // Botón Google Sign-In (solo si no hay sesión)
-                    if !signInMgr.isSignedIn {
+                    // Botón Google: sign-in si no hay sesión, o pedir Drive scope si falta
+                    if !signInMgr.isSignedIn || !signInMgr.hasDriveScope {
                         Button(action: {
                             if let vc = UIApplication.shared.connectedScenes
                                 .compactMap({ $0 as? UIWindowScene })
                                 .first?.windows.first?.rootViewController {
-                                signInMgr.signIn(presenting: vc)
+                                if signInMgr.isSignedIn {
+                                    signInMgr.grantDriveScope(presenting: vc)
+                                } else {
+                                    signInMgr.signIn(presenting: vc)
+                                }
                             }
                         }) {
                             HStack(spacing: 4) {
-                                Image(systemName: "person.crop.circle.badge.plus")
-                                Text("Google")
+                                Image(systemName: signInMgr.isSignedIn ? "folder.badge.plus" : "person.crop.circle.badge.plus")
+                                Text(signInMgr.isSignedIn ? "Drive" : "Google")
                                     .font(.system(size: 10, weight: .semibold))
                             }
                             .foregroundColor(.white)
                             .padding(.horizontal, 8).padding(.vertical, 5)
-                            .background(.black.opacity(0.55))
+                            .background(signInMgr.isSignedIn ? .orange.opacity(0.8) : .black.opacity(0.55))
                             .cornerRadius(8)
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.3), lineWidth: 1))
                         }

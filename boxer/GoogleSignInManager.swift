@@ -20,7 +20,11 @@ final class GoogleSignInManager: ObservableObject {
         userEmail = user?.profile?.email
     }
 
-    private let driveScope = "https://www.googleapis.com/auth/drive.file"
+    let driveScope = "https://www.googleapis.com/auth/drive.file"
+
+    var hasDriveScope: Bool {
+        GIDSignIn.sharedInstance.currentUser?.grantedScopes?.contains(driveScope) == true
+    }
 
     func signIn(presenting viewController: UIViewController) {
         GIDSignIn.sharedInstance.signIn(
@@ -30,10 +34,19 @@ final class GoogleSignInManager: ObservableObject {
         ) { result, error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let error {
-                    print("GoogleSignIn error: \(error.localizedDescription)")
-                    return
-                }
+                if let error { print("GoogleSignIn error: \(error.localizedDescription)"); return }
+                self.isSignedIn = result?.user != nil
+                self.userEmail = result?.user.profile?.email
+            }
+        }
+    }
+
+    func grantDriveScope(presenting viewController: UIViewController) {
+        guard let user = GIDSignIn.sharedInstance.currentUser else { signIn(presenting: viewController); return }
+        user.addScopes([driveScope], presenting: viewController) { result, error in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                if let error { print("addScopes error: \(error.localizedDescription)"); return }
                 self.isSignedIn = result?.user != nil
                 self.userEmail = result?.user.profile?.email
             }
