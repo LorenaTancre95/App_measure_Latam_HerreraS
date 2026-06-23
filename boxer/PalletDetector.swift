@@ -26,30 +26,31 @@ final class PalletDetector {
     func detect(pixelBuffer: CVPixelBuffer, confThreshold: Float = 0.3) throws -> [[Bool]]? {
         let S = PalletDetector.imageSize
 
-        // Center-crop to square → scale to 640×640 → RGBA bytes
+        // Center-crop to square → scale to 640×640 → CVPixelBuffer (model expects Image type)
         let ci  = CIImage(cvPixelBuffer: pixelBuffer)
         let ctx = CIContext()
         let w = ci.extent.width, h = ci.extent.height, side = min(w, h)
         let cropped = ci.cropped(to: CGRect(x: (w-side)/2, y: (h-side)/2, width: side, height: side))
         let scaled  = cropped.transformed(by: CGAffineTransform(scaleX: CGFloat(S)/side,
                                                                 y: CGFloat(S)/side))
-        var rgba = [UInt8](repeating: 0, count: S * S * 4)
-        ctx.render(scaled, toBitmap: &rgba, rowBytes: S * 4,
-                   bounds: CGRect(x: scaled.extent.origin.x, y: scaled.extent.origin.y,
-                                  width: CGFloat(S), height: CGFloat(S)),
-                   format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
 
-        // CHW float32 in [0, 255] — model scales internally
-        let arr = try MLMultiArray(shape: [1, 3, S, S] as [NSNumber], dataType: .float32)
-        let ptr = arr.dataPointer.assumingMemoryBound(to: Float32.self)
-        let n   = S * S
-        for i in 0..<n {
-            ptr[i]       = Float(rgba[i*4])
-            ptr[n + i]   = Float(rgba[i*4 + 1])
-            ptr[2*n + i] = Float(rgba[i*4 + 2])
+        var outBuffer: CVPixelBuffer?
+        CVPixelBufferCreate(kCFAllocatorDefault, S, S, kCVPixelFormatType_32BGRA,
+                            [kCVPixelBufferCGImageCompatibilityKey: true,
+                             kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary,
+                            &outBuffer)
+        guard let buf = outBuffer else { return nil }
+        ctx.render(scaled, to: buf)
+
+        let constraint = model.modelDescription.inputDescriptionsByName["image"]?.imageConstraint
+        let imageValue: MLFeatureValue
+        if let c = constraint {
+            imageValue = try MLFeatureValue(pixelBuffer: buf, constraint: c)
+        } else {
+            imageValue = MLFeatureValue(pixelBuffer: buf)
         }
 
-        let input  = try MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(multiArray: arr)])
+        let input  = try MLDictionaryFeatureProvider(dictionary: ["image": imageValue])
         let output = try autoreleasepool { try model.prediction(from: input) }
 
         // Log shapes once for debugging
