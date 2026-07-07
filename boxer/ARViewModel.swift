@@ -111,7 +111,8 @@ final class ARViewModel: ObservableObject {
                 let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
                                  width: vfN.width*vp.width, height: vfN.height*vp.height)
                 let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
-                    vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
+                    // Acepta si el centro O más del 30% del área intersecta el viewfinder
+                    vfR.intersects(scr.rect) ? box : nil
                 }
 
                 // ── Selección del bbox a medir ─────────────────────────
@@ -125,10 +126,11 @@ final class ARViewModel: ObservableObject {
                         await MainActor.run { self.status = "Apuntá la caja al viewfinder" }
                     }
                 } else {
-                    // Fallback: caja grande llena el encuadre → bbox = visor completo
-                    best = YOLOBox(xmin: 32, ymin: 32, xmax: 608, ymax: 608,
+                    // Fallback: YOLO no detectó → medir zona central del visor
+                    // (evita capturar piso/fondo fuera de la caja)
+                    best = YOLOBox(xmin: 160, ymin: 160, xmax: 480, ymax: 480,
                                    label: "caja", score: 0)
-                    await MainActor.run { self.status = "Midiendo área del visor..." }
+                    await MainActor.run { self.status = "Centrá la caja en el visor..." }
                 }
 
                 // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────

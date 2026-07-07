@@ -189,7 +189,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 1.00   // include up to 100 cm behind front face (cubre cajas grandes)
+        let dCut = dFront + 0.55   // include up to 55 cm behind front face
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics
@@ -242,17 +242,20 @@ struct BoxMeasurer2 {
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
         let rb = CVPixelBufferGetBytesPerRow(depthBuffer)
 
+        // Solo incluir puntos que estén razonablemente cerca de la cara frontal
+        // (evita capturar piso/pared lejanos como si fueran la cara trasera de la caja)
+        let maxBoxDepth: Float = 0.65
         var bgDs: [Float] = []
         for py in ey0...ey1 {
             let row = base.advanced(by: py*rb).assumingMemoryBound(to: Float32.self)
             for px in ex0...ex1 {
                 if px >= ix0 && px <= ix1 && py >= iy0 && py <= iy1 { continue }
                 let d = row[px]
-                if d > dFront+0.05 && d < 7 { bgDs.append(d) }
+                if d > dFront+0.05 && d < dFront+maxBoxDepth { bgDs.append(d) }
             }
         }
         guard !bgDs.isEmpty else { return 0.25 }
         bgDs.sort()
-        return bgDs[bgDs.count/2] - dFront
+        return min(bgDs[bgDs.count/2] - dFront, maxBoxDepth)
     }
 }
