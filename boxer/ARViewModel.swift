@@ -257,9 +257,18 @@ final class ARViewModel: ObservableObject {
         Task.detached {
             do {
                 let conf = await MainActor.run { self.confidenceThreshold }
-                guard let mask = try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf) else {
-                    await MainActor.run { self.status = "No se detectó carga (bajá el umbral de confianza)"; self.isProcessing = false }
-                    return
+                let detectedMask = try? detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf)
+
+                // Si el modelo de segmentación no detectó nada, usar máscara completa
+                // (toda el área del visor = toda la carga grande que llena la pantalla)
+                let mask: [[Bool]]
+                if let m = detectedMask {
+                    mask = m
+                    await MainActor.run { self.status = "Carga segmentada — midiendo..." }
+                } else {
+                    let sz = 32
+                    mask = Array(repeating: Array(repeating: true, count: sz), count: sz)
+                    await MainActor.run { self.status = "Midiendo visor completo..." }
                 }
 
                 // Multi-shot: medir 3 veces con LiDAR y tomar mediana

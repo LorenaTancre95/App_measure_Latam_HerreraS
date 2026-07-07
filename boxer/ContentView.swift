@@ -169,8 +169,7 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .disabled(viewModel.isProcessing || !viewModel.isCalibrated ||
-                              (viewModel.measureMode == .box && !viewModel.isModelReady))
+                    .disabled(isButtonDisabled)
 
                     // Botón de captura de foto para dataset
                     Button(action: { viewModel.captureAndUpload() }) {
@@ -218,8 +217,17 @@ struct ContentView: View {
     private var buttonColor: Color {
         if viewModel.isProcessing { return .gray }
         if viewModel.measureMode == .box && !viewModel.isModelReady { return .purple }
-        if !viewModel.isCalibrated { return .orange }
+        if viewModel.measureMode == .box && !viewModel.isCalibrated { return .orange }
         return .blue
+    }
+
+    private var isButtonDisabled: Bool {
+        if viewModel.isProcessing { return true }
+        if viewModel.measureMode == .box {
+            return !viewModel.isModelReady || !viewModel.isCalibrated
+        }
+        // Oversize: solo necesita LiDAR (no requiere piso calibrado)
+        return false
     }
 
     @ViewBuilder
