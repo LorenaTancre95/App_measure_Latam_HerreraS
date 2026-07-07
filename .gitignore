@@ -17,3 +17,4 @@ DerivedData/
 !models_yolo/*.onnx
 !boxer/best.onnx
 *.pyc
+!boxer/best_yolov9.onnx
