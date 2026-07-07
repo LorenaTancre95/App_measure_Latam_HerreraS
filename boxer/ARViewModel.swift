@@ -106,12 +106,12 @@ final class ARViewModel: ObservableObject {
                 let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
                     vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
                 }
-                guard let labelSrc = vfPassed.first else {
-                    await MainActor.run { self.status = "Apuntá la caja al visor"; self.isProcessing = false }
-                    return
+                guard let labelSrc = vfPassed.first ?? topBoxes.first else {
+                    await MainActor.run { self.isProcessing = false }; return
                 }
-                // ROI anclada al centro del crosshair (YOLO 320,320 ≈ centro de pantalla).
-                // Usa el tamaño del bbox de YOLO pero fuerza el centro al visor.
+                if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
+                // ROI de medición centrada en el crosshair (YOLO 320,320).
+                // Toma el tamaño del bbox de YOLO pero ancla el centro al visor.
                 let hw = (labelSrc.xmax - labelSrc.xmin) / 2
                 let hh = (labelSrc.ymax - labelSrc.ymin) / 2
                 let best = YOLOBox(xmin: max(0, 320-hw), ymin: max(0, 320-hh),
