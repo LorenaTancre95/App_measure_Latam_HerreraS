@@ -152,10 +152,12 @@ struct ContentView: View {
                                 .fill(.white)
                                 .frame(width: 70, height: 70)
                             Circle()
-                                .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
+                                .fill(buttonColor)
                                 .frame(width: 60, height: 60)
                             if viewModel.isProcessing {
                                 ProgressView().tint(.white)
+                            } else if viewModel.measureMode == .box && !viewModel.isModelReady {
+                                ProgressView().tint(.white).scaleEffect(0.8)
                             } else if !viewModel.isCalibrated {
                                 Image(systemName: "arrow.down.to.line")
                                     .font(.system(size: 22))
@@ -167,7 +169,8 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
+                    .disabled(viewModel.isProcessing || !viewModel.isCalibrated ||
+                              (viewModel.measureMode == .box && !viewModel.isModelReady))
 
                     // Botón de captura de foto para dataset
                     Button(action: { viewModel.captureAndUpload() }) {
@@ -210,6 +213,13 @@ struct ContentView: View {
                 .padding(.trailing, 20)
             }
         }
+    }
+
+    private var buttonColor: Color {
+        if viewModel.isProcessing { return .gray }
+        if viewModel.measureMode == .box && !viewModel.isModelReady { return .purple }
+        if !viewModel.isCalibrated { return .orange }
+        return .blue
     }
 
     @ViewBuilder

@@ -15,6 +15,7 @@ struct DetectionInfo: Identifiable {
 final class ARViewModel: ObservableObject {
     @Published var status: String = "Initializing..."
     @Published var isProcessing: Bool = false
+    @Published var isModelReady: Bool = false
     @Published var detections: [DetectionInfo] = []
     @Published var confidenceThreshold: Float = 0.3
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
@@ -57,7 +58,12 @@ final class ARViewModel: ObservableObject {
         await MainActor.run {
             self.yoloDetector = yolo
             self.palletDetector = pallet
-            self.status = "Apuntá al piso para calibrar..."
+            self.isModelReady = true
+            if self.isCalibrated {
+                self.status = "Listo ✓ — apuntá la caja al visor"
+            } else {
+                self.status = "Apuntá al piso para calibrar..."
+            }
         }
     }
 
@@ -289,7 +295,9 @@ final class ARViewModel: ObservableObject {
     func floorDetected() {
         guard !isCalibrated else { return }
         isCalibrated = true
-        if !isProcessing { status = "Piso calibrado ✓ — apuntá la caja al visor" }
+        if !isProcessing {
+            status = isModelReady ? "Piso calibrado ✓ — apuntá la caja al visor" : "Piso calibrado ✓ — cargando modelo..."
+        }
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
