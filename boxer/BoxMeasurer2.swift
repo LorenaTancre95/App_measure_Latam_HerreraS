@@ -109,11 +109,15 @@ struct BoxMeasurer2 {
 
         // 5. If box is viewed nearly face-on, widthB is the noise band of the
         //    front face depth — fall back to background sampling for depth.
+        // Sanity check: widthA > 2m means background contamination, bail out.
+        guard widthA < 2.0 else { return nil }
+
         let depthEstimate: Float
         let minDepthRatio: Float = 0.20   // < 20% of width → probably face-on
         if widthB < widthA * minDepthRatio {
-            depthEstimate = max(backgroundDepth(frame: frame, yoloBox: yoloBox, dFront: dFront),
-                                0.05)
+            let bg = backgroundDepth(frame: frame, yoloBox: yoloBox, dFront: dFront)
+            // Cap background depth: box depth can't exceed 2× its own width.
+            depthEstimate = max(min(bg, max(widthA * 2.0, 0.25)), 0.05)
         } else {
             depthEstimate = max(widthB, 0.05)
         }
@@ -196,11 +200,16 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 1.00   // include up to 100 cm behind front face (cubre cajas grandes)
 
-        // Pass 2: unproject surface points.
+        // Adaptive depth cutoff: box depth ≤ 1.5× its projected width (min 25 cm).
+        // Prevents wall/floor points far behind the box from contaminating PCA.
         let intr = frame.camera.intrinsics
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+        let bboxWidthPx = (yoloBox.xmax - yoloBox.xmin) / 640 * side
+        let projectedWidth = bboxWidthPx / fx * dFront
+        let dCut = dFront + max(projectedWidth * 1.5, 0.25)
+
+        // Pass 2: unproject surface points.
         let T = frame.camera.transform
         var pts: [simd_float3] = []
 
