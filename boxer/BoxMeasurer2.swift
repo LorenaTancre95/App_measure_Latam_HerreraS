@@ -118,16 +118,23 @@ struct BoxMeasurer2 {
             depthEstimate = max(widthB, 0.05)
         }
 
-        // 6. Centro OBB: midpoint de los extremos percentil sobre cada eje.
-        // qMin es el percentil 1 sobre el eje de profundidad (cara frontal).
-        // Para vista frontal: qMin ≈ cara delantera → centro = qMin + depthEstimate/2.
-        // Para vista angular: depthEstimate = widthB = qMax-qMin → (qMin+qMax)/2.
-        // Ambos casos quedan cubiertos por la misma fórmula.
-        let centerW = (pMin + pMax) / 2
-        let centerD = qMin + depthEstimate / 2
-        let cX = xMean + centerW * axX + centerD * pxX
-        let cZ = zMean + centerW * axZ + centerD * pxZ
-        let center = simd_float3(cX, (yMin + yMax) / 2, cZ)
+        // 6. Build gravity-aligned world transform.
+        // Center XZ: project the YOLO bbox center at mid-depth using camera intrinsics.
+        // This avoids PCA centroid bias (near face has more LiDAR points → centroid shifts forward).
+        let bufWc = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufHc = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let sidec = min(bufWc, bufHc)
+        let oxc = (bufWc-sidec)/2, oyc = (bufHc-sidec)/2
+        let imgMidX = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sidec + oxc
+        let imgMidY = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sidec + oyc
+        let intr = frame.camera.intrinsics
+        let midD = dFront + depthEstimate/2
+        let camC = simd_float4(
+            (imgMidX - intr[2][0]) / intr[0][0] * midD,
+            (imgMidY - intr[2][1]) / intr[1][1] * midD,
+            -midD, 1)
+        let wc = frame.camera.transform * camC
+        let center = simd_float3(wc.x/wc.w, (yMin+yMax)/2, wc.z/wc.w)
 
         let yaw = atan2(axZ, axX)
         let cosY = cos(yaw), sinY = sin(yaw)
@@ -189,7 +196,7 @@ struct BoxMeasurer2 {
         guard allD.count >= 10 else { return [] }
         allD.sort()
         dFront = allD[allD.count/10]
-        let dCut = dFront + 0.55   // include up to 55 cm behind front face
+        let dCut = dFront + 1.00   // include up to 100 cm behind front face (cubre cajas grandes)
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics
@@ -242,20 +249,17 @@ struct BoxMeasurer2 {
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
         let rb = CVPixelBufferGetBytesPerRow(depthBuffer)
 
-        // Solo incluir puntos que estén razonablemente cerca de la cara frontal
-        // (evita capturar piso/pared lejanos como si fueran la cara trasera de la caja)
-        let maxBoxDepth: Float = 0.65
         var bgDs: [Float] = []
         for py in ey0...ey1 {
             let row = base.advanced(by: py*rb).assumingMemoryBound(to: Float32.self)
             for px in ex0...ex1 {
                 if px >= ix0 && px <= ix1 && py >= iy0 && py <= iy1 { continue }
                 let d = row[px]
-                if d > dFront+0.05 && d < dFront+maxBoxDepth { bgDs.append(d) }
+                if d > dFront+0.05 && d < 7 { bgDs.append(d) }
             }
         }
         guard !bgDs.isEmpty else { return 0.25 }
         bgDs.sort()
-        return min(bgDs[bgDs.count/2] - dFront, maxBoxDepth)
+        return bgDs[bgDs.count/2] - dFront
     }
 }

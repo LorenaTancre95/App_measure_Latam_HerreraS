@@ -15,7 +15,6 @@ struct DetectionInfo: Identifiable {
 final class ARViewModel: ObservableObject {
     @Published var status: String = "Initializing..."
     @Published var isProcessing: Bool = false
-    @Published var isModelReady: Bool = false
     @Published var detections: [DetectionInfo] = []
     @Published var confidenceThreshold: Float = 0.3
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
@@ -37,12 +36,11 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func loadModelsInBackground() async {
-        // Preferir YOLOv9 si está disponible, sino usar el modelo anterior
         let yoloPath = Bundle.main.path(forResource: "best_yolov9", ofType: "onnx")
                     ?? Bundle.main.path(forResource: "best", ofType: "onnx")
         await MainActor.run { self.status = "Loading YOLO..." }
         guard let yoloPath else {
-            await MainActor.run { self.status = "best_yolov9.onnx / best.onnx not found" }
+            await MainActor.run { self.status = "best.onnx not found" }
             return
         }
         let yolo: YOLODetector
@@ -58,12 +56,7 @@ final class ARViewModel: ObservableObject {
         await MainActor.run {
             self.yoloDetector = yolo
             self.palletDetector = pallet
-            self.isModelReady = true
-            if self.isCalibrated {
-                self.status = "Listo ✓ — apuntá la caja al visor"
-            } else {
-                self.status = "Apuntá al piso para calibrar..."
-            }
+            self.status = "Apuntá al piso para calibrar..."
         }
     }
 
@@ -81,81 +74,47 @@ final class ARViewModel: ObservableObject {
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
         Task.detached {
             do {
+                // ── YOLO: una sola vez sobre el frame actual ───────────
+                let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
                 let conf = await MainActor.run { self.confidenceThreshold }
-                let vp   = await MainActor.run { self.viewportSize }
-                let vfN  = await MainActor.run { self.viewfinderNorm }
-                let vfR  = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
-                                  width: vfN.width*vp.width, height: vfN.height*vp.height)
+                let yoloBoxes = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
+                guard !yoloBoxes.isEmpty else {
+                    await MainActor.run { self.status = "No cajas detectadas"; self.isProcessing = false }
+                    return
+                }
+                let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
 
-                // ── YOLO: hasta 3 intentos en frames consecutivos ──────
-                // Si el primer frame no da detección, espera y reintenta para
-                // cubrir ángulos difíciles (vista desde arriba, caja girada, etc.)
+                // ── Overlay 2D ─────────────────────────────────────────
+                let vp = await MainActor.run { self.viewportSize }
+                let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
                 let res = frame.camera.imageResolution
                 let imgW = Float(res.width), imgH = Float(res.height)
                 let side = min(imgW, imgH), ox = (imgW-side)/2, oy = (imgH-side)/2
-
-                func yoloOn(_ f: ARFrame) throws -> (boxes: [YOLOBox], screen: [(rect: CGRect, score: Float)]) {
-                    let (img, _, _) = pixelBufferToFloatArray(f.capturedImage, targetSize: 640)
-                    let raw = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
-                    let sorted = Array(raw.sorted { $0.score > $1.score }.prefix(5))
-                    let displayT = f.displayTransform(for: .portrait, viewportSize: vp)
-                    let scr: [(rect: CGRect, score: Float)] = sorted.map { box in
-                        func pt(_ x: Float, _ y: Float) -> CGPoint {
-                            CGPoint(x: CGFloat((x/640*side+ox)/imgW),
-                                    y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
-                        }
-                        let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
-                        return (CGRect(x: min(tl.x,br.x), y: min(tl.y,br.y),
-                                      width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
+                let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
+                    func pt(_ x: Float, _ y: Float) -> CGPoint {
+                        CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
                     }
-                    return (sorted, scr)
+                    let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
+                    return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                                  width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
                 }
+                await MainActor.run { self.debugBBoxes = screenBoxes }
 
-                var topBoxes:   [YOLOBox] = []
-                var screenBoxes: [(rect: CGRect, score: Float)] = []
-                var vfPassed:   [YOLOBox] = []
-
-                let framesToTry: [ARFrame] = [frame] + (1...2).compactMap { _ -> ARFrame? in nil }
-                var attempts = [(frame: ARFrame, delay: UInt64)]()
-                attempts.append((frame, 0))
-                // Agrega dos reintentos con frames frescos
-                for delay in [UInt64(150_000_000), UInt64(150_000_000)] {
-                    attempts.append((frame, delay))  // placeholder; frame real se toma en el loop
+                // ── Viewfinder filter ──────────────────────────────────
+                let vfN = await MainActor.run { self.viewfinderNorm }
+                let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
+                                 width: vfN.width*vp.width, height: vfN.height*vp.height)
+                let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
+                    vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
                 }
-
-                for (idx, _) in attempts.enumerated() {
-                    if idx > 0 { try? await Task.sleep(nanoseconds: 150_000_000) }
-                    let currentFrame = idx == 0 ? frame :
-                        (await MainActor.run { self.sceneView?.session.currentFrame } ?? frame)
-                    let (boxes, scr) = try yoloOn(currentFrame)
-                    let passed = zip(boxes, scr).compactMap { b, s in vfR.intersects(s.rect) ? b : nil }
-                    if !passed.isEmpty || !boxes.isEmpty {
-                        topBoxes    = boxes
-                        screenBoxes = scr
-                        vfPassed    = passed
-                        if !passed.isEmpty { break }  // detección en visor → no hace falta reintentar
-                    }
+                guard let best = vfPassed.first ?? topBoxes.first else {
+                    await MainActor.run { self.isProcessing = false }; return
                 }
-
-                if !topBoxes.isEmpty {
-                    await MainActor.run { self.debugBBoxes = screenBoxes }
-                }
-
-                // ── Selección del bbox a medir ─────────────────────────
-                let best: YOLOBox
-                if let detected = vfPassed.first ?? topBoxes.first {
-                    best = detected
-                    if vfPassed.isEmpty {
-                        await MainActor.run { self.status = "Apuntá la caja al viewfinder" }
-                    }
-                } else {
-                    // Fallback: YOLO no detectó en 3 intentos → usar visor completo
-                    best = YOLOBox(xmin: 32, ymin: 32, xmax: 608, ymax: 608,
-                                   label: "caja", score: 0)
-                    await MainActor.run { self.status = "Sin detección — centrá la caja en el visor" }
-                }
+                if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
 
                 // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
+                // YOLO ya localizó la caja; ahora medimos 5 veces con LiDAR
+                // en frames consecutivos para promediar el ruido.
                 let nShots = 5
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
@@ -281,18 +240,9 @@ final class ARViewModel: ObservableObject {
         Task.detached {
             do {
                 let conf = await MainActor.run { self.confidenceThreshold }
-                let detectedMask = try? detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf)
-
-                // Si el modelo de segmentación no detectó nada, usar máscara completa
-                // (toda el área del visor = toda la carga grande que llena la pantalla)
-                let mask: [[Bool]]
-                if let m = detectedMask {
-                    mask = m
-                    await MainActor.run { self.status = "Carga segmentada — midiendo..." }
-                } else {
-                    let sz = 32
-                    mask = Array(repeating: Array(repeating: true, count: sz), count: sz)
-                    await MainActor.run { self.status = "Midiendo visor completo..." }
+                guard let mask = try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf) else {
+                    await MainActor.run { self.status = "No se detectó carga (bajá el umbral de confianza)"; self.isProcessing = false }
+                    return
                 }
 
                 // Multi-shot: medir 3 veces con LiDAR y tomar mediana
@@ -328,9 +278,7 @@ final class ARViewModel: ObservableObject {
     func floorDetected() {
         guard !isCalibrated else { return }
         isCalibrated = true
-        if !isProcessing {
-            status = isModelReady ? "Piso calibrado ✓ — apuntá la caja al visor" : "Piso calibrado ✓ — cargando modelo..."
-        }
+        if !isProcessing { status = "Piso calibrado ✓ — apuntá la caja al visor" }
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
