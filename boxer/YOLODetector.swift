@@ -48,70 +48,60 @@ final class YOLODetector {
             shape: [1, 3, NSNumber(value: imageHeight), NSNumber(value: imageWidth)]
         )
 
+        let outputs = try session.run(
+            withInputs: ["images": inputTensor],
+            outputNames: ["output0"],
+            runOptions: nil
+        )
+
+        // YOLO output: (1, 4+numClasses, 8400) — 4 box coords + class scores per anchor.
+        let outputData = try outputs["output0"]!.tensorData() as Data
+        let values = outputData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+
+        let numClasses = Self.classNames.count
+        let numAnchors = 8400
+        let stride = numAnchors
+
         var boxes: [YOLOBox] = []
 
-        // YOLOv9 native: 3 outputs por escala (p3=80×80, p4=40×40, p5=20×20)
-        if let v9out = try? session.run(
-            withInputs: ["images": inputTensor],
-            outputNames: ["p3_box", "p4_box", "p5_box"],
-            runOptions: nil
-        ) {
-            for (key, anchors) in [("p3_box", 6400), ("p4_box", 1600), ("p5_box", 400)] {
-                if let tensor = v9out[key],
-                   let data = try? tensor.tensorData() as Data {
-                    let vals = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-                    boxes += parseAnchors(vals, numAnchors: anchors, confThreshold: confThreshold)
+        for a in 0..<numAnchors {
+            // Box: cx, cy, w, h (indices 0-3).
+            let cx = values[0 * stride + a]
+            let cy = values[1 * stride + a]
+            let w  = values[2 * stride + a]
+            let h  = values[3 * stride + a]
+
+            // Find best class.
+            var bestClass = 0
+            var bestScore: Float = 0
+            for c in 0..<numClasses {
+                let score = values[(4 + c) * stride + a]
+                if score > bestScore {
+                    bestScore = score
+                    bestClass = c
                 }
             }
-        } else {
-            // Fallback: YOLOv8 / YOLOv11 — output único (1, 4+nc, 8400)
-            let out = try session.run(
-                withInputs: ["images": inputTensor],
-                outputNames: ["output0"],
-                runOptions: nil
-            )
-            guard let tensor = out["output0"],
-                  let data = try? tensor.tensorData() as Data else { return [] }
-            let vals = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
-            boxes = parseAnchors(vals, numAnchors: 8400, confThreshold: confThreshold)
-        }
 
-        return nms(boxes: boxes, iouThreshold: iouThreshold)
-    }
-
-    // Decodifica un tensor YOLO de shape (1, 4+nc, numAnchors) → YOLOBox array.
-    private func parseAnchors(_ values: [Float], numAnchors: Int,
-                               confThreshold: Float) -> [YOLOBox] {
-        let numClasses = Self.classNames.count
-        // Calcular canales reales del tensor (puede ser 4 en modelos sin clase, o 5+)
-        let totalChannels = values.isEmpty ? 0 : values.count / max(numAnchors, 1)
-        guard totalChannels >= 4 else { return [] }
-        // La escala de coordenadas puede ser normalizada (0-1) o en píxeles (0-640).
-        // Si el max de cx en los primeros 100 anchors es < 2.0, asumimos normalizado.
-        let sampleMax = (0..<min(100, numAnchors)).map { values[$0] }.max() ?? 0
-        let scale: Float = sampleMax < 2.0 ? 640.0 : 1.0
-
-        var boxes: [YOLOBox] = []
-        for a in 0..<numAnchors {
-            let cx = values[0 * numAnchors + a] * scale
-            let cy = values[1 * numAnchors + a] * scale
-            let w  = values[2 * numAnchors + a] * scale
-            let h  = values[3 * numAnchors + a] * scale
-            var bestClass = 0, bestScore: Float = 0
-            for c in 0..<numClasses {
-                let idx = (4 + c) * numAnchors + a
-                guard idx < values.count else { continue }
-                let s = values[idx]
-                if s > bestScore { bestScore = s; bestClass = c }
-            }
             guard bestScore >= confThreshold else { continue }
+
+            let xmin = cx - w / 2
+            let ymin = cy - h / 2
+            let xmax = cx + w / 2
+            let ymax = cy + h / 2
+
+            let label = bestClass < Self.classNames.count
+                ? Self.classNames[bestClass]
+                : "class_\(bestClass)"
+
             boxes.append(YOLOBox(
-                xmin: cx - w/2, ymin: cy - h/2,
-                xmax: cx + w/2, ymax: cy + h/2,
-                label: bestClass < Self.classNames.count ? Self.classNames[bestClass] : "class_\(bestClass)",
-                score: bestScore
+                xmin: xmin, ymin: ymin, xmax: xmax, ymax: ymax,
+                label: label, score: bestScore
             ))
         }
+
+        // NMS.
+        boxes = nms(boxes: boxes, iouThreshold: iouThreshold)
+
         return boxes
     }
 
