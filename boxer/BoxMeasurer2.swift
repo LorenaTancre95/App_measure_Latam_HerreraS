@@ -118,23 +118,16 @@ struct BoxMeasurer2 {
             depthEstimate = max(widthB, 0.05)
         }
 
-        // 6. Build gravity-aligned world transform.
-        // Center XZ: project the YOLO bbox center at mid-depth using camera intrinsics.
-        // This avoids PCA centroid bias (near face has more LiDAR points → centroid shifts forward).
-        let bufWc = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let bufHc = Float(CVPixelBufferGetHeight(frame.capturedImage))
-        let sidec = min(bufWc, bufHc)
-        let oxc = (bufWc-sidec)/2, oyc = (bufHc-sidec)/2
-        let imgMidX = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sidec + oxc
-        let imgMidY = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sidec + oyc
-        let intr = frame.camera.intrinsics
-        let midD = dFront + depthEstimate/2
-        let camC = simd_float4(
-            (imgMidX - intr[2][0]) / intr[0][0] * midD,
-            (imgMidY - intr[2][1]) / intr[1][1] * midD,
-            -midD, 1)
-        let wc = frame.camera.transform * camC
-        let center = simd_float3(wc.x/wc.w, (yMin+yMax)/2, wc.z/wc.w)
+        // 6. Centro OBB: midpoint de los extremos percentil sobre cada eje.
+        // qMin es el percentil 1 sobre el eje de profundidad (cara frontal).
+        // Para vista frontal: qMin ≈ cara delantera → centro = qMin + depthEstimate/2.
+        // Para vista angular: depthEstimate = widthB = qMax-qMin → (qMin+qMax)/2.
+        // Ambos casos quedan cubiertos por la misma fórmula.
+        let centerW = (pMin + pMax) / 2
+        let centerD = qMin + depthEstimate / 2
+        let cX = xMean + centerW * axX + centerD * pxX
+        let cZ = zMean + centerW * axZ + centerD * pxZ
+        let center = simd_float3(cX, (yMin + yMax) / 2, cZ)
 
         let yaw = atan2(axZ, axX)
         let cosY = cos(yaw), sinY = sin(yaw)
