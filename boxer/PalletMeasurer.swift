@@ -81,73 +81,42 @@ struct PalletMeasurer {
         let above = pts.filter { $0.y > floorY + 0.04 }
         guard above.count >= 20 else { return nil }
 
+        // Axis-aligned bounding box (2%–98% percentiles to suppress LiDAR noise)
         func pct(_ vals: [Float], _ p: Float) -> Float {
-            let s = vals.sorted(); return s[max(0, min(s.count-1, Int(Float(s.count) * p)))]
+            let s = vals.sorted(); return s[max(0, Int(Float(s.count) * p))]
         }
+        let xs = above.map { $0.x }
+        let ys = above.map { $0.y }
+        let zs = above.map { $0.z }
+
+        let xMin = pct(xs, 0.02), xMax = pct(xs, 0.98)
         let yMin = floorY
-        let yMax = pct(above.map { $0.y }, 0.97)
+        let yMax = pct(ys, 0.97)
+        let zMin = pct(zs, 0.02), zMax = pct(zs, 0.98)
+
+        let width  = xMax - xMin
         let height = yMax - yMin
-        guard height > 0.05, height < 3.0 else { return nil }
+        let depth  = zMax - zMin
 
-        // PCA en plano XZ para obtener orientación real de la carga
-        let n = Float(above.count)
-        let xMean = above.map { $0.x }.reduce(0, +) / n
-        let zMean = above.map { $0.z }.reduce(0, +) / n
-        var cxx: Float = 0, czz: Float = 0, cxz: Float = 0
-        for p in above {
-            let dx = p.x - xMean, dz = p.z - zMean
-            cxx += dx*dx; czz += dz*dz; cxz += dx*dz
-        }
-        cxx /= n; czz /= n; cxz /= n
+        guard width  > 0.05, width  < 4.0,
+              height > 0.05, height < 3.0,
+              depth  > 0.05, depth  < 4.0 else { return nil }
 
-        // Power iteration → eigenvector dominante (eje de ancho)
-        var ex: Float = 1, ez: Float = 0
-        for _ in 0..<30 {
-            let nx = cxx*ex + cxz*ez, nz = cxz*ex + czz*ez
-            let len = sqrt(nx*nx + nz*nz)
-            guard len > 1e-9 else { break }
-            ex = nx/len; ez = nz/len
-        }
-        let px = -ez, pz = ex   // eje perpendicular (profundidad)
+        let center = simd_float3((xMin + xMax) / 2, (yMin + yMax) / 2, (zMin + zMax) / 2)
 
-        // Proyectar puntos sobre los dos ejes orientados
-        var wVals = [Float](), dVals = [Float]()
-        for p in above {
-            let dx = p.x - xMean, dz = p.z - zMean
-            wVals.append(dx*ex + dz*ez)
-            dVals.append(dx*px + dz*pz)
-        }
-        wVals.sort(); dVals.sort()
-        let lo = max(0, Int(Float(wVals.count)*0.02))
-        let hi = min(wVals.count-1, Int(Float(wVals.count)*0.98))
-        let wMin = wVals[lo], wMax = wVals[hi]
-        let dMin = dVals[lo], dMax = dVals[hi]
-
-        let width = wMax - wMin
-        let depth = dMax - dMin
-        guard width > 0.05, width < 4.0,
-              depth > 0.05, depth < 4.0 else { return nil }
-
-        // Centro OBB en espacio mundo
-        let cX = xMean + (wMin+wMax)/2 * ex + (dMin+dMax)/2 * px
-        let cZ = zMean + (wMin+wMax)/2 * ez + (dMin+dMax)/2 * pz
-        let cY = (yMin + yMax) / 2
-        let center = simd_float3(cX, cY, cZ)
-
-        let yaw = atan2(ez, ex)
-        let cosY = cos(yaw), sinY = sin(yaw)
+        // Axis-aligned transform (yaw = 0)
         let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(cX, cY, cZ, 1)
+            simd_float4(1, 0, 0, 0),
+            simd_float4(0, 1, 0, 0),
+            simd_float4(0, 0, 1, 0),
+            simd_float4(center.x, center.y, center.z, 1)
         )
 
         return Detection3D(center: center,
                            size: simd_float3(width, height, depth),
-                           yaw: yaw,
+                           yaw: 0,
                            confidence: 1.0,
                            worldTransform: worldTransform,
-                           label: "oversize")
+                           label: "pallet")
     }
 }
