@@ -81,44 +81,67 @@ final class ARViewModel: ObservableObject {
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
         Task.detached {
             do {
-                // ── YOLO: una sola vez sobre el frame actual ───────────
-                let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
                 let conf = await MainActor.run { self.confidenceThreshold }
-                let yoloBoxes = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
-                let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
+                let vp   = await MainActor.run { self.viewportSize }
+                let vfN  = await MainActor.run { self.viewfinderNorm }
+                let vfR  = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
+                                  width: vfN.width*vp.width, height: vfN.height*vp.height)
 
-                // ── Overlay 2D ─────────────────────────────────────────
-                let vp = await MainActor.run { self.viewportSize }
-                let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
+                // ── YOLO: hasta 3 intentos en frames consecutivos ──────
+                // Si el primer frame no da detección, espera y reintenta para
+                // cubrir ángulos difíciles (vista desde arriba, caja girada, etc.)
                 let res = frame.camera.imageResolution
                 let imgW = Float(res.width), imgH = Float(res.height)
                 let side = min(imgW, imgH), ox = (imgW-side)/2, oy = (imgH-side)/2
-                var screenBoxes: [(rect: CGRect, score: Float)] = []
-                if !topBoxes.isEmpty {
-                    screenBoxes = topBoxes.map { box in
+
+                func yoloOn(_ f: ARFrame) throws -> (boxes: [YOLOBox], screen: [(rect: CGRect, score: Float)]) {
+                    let (img, _, _) = pixelBufferToFloatArray(f.capturedImage, targetSize: 640)
+                    let raw = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
+                    let sorted = Array(raw.sorted { $0.score > $1.score }.prefix(5))
+                    let displayT = f.displayTransform(for: .portrait, viewportSize: vp)
+                    let scr: [(rect: CGRect, score: Float)] = sorted.map { box in
                         func pt(_ x: Float, _ y: Float) -> CGPoint {
-                            CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
+                            CGPoint(x: CGFloat((x/640*side+ox)/imgW),
+                                    y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
                         }
                         let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
-                        return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                        return (CGRect(x: min(tl.x,br.x), y: min(tl.y,br.y),
                                       width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
                     }
+                    return (sorted, scr)
+                }
+
+                var topBoxes:   [YOLOBox] = []
+                var screenBoxes: [(rect: CGRect, score: Float)] = []
+                var vfPassed:   [YOLOBox] = []
+
+                let framesToTry: [ARFrame] = [frame] + (1...2).compactMap { _ -> ARFrame? in nil }
+                var attempts = [(frame: ARFrame, delay: UInt64)]()
+                attempts.append((frame, 0))
+                // Agrega dos reintentos con frames frescos
+                for delay in [UInt64(150_000_000), UInt64(150_000_000)] {
+                    attempts.append((frame, delay))  // placeholder; frame real se toma en el loop
+                }
+
+                for (idx, _) in attempts.enumerated() {
+                    if idx > 0 { try? await Task.sleep(nanoseconds: 150_000_000) }
+                    let currentFrame = idx == 0 ? frame :
+                        (await MainActor.run { self.sceneView?.session.currentFrame } ?? frame)
+                    let (boxes, scr) = try yoloOn(currentFrame)
+                    let passed = zip(boxes, scr).compactMap { b, s in vfR.intersects(s.rect) ? b : nil }
+                    if !passed.isEmpty || !boxes.isEmpty {
+                        topBoxes    = boxes
+                        screenBoxes = scr
+                        vfPassed    = passed
+                        if !passed.isEmpty { break }  // detección en visor → no hace falta reintentar
+                    }
+                }
+
+                if !topBoxes.isEmpty {
                     await MainActor.run { self.debugBBoxes = screenBoxes }
                 }
 
-                // ── Viewfinder filter ──────────────────────────────────
-                let vfN = await MainActor.run { self.viewfinderNorm }
-                let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
-                                 width: vfN.width*vp.width, height: vfN.height*vp.height)
-                let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
-                    // Acepta si el centro O más del 30% del área intersecta el viewfinder
-                    vfR.intersects(scr.rect) ? box : nil
-                }
-
                 // ── Selección del bbox a medir ─────────────────────────
-                // Si YOLO detectó algo → usar la detección más centrada.
-                // Si no → la caja es demasiado grande para YOLO: medir el
-                //  área del visor directamente (frame casi completo).
                 let best: YOLOBox
                 if let detected = vfPassed.first ?? topBoxes.first {
                     best = detected
@@ -126,11 +149,10 @@ final class ARViewModel: ObservableObject {
                         await MainActor.run { self.status = "Apuntá la caja al viewfinder" }
                     }
                 } else {
-                    // Fallback: YOLO no detectó → medir zona central del visor
-                    // (evita capturar piso/fondo fuera de la caja)
-                    best = YOLOBox(xmin: 160, ymin: 160, xmax: 480, ymax: 480,
+                    // Fallback: YOLO no detectó en 3 intentos → usar visor completo
+                    best = YOLOBox(xmin: 32, ymin: 32, xmax: 608, ymax: 608,
                                    label: "caja", score: 0)
-                    await MainActor.run { self.status = "Centrá la caja en el visor..." }
+                    await MainActor.run { self.status = "Sin detección — centrá la caja en el visor" }
                 }
 
                 // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
