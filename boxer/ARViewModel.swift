@@ -36,10 +36,12 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func loadModelsInBackground() async {
-        let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx")
+        // Preferir YOLOv9 si está disponible, sino usar el modelo anterior
+        let yoloPath = Bundle.main.path(forResource: "best_yolov9", ofType: "onnx")
+                    ?? Bundle.main.path(forResource: "best", ofType: "onnx")
         await MainActor.run { self.status = "Loading YOLO..." }
         guard let yoloPath else {
-            await MainActor.run { self.status = "best.onnx not found" }
+            await MainActor.run { self.status = "best_yolov9.onnx / best.onnx not found" }
             return
         }
         let yolo: YOLODetector
@@ -77,10 +79,6 @@ final class ARViewModel: ObservableObject {
                 let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
                 let conf = await MainActor.run { self.confidenceThreshold }
                 let yoloBoxes = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
-                guard !yoloBoxes.isEmpty else {
-                    await MainActor.run { self.status = "No cajas detectadas"; self.isProcessing = false }
-                    return
-                }
                 let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
 
                 // ── Overlay 2D ─────────────────────────────────────────
@@ -89,15 +87,18 @@ final class ARViewModel: ObservableObject {
                 let res = frame.camera.imageResolution
                 let imgW = Float(res.width), imgH = Float(res.height)
                 let side = min(imgW, imgH), ox = (imgW-side)/2, oy = (imgH-side)/2
-                let screenBoxes: [(rect: CGRect, score: Float)] = topBoxes.map { box in
-                    func pt(_ x: Float, _ y: Float) -> CGPoint {
-                        CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
+                var screenBoxes: [(rect: CGRect, score: Float)] = []
+                if !topBoxes.isEmpty {
+                    screenBoxes = topBoxes.map { box in
+                        func pt(_ x: Float, _ y: Float) -> CGPoint {
+                            CGPoint(x: CGFloat((x/640*side+ox)/imgW), y: CGFloat((y/640*side+oy)/imgH)).applying(displayT)
+                        }
+                        let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
+                        return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
+                                      width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
                     }
-                    let tl = pt(box.xmin, box.ymin), br = pt(box.xmax, box.ymax)
-                    return (CGRect(x: min(tl.x, br.x), y: min(tl.y, br.y),
-                                  width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
+                    await MainActor.run { self.debugBBoxes = screenBoxes }
                 }
-                await MainActor.run { self.debugBBoxes = screenBoxes }
 
                 // ── Viewfinder filter ──────────────────────────────────
                 let vfN = await MainActor.run { self.viewfinderNorm }
@@ -106,14 +107,25 @@ final class ARViewModel: ObservableObject {
                 let vfPassed: [YOLOBox] = zip(topBoxes, screenBoxes).compactMap { box, scr in
                     vfR.contains(CGPoint(x: scr.rect.midX, y: scr.rect.midY)) ? box : nil
                 }
-                guard let best = vfPassed.first ?? topBoxes.first else {
-                    await MainActor.run { self.isProcessing = false }; return
+
+                // ── Selección del bbox a medir ─────────────────────────
+                // Si YOLO detectó algo → usar la detección más centrada.
+                // Si no → la caja es demasiado grande para YOLO: medir el
+                //  área del visor directamente (frame casi completo).
+                let best: YOLOBox
+                if let detected = vfPassed.first ?? topBoxes.first {
+                    best = detected
+                    if vfPassed.isEmpty {
+                        await MainActor.run { self.status = "Apuntá la caja al viewfinder" }
+                    }
+                } else {
+                    // Fallback: caja grande llena el encuadre → bbox = visor completo
+                    best = YOLOBox(xmin: 32, ymin: 32, xmax: 608, ymax: 608,
+                                   label: "caja", score: 0)
+                    await MainActor.run { self.status = "Midiendo área del visor..." }
                 }
-                if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
 
                 // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
-                // YOLO ya localizó la caja; ahora medimos 5 veces con LiDAR
-                // en frames consecutivos para promediar el ruido.
                 let nShots = 5
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
