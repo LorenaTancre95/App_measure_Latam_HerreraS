@@ -125,9 +125,8 @@ struct BoxMeasurer2 {
         let bufHc = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let sidec = min(bufWc, bufHc)
         let oxc = (bufWc-sidec)/2, oyc = (bufHc-sidec)/2
-        // Centro XZ desde el centro de la imagen (= crosshair), no desde el bbox de YOLO.
-        let imgMidX = bufWc / 2
-        let imgMidY = bufHc / 2
+        let imgMidX = (yoloBox.xmin+yoloBox.xmax)/2 / 640 * sidec + oxc
+        let imgMidY = (yoloBox.ymin+yoloBox.ymax)/2 / 640 * sidec + oyc
         let intr = frame.camera.intrinsics
         let midD = dFront + depthEstimate/2
         let camC = simd_float4(
@@ -188,29 +187,16 @@ struct BoxMeasurer2 {
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
         let rb = CVPixelBufferGetBytesPerRow(depthBuffer)
 
-        // Pass 1: dFront desde el crosshair (centro del depth buffer = punto blanco del visor).
-        // Fallback al percentil 10 del bbox si el centro no tiene lecturas válidas.
+        // Pass 1: front depth (10th percentile).
         var allD: [Float] = []
-        var centerD: [Float] = []
-        let cpx = dW / 2, cpy = dH / 2, cr = 12   // región 25×25 px alrededor del crosshair
-
         for py in py0...py1 {
             let row = base.advanced(by: py*rb).assumingMemoryBound(to: Float32.self)
-            for px in px0...px1 {
-                let d = row[px]
-                guard d > 0.1, d < 7 else { continue }
-                allD.append(d)
-                if abs(px - cpx) <= cr && abs(py - cpy) <= cr { centerD.append(d) }
-            }
+            for px in px0...px1 { let d = row[px]; if d > 0.1 && d < 7 { allD.append(d) } }
         }
         guard allD.count >= 10 else { return [] }
-
-        if centerD.count >= 5 {
-            centerD.sort(); dFront = centerD[centerD.count / 2]   // mediana del crosshair
-        } else {
-            allD.sort(); dFront = allD[allD.count / 10]            // fallback: percentil 10
-        }
-        let dCut = dFront + 1.00
+        allD.sort()
+        dFront = allD[allD.count/10]
+        let dCut = dFront + 1.00   // include up to 100 cm behind front face (cubre cajas grandes)
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics

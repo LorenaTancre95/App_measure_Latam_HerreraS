@@ -36,10 +36,10 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func loadModelsInBackground() async {
-        let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx")
+        let yoloPath = Bundle.main.path(forResource: "best_yolov9", ofType: "onnx")
         await MainActor.run { self.status = "Loading YOLO..." }
         guard let yoloPath else {
-            await MainActor.run { self.status = "best.onnx not found" }
+            await MainActor.run { self.status = "best_yolov9.onnx not found" }
             return
         }
         let yolo: YOLODetector
@@ -111,22 +111,16 @@ final class ARViewModel: ObservableObject {
                 }
                 if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
 
-                // Centrar el bbox de YOLO en (320,320) = crosshair.
-                // Mantiene el tamaño del bbox pero ancla la posición al punto blanco.
-                let hw = (best.xmax - best.xmin) / 2
-                let hh = (best.ymax - best.ymin) / 2
-                let measBox = YOLOBox(xmin: max(0, 320-hw), ymin: max(0, 320-hh),
-                                     xmax: min(640, 320+hw), ymax: min(640, 320+hh),
-                                     label: best.label, score: best.score)
-
                 // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
+                // YOLO ya localizó la caja; ahora medimos 5 veces con LiDAR
+                // en frames consecutivos para promediar el ruido.
                 let nShots = 5
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
                     await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                     let f = await MainActor.run { self.sceneView?.session.currentFrame }
                     if let f, f.sceneDepth != nil,
-                       let det = BoxMeasurer2.measure(frame: f, yoloBox: measBox) {
+                       let det = BoxMeasurer2.measure(frame: f, yoloBox: best) {
                         shots.append(det)
                     }
                     if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
