@@ -36,10 +36,10 @@ final class ARViewModel: ObservableObject {
     }
 
     nonisolated private func loadModelsInBackground() async {
-        let yoloPath = Bundle.main.path(forResource: "best_yolov9", ofType: "onnx")
+        let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx")
         await MainActor.run { self.status = "Loading YOLO..." }
         guard let yoloPath else {
-            await MainActor.run { self.status = "best_yolov9.onnx not found" }
+            await MainActor.run { self.status = "best.onnx not found" }
             return
         }
         let yolo: YOLODetector
