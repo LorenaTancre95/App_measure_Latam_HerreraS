@@ -33,8 +33,15 @@ struct BoxMeasurer2 {
         let dW = CVPixelBufferGetWidth(depthBuffer)
         let dH = CVPixelBufferGetHeight(depthBuffer)
 
-        // 1. Reference depth from crosshair (screen center).
-        let dRef = crosshairDepth(depthBuffer: depthBuffer, dW: dW, dH: dH)
+        // 1. Reference depth from YOLO bbox center (small 15x15 px region in depth buffer).
+        //    Using YOLO center is more reliable than screen center — YOLO already found the box.
+        let side = min(bufW, bufH)
+        let ox = (bufW - side) / 2, oy = (bufH - side) / 2
+        let bCenterX = (yoloBox.xmin + yoloBox.xmax) / 2 / 640 * side + ox
+        let bCenterY = (yoloBox.ymin + yoloBox.ymax) / 2 / 640 * side + oy
+        let dcx = Int(bCenterX / bufW * Float(dW))
+        let dcy = Int(bCenterY / bufH * Float(dH))
+        let dRef = bboxCenterDepth(depthBuffer: depthBuffer, dcx: dcx, dcy: dcy, dW: dW, dH: dH)
         guard dRef > 0.15 && dRef < 6.0 else { return nil }
 
         // 2. Unproject all LiDAR points in depth range around dRef.
@@ -72,11 +79,11 @@ struct BoxMeasurer2 {
             voxelPoints[key, default: []].append(p)
         }
 
-        // 5. Crosshair world-XZ seed: unproject screen center at dRef.
+        // 5. Seed: unproject YOLO bbox center at dRef → world XZ.
         let intr = frame.camera.intrinsics
         let camSeed = simd_float4(
-            (bufW/2 - intr[2][0]) / intr[0][0] * dRef,
-            (bufH/2 - intr[2][1]) / intr[1][1] * dRef,
+            (bCenterX - intr[2][0]) / intr[0][0] * dRef,
+            (bCenterY - intr[2][1]) / intr[1][1] * dRef,
             -dRef, 1
         )
         let wSeed = frame.camera.transform * camSeed
@@ -187,18 +194,18 @@ struct BoxMeasurer2 {
         )
     }
 
-    // MARK: - Crosshair depth (median at depth buffer center)
+    // MARK: - YOLO bbox center depth (median of 15x15 px region)
 
-    private static func crosshairDepth(depthBuffer: CVPixelBuffer, dW: Int, dH: Int) -> Float {
+    private static func bboxCenterDepth(depthBuffer: CVPixelBuffer, dcx: Int, dcy: Int, dW: Int, dH: Int) -> Float {
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
         let rb = CVPixelBufferGetBytesPerRow(depthBuffer)
-        let cx = dW / 2, cy = dH / 2, r = 12
+        let r = 7   // 15x15 px window
         var ds: [Float] = []
-        for py in max(0, cy - r)...min(dH - 1, cy + r) {
+        for py in max(0, dcy - r)...min(dH - 1, dcy + r) {
             let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
-            for px in max(0, cx - r)...min(dW - 1, cx + r) {
+            for px in max(0, dcx - r)...min(dW - 1, dcx + r) {
                 let d = row[px]
                 if d > 0.1 && d < 7 { ds.append(d) }
             }
