@@ -80,8 +80,9 @@ struct BoxMeasurer2 {
             -dRef, 1
         )
         let wSeed = frame.camera.transform * camSeed
-        let seedXZ = simd_float2(wSeed.x / wSeed.w, wSeed.z / wSeed.w)
-        let seedKey = VoxelKey(x: Int(floor(seedXZ.x / voxelSize)), z: Int(floor(seedXZ.z / voxelSize)))
+        let seedWorldX = wSeed.x / wSeed.w
+        let seedWorldZ = wSeed.z / wSeed.w
+        let seedKey = VoxelKey(x: Int(floor(seedWorldX / voxelSize)), z: Int(floor(seedWorldZ / voxelSize)))
 
         guard voxelSet.contains(seedKey) else { return nil }
 
