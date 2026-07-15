@@ -155,7 +155,7 @@ struct BoxMeasurer2 {
         let ox = (bufW-side)/2, oy = (bufH-side)/2
         let bxRaw0 = yoloBox.xmin/640*side+ox, byRaw0 = yoloBox.ymin/640*side+oy
         let bxRaw1 = yoloBox.xmax/640*side+ox, byRaw1 = yoloBox.ymax/640*side+oy
-        let shrinkX = (bxRaw1-bxRaw0)*0.05, shrinkY = (byRaw1-byRaw0)*0.05
+        let shrinkX = (bxRaw1-bxRaw0)*0.10, shrinkY = (byRaw1-byRaw0)*0.10
         let bx0 = bxRaw0+shrinkX, by0 = byRaw0+shrinkY
         let bx1 = bxRaw1-shrinkX, by1 = byRaw1-shrinkY
 
@@ -183,9 +183,16 @@ struct BoxMeasurer2 {
             }
         }
         guard centreD.count >= 5 else { return [] }
-        centreD.sort()
-        dFront = centreD[centreD.count / 2]   // median of centre third
-        let dCut = dFront + 0.65              // 0.65 m — tighter than original 1.00 m
+
+        // Histogram peak (5 cm bins) — more robust than median when bbox centre
+        // overlaps a mix of box surface + background wall at different depths.
+        let binSize: Float = 0.05
+        var hist: [Int: Int] = [:]
+        for d in centreD { hist[Int(d / binSize), default: 0] += 1 }
+        let peakBin = hist.max(by: { $0.value < $1.value })!.key
+        dFront = Float(peakBin) * binSize + binSize / 2
+
+        let dCut = dFront + 0.65
 
         // Pass 2: unproject surface points.
         let intr = frame.camera.intrinsics
