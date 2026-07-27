@@ -1,0 +1,7 @@
+Adicionar estas chaves no Info.plist do projeto Xcode:
+
+<key>NSCameraUsageDescription</key>
+<string>Necessário para medir caixas com realidade aumentada</string>
+
+<key>NSLocationWhenInUseUsageDescription</key>
+<string>Necessário para o rastreamento ARKit</string>
