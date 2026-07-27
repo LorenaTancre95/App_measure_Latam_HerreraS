@@ -54,13 +54,13 @@ final class ARViewModel: ObservableObject {
         // Load PalletDetector (non-fatal)
         let pallet = try? PalletDetector()
 
-        // Load MobileSAM for TAP mode (non-fatal: tap mode won't be available if missing)
-        let sam = try? SAMSegmenter()
+        // SAMSegmenter is NOT loaded here — it's loaded lazily on first TAP use.
+        // Loading YOLO + Pallet + SAM simultaneously causes an OOM kill on device
+        // because the SAM encoder (1024×1024 cpuOnly) spikes memory by ~300 MB.
 
         await MainActor.run {
             self.yoloDetector = yolo
             self.palletDetector = pallet
-            self.samSegmenter = sam
             self.status = "Apuntá al piso para calibrar..."
         }
     }
@@ -280,7 +280,7 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Tap-to-select (MobileSAM)
+    // MARK: - Tap-to-select (MobileSAM — loaded lazily on first use)
 
     func measureAtTap(at point: CGPoint) {
         guard let sceneView, let frame = sceneView.session.currentFrame else {
@@ -288,7 +288,26 @@ final class ARViewModel: ObservableObject {
         }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
         guard !isProcessing else { return }
-        guard let sam = samSegmenter else { status = "SAM cargando..."; return }
+
+        // First tap: SAM not loaded yet → kick off background load and return.
+        // Subsequent taps use the cached instance.
+        if samSegmenter == nil {
+            isProcessing = true
+            status = "Cargando SAM (primera vez)..."
+            Task.detached {
+                let sam = try? SAMSegmenter()
+                await MainActor.run {
+                    self.samSegmenter = sam
+                    self.isProcessing = false
+                    self.status = sam != nil
+                        ? "SAM listo — toque la caja"
+                        : "SAM no disponible — revisá sam_encoder.mlpackage"
+                }
+            }
+            return
+        }
+
+        guard let sam = samSegmenter else { return }
 
         isProcessing = true
         clearAll()
