@@ -13,7 +13,9 @@ final class SAMSegmenter {
 
     init() throws {
         let config = MLModelConfiguration()
-        config.computeUnits = .cpuOnly   // NeuralEngine puede disparar picos de RAM que iOS mata
+        // cpuOnly: spikes 400–500 MB RAM on device → jetsam kill.
+        // NeuralEngine: also spikes RAM (original comment). GPU uses Metal VRAM, no RAM pressure.
+        config.computeUnits = .cpuAndGPU
 
         guard let encURL = Bundle.main.url(forResource: "sam_encoder", withExtension: "mlpackage")
                         ?? Bundle.main.url(forResource: "sam_encoder", withExtension: "mlmodelc")
