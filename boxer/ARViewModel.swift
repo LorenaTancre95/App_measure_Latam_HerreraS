@@ -20,6 +20,7 @@ final class ARViewModel: ObservableObject {
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
     @Published var isCalibrated: Bool = false
     @Published var measureMode: MeasureMode = .box
+    @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
 
     enum MeasureMode { case box, oversize, tap }
 
@@ -285,16 +286,45 @@ final class ARViewModel: ObservableObject {
 
         isProcessing = true
         clearAll()
-        status = "Analisando..."
+        status = "Segmentando..."
 
         let vp = viewportSize
         Task.detached {
             guard #available(iOS 17, *) else {
-                await MainActor.run { self.status = "Requiere iOS 17+"; self.isProcessing = false }
+                await MainActor.run {
+                    self.status = "Requiere iOS 17+"
+                    self.isProcessing = false
+                }
                 return
             }
 
-            // Take 3 shots and use the median result
+            // Step 1: segment the tapped object and get the preview image
+            let segResult = TapBoxMeasurer.segmentWithPreview(
+                pixelBuffer: frame.capturedImage,
+                tapPoint: point,
+                viewportSize: vp
+            )
+
+            guard let seg = segResult else {
+                await MainActor.run {
+                    self.status = "Nenhum objeto detectado — toque diretamente na caixa"
+                    self.isProcessing = false
+                }
+                return
+            }
+
+            // Step 2: show the mask overlay so the user can verify what was selected
+            await MainActor.run {
+                self.segmentationOverlay = seg.preview
+                self.status = "Verificando segmentação..."
+            }
+
+            // Hold the overlay for 1.5 s
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+
+            await MainActor.run { self.status = "Midiendo..." }
+
+            // Step 3: take 3 depth shots and use median
             let nShots = 3
             var shots: [Detection3D] = []
             for i in 1 ... nShots {
@@ -310,8 +340,10 @@ final class ARViewModel: ObservableObject {
             }
 
             await MainActor.run {
+                // Hide the overlay before showing the 3D box
+                self.segmentationOverlay = nil
                 if shots.isEmpty {
-                    self.status = "Nenhum objeto detectado — toque diretamente na caixa"
+                    self.status = "Sin geometría — acercate más o apuntá de frente"
                 } else if let sv = self.sceneView {
                     self.placeBoxes([self.medianDetection(shots)], in: sv)
                 }

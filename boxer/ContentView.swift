@@ -44,6 +44,26 @@ struct ContentView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
+            // Segmentation mask overlay (TAP mode — shown for 1.5 s before OBB)
+            if let overlay = viewModel.segmentationOverlay {
+                Image(uiImage: overlay)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+                    .overlay(alignment: .top) {
+                        Label("Verificá que cubra solo la caja", systemImage: "eye")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Color.yellow.opacity(0.9))
+                            .cornerRadius(12)
+                            .padding(.top, 60)
+                    }
+            }
+
             // TAP mode instruction banner
             if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty {
                 VStack {

@@ -93,15 +93,17 @@ struct TapBoxMeasurer {
         )
     }
 
-    // MARK: - Segmentation
+    // MARK: - Segmentation (public for preview)
 
-    /// Runs VNGenerateForegroundInstanceMaskRequest and returns the instance mask
-    /// CVPixelBuffer + the label (UInt8) of the instance under the tap point.
-    private static func segmentAtPoint(
+    /// Runs VNGenerateForegroundInstanceMaskRequest.
+    /// Returns the raw instanceMask CVPixelBuffer, the selected label, and a
+    /// coloured UIImage suitable for displaying as an on-screen overlay.
+    /// Returns nil if no foreground instance was found at the tap point.
+    static func segmentWithPreview(
         pixelBuffer: CVPixelBuffer,
         tapPoint: CGPoint,
         viewportSize: CGSize
-    ) -> (CVPixelBuffer, UInt8)? {
+    ) -> (mask: CVPixelBuffer, label: UInt8, preview: UIImage)? {
 
         let handler = VNImageRequestHandler(
             cvPixelBuffer: pixelBuffer,
@@ -116,7 +118,6 @@ struct TapBoxMeasurer {
         let instanceMask = obs.instanceMask
 
         // Map portrait-screen tap → normalized landscape-image coords
-        // (same portrait→landscape mapping used throughout the codebase)
         let normX = Float(tapPoint.y / viewportSize.height)
         let normY = Float(1.0 - tapPoint.x / viewportSize.width)
 
@@ -134,7 +135,66 @@ struct TapBoxMeasurer {
 
         guard label != 0 else { return nil }   // 0 = background
 
-        return (instanceMask, label)
+        let preview = buildPreviewImage(instanceMask: instanceMask, selectedLabel: label)
+        return (instanceMask, label, preview)
+    }
+
+    // MARK: - Preview image generation
+
+    /// Creates a semitransparent RGBA UIImage (landscape) where:
+    ///   - selected instance pixels → yellow at 55% opacity
+    ///   - all other pixels         → transparent
+    /// The UIImage is given orientation .right so UIKit renders it in portrait.
+    private static func buildPreviewImage(
+        instanceMask: CVPixelBuffer,
+        selectedLabel: UInt8
+    ) -> UIImage {
+
+        let w = CVPixelBufferGetWidth(instanceMask)
+        let h = CVPixelBufferGetHeight(instanceMask)
+
+        CVPixelBufferLockBaseAddress(instanceMask, .readOnly)
+        let src = CVPixelBufferGetBaseAddress(instanceMask)!
+            .assumingMemoryBound(to: UInt8.self)
+
+        // RGBA buffer — yellow (255,220,0) at alpha 140 (~55%) for the selected instance
+        var rgba = [UInt8](repeating: 0, count: w * h * 4)
+        for i in 0 ..< w * h {
+            if src[i] == selectedLabel {
+                rgba[i * 4 + 0] = 255   // R
+                rgba[i * 4 + 1] = 220   // G
+                rgba[i * 4 + 2] = 0     // B
+                rgba[i * 4 + 3] = 140   // A
+            }
+            // else stays 0,0,0,0 (transparent)
+        }
+        CVPixelBufferUnlockBaseAddress(instanceMask, .readOnly)
+
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(
+            data: &rgba,
+            width: w, height: h,
+            bitsPerComponent: 8,
+            bytesPerRow: w * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        let cgImage = ctx.makeImage()!
+        // .right orientation rotates the landscape image 90° CW → displays in portrait
+        return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
+    }
+
+    // Private wrapper used by measure()
+    private static func segmentAtPoint(
+        pixelBuffer: CVPixelBuffer,
+        tapPoint: CGPoint,
+        viewportSize: CGSize
+    ) -> (CVPixelBuffer, UInt8)? {
+        guard let result = segmentWithPreview(pixelBuffer: pixelBuffer,
+                                              tapPoint: tapPoint,
+                                              viewportSize: viewportSize)
+        else { return nil }
+        return (result.mask, result.label)
     }
 
     // MARK: - Point cloud
