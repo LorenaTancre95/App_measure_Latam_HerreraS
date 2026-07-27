@@ -21,7 +21,7 @@ final class ARViewModel: ObservableObject {
     @Published var isCalibrated: Bool = false
     @Published var measureMode: MeasureMode = .box
 
-    enum MeasureMode { case box, oversize }
+    enum MeasureMode { case box, oversize, tap }
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
@@ -270,6 +270,52 @@ final class ARViewModel: ObservableObject {
                     self.status = "Error SAM: \(error.localizedDescription)"
                     self.isProcessing = false
                 }
+            }
+        }
+    }
+
+    // MARK: - Tap-to-select (iOS 17+)
+
+    func measureAtTap(at point: CGPoint) {
+        guard let sceneView, let frame = sceneView.session.currentFrame else {
+            status = "Sin frame AR"; return
+        }
+        guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
+        guard !isProcessing else { return }
+
+        isProcessing = true
+        clearAll()
+        status = "Analisando..."
+
+        let vp = viewportSize
+        Task.detached {
+            guard #available(iOS 17, *) else {
+                await MainActor.run { self.status = "Requiere iOS 17+"; self.isProcessing = false }
+                return
+            }
+
+            // Take 3 shots and use the median result
+            let nShots = 3
+            var shots: [Detection3D] = []
+            for i in 1 ... nShots {
+                await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
+                let f = await MainActor.run { self.sceneView?.session.currentFrame }
+                if let f, f.sceneDepth != nil,
+                   let det = TapBoxMeasurer.measure(frame: f,
+                                                     tapPoint: point,
+                                                     viewportSize: vp) {
+                    shots.append(det)
+                }
+                if i < nShots { try? await Task.sleep(nanoseconds: 200_000_000) }
+            }
+
+            await MainActor.run {
+                if shots.isEmpty {
+                    self.status = "Nenhum objeto detectado — toque diretamente na caixa"
+                } else if let sv = self.sceneView {
+                    self.placeBoxes([self.medianDetection(shots)], in: sv)
+                }
+                self.isProcessing = false
             }
         }
     }

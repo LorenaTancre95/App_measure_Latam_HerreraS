@@ -44,6 +44,28 @@ struct ContentView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
+            // TAP mode instruction banner
+            if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty {
+                VStack {
+                    Spacer()
+                    HStack(spacing: 8) {
+                        Image(systemName: "hand.tap")
+                            .font(.system(size: 18))
+                            .foregroundColor(.yellow)
+                        Text(viewModel.isCalibrated
+                             ? "Toque na caixa que deseja medir"
+                             : "Apuntá al piso para calibrar primero")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 12)
+                    .background(.black.opacity(0.65))
+                    .cornerRadius(20)
+                    .padding(.bottom, 160)
+                }
+            }
+
             // Top spacer (removed status bar)
             VStack { Spacer() }
 
@@ -138,36 +160,58 @@ struct ContentView: View {
                     .foregroundColor(.white.opacity(0.8))
                     .padding(.trailing, 12)
                 VStack(spacing: 8) {
-                    // CAJA / PALLET toggle
+                    // CAJA / OVERSIZE / TAP toggle
                     HStack(spacing: 0) {
                         modeButton("CAJA", mode: .box)
                         modeButton("OVERSIZE", mode: .oversize)
+                        modeButton("TAP", mode: .tap)
                     }
                     .background(.black.opacity(0.45))
                     .cornerRadius(8)
 
-                    Button(action: { viewModel.detectNow() }) {
+                    // Scan button (hidden in TAP mode — user taps directly on screen)
+                    if viewModel.measureMode != .tap {
+                        Button(action: { viewModel.detectNow() }) {
+                            ZStack {
+                                Circle()
+                                    .fill(.white)
+                                    .frame(width: 70, height: 70)
+                                Circle()
+                                    .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
+                                    .frame(width: 60, height: 60)
+                                if viewModel.isProcessing {
+                                    ProgressView().tint(.white)
+                                } else if !viewModel.isCalibrated {
+                                    Image(systemName: "arrow.down.to.line")
+                                        .font(.system(size: 22))
+                                        .foregroundColor(.white)
+                                } else {
+                                    Image(systemName: viewModel.measureMode == .oversize ? "shippingbox.fill" : "cube.transparent.fill")
+                                        .font(.system(size: 24))
+                                        .foregroundColor(.white)
+                                }
+                            }
+                        }
+                        .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
+                    } else {
+                        // TAP mode: show finger icon as visual hint
                         ZStack {
                             Circle()
                                 .fill(.white)
                                 .frame(width: 70, height: 70)
                             Circle()
-                                .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
+                                .fill(viewModel.isProcessing ? .gray : .green)
                                 .frame(width: 60, height: 60)
                             if viewModel.isProcessing {
                                 ProgressView().tint(.white)
-                            } else if !viewModel.isCalibrated {
-                                Image(systemName: "arrow.down.to.line")
-                                    .font(.system(size: 22))
-                                    .foregroundColor(.white)
                             } else {
-                                Image(systemName: viewModel.measureMode == .oversize ? "shippingbox.fill" : "cube.transparent.fill")
-                                    .font(.system(size: 24))
+                                Image(systemName: "hand.tap.fill")
+                                    .font(.system(size: 26))
                                     .foregroundColor(.white)
                             }
                         }
+                        .opacity(0.85)
                     }
-                    .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
 
                     // Botón de captura de foto para dataset
                     Button(action: { viewModel.captureAndUpload() }) {
