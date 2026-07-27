@@ -29,6 +29,7 @@ final class ARViewModel: ObservableObject {
     let viewfinderNorm = CGRect(x: 0.1, y: 0.18, width: 0.8, height: 0.64)
     private var yoloDetector: YOLODetector?
     private var palletDetector: PalletDetector?
+    private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
 
     func setup(sceneView: ARSCNView) {
@@ -50,12 +51,16 @@ final class ARViewModel: ObservableObject {
             return
         }
 
-        // Load PalletDetector (non-fatal: pallet mode won't be available if it fails)
+        // Load PalletDetector (non-fatal)
         let pallet = try? PalletDetector()
+
+        // Load MobileSAM for TAP mode (non-fatal: tap mode won't be available if missing)
+        let sam = try? SAMSegmenter()
 
         await MainActor.run {
             self.yoloDetector = yolo
             self.palletDetector = pallet
+            self.samSegmenter = sam
             self.status = "Apuntá al piso para calibrar..."
         }
     }
@@ -275,7 +280,7 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Tap-to-select (iOS 17+)
+    // MARK: - Tap-to-select (MobileSAM)
 
     func measureAtTap(at point: CGPoint) {
         guard let sceneView, let frame = sceneView.session.currentFrame else {
@@ -283,6 +288,7 @@ final class ARViewModel: ObservableObject {
         }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
         guard !isProcessing else { return }
+        guard let sam = samSegmenter else { status = "SAM cargando..."; return }
 
         isProcessing = true
         clearAll()
@@ -290,19 +296,12 @@ final class ARViewModel: ObservableObject {
 
         let vp = viewportSize
         Task.detached {
-            guard #available(iOS 17, *) else {
-                await MainActor.run {
-                    self.status = "Requiere iOS 17+"
-                    self.isProcessing = false
-                }
-                return
-            }
-
-            // Step 1: segment the tapped object and get the preview image
+            // Step 1: run MobileSAM on the tapped point
             let segResult = TapBoxMeasurer.segmentWithPreview(
                 pixelBuffer: frame.capturedImage,
                 tapPoint: point,
-                viewportSize: vp
+                viewportSize: vp,
+                samSegmenter: sam
             )
 
             guard let seg = segResult else {
@@ -313,34 +312,29 @@ final class ARViewModel: ObservableObject {
                 return
             }
 
-            // Step 2: show the mask overlay so the user can verify what was selected
+            // Step 2: show yellow mask overlay for 1.5 s so user can verify coverage
             await MainActor.run {
                 self.segmentationOverlay = seg.preview
                 self.status = "Verificando segmentação..."
             }
 
-            // Hold the overlay for 1.5 s
             try? await Task.sleep(nanoseconds: 1_500_000_000)
 
-            await MainActor.run { self.status = "Midiendo..." }
-
-            // Step 3: take 3 depth shots and use median
+            // Step 3: 3 LiDAR shots filtered through the SAM mask → median
+            let mask = seg.mask
             let nShots = 3
             var shots: [Detection3D] = []
-            for i in 1 ... nShots {
+            for i in 1...nShots {
                 await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                 let f = await MainActor.run { self.sceneView?.session.currentFrame }
                 if let f, f.sceneDepth != nil,
-                   let det = TapBoxMeasurer.measure(frame: f,
-                                                     tapPoint: point,
-                                                     viewportSize: vp) {
+                   let det = TapBoxMeasurer.measure(frame: f, mask: mask) {
                     shots.append(det)
                 }
                 if i < nShots { try? await Task.sleep(nanoseconds: 200_000_000) }
             }
 
             await MainActor.run {
-                // Hide the overlay before showing the 3D box
                 self.segmentationOverlay = nil
                 if shots.isEmpty {
                     self.status = "Sin geometría — acercate más o apuntá de frente"

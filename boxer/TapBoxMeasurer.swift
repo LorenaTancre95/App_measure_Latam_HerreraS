@@ -1,319 +1,119 @@
 import ARKit
-import Vision
+import UIKit
 import simd
 
-/// Tap-to-select box measurement using VNGenerateForegroundInstanceMaskRequest (iOS 17+).
+/// Tap-to-select box measurement using MobileSAM.
 ///
 /// Flow:
-///   1. User taps on screen → screen point passed here
-///   2. VNGenerateForegroundInstanceMaskRequest segments all foreground objects
-///   3. The instance label at the tapped point is identified
-///   4. A binary mask is built for ONLY that instance
-///   5. LiDAR depth map is filtered through the mask
-///   6. Floor-removed point cloud → OBB via PCA in XZ plane → Detection3D
-///
-/// Coordinate note: capturedImage is landscape (width > height).
-/// PalletMeasurer uses the same depth-map → world pattern reused here.
-@available(iOS 17.0, *)
+///   1. User taps a portrait screen point
+///   2. Tap coords mapped → SAM 1024×1024 prompt (center-crop of landscape capturedImage)
+///   3. SAMSegmenter encoder+decoder → [[Bool]] mask at decoder resolution
+///   4. Yellow preview UIImage built from mask so user can verify
+///   5. PalletMeasurer filters LiDAR depth through mask → OBB → Detection3D
 struct TapBoxMeasurer {
 
-    // MARK: - Entry point
+    // MARK: - Public API
 
-    static func measure(
-        frame: ARFrame,
-        tapPoint: CGPoint,
-        viewportSize: CGSize,
-        minPoints: Int = 30
-    ) -> Detection3D? {
-
-        guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
-
-        // 1. Run instance segmentation
-        guard let (instanceMask, selectedLabel) = segmentAtPoint(
-            pixelBuffer: frame.capturedImage,
-            tapPoint: tapPoint,
-            viewportSize: viewportSize
-        ) else { return nil }
-
-        // 2. Collect filtered 3D point cloud (same pattern as PalletMeasurer)
-        let pts = buildPointCloud(
-            frame: frame,
-            depthBuffer: depthBuffer,
-            instanceMask: instanceMask,
-            selectedLabel: selectedLabel
-        )
-        guard pts.count >= minPoints else { return nil }
-
-        // 3. Floor removal
-        let rawYMin = pts.map { $0.y }.min()!
-        let anchorY: Float? = frame.anchors
-            .compactMap { $0 as? ARPlaneAnchor }
-            .filter { $0.alignment == .horizontal }
-            .map { Float($0.transform.columns.3.y) }.min()
-
-        let floorY: Float
-        if let a = anchorY, a <= rawYMin + 0.08 { floorY = a } else { floorY = rawYMin }
-
-        let above = pts.filter { $0.y > floorY + 0.04 }
-        guard above.count >= minPoints else { return nil }
-
-        // 4. Height using 97th-percentile top (same as BoxMeasurer2)
-        var ySorted = above.map { $0.y }; ySorted.sort()
-        let yTop  = ySorted[Int(Float(ySorted.count) * 0.97)]
-        let height = yTop - floorY
-        guard height > 0.02, height < 3.0 else { return nil }
-
-        // 5. Horizontal OBB via 2×2 PCA on XZ
-        let (width, depth, center2D, axis1) = obbXZ(points: above)
-        guard width > 0.02, width < 4.0,
-              depth > 0.02, depth < 4.0 else { return nil }
-
-        // 6. Build Detection3D
-        let centerY = (floorY + yTop) / 2
-        let center  = simd_float3(center2D.x, centerY, center2D.y)
-
-        // Yaw from principal axis
-        let yaw = atan2(axis1.y, axis1.x)
-        let cosY = cos(yaw), sinY = sin(yaw)
-        let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(center.x, center.y, center.z, 1)
-        )
-
-        // size.x = width along axis1, size.z = depth along axis2
-        return Detection3D(
-            center: center,
-            size: simd_float3(width, height, depth),
-            yaw: yaw,
-            confidence: 1.0,
-            worldTransform: worldTransform,
-            label: "caja"
-        )
-    }
-
-    // MARK: - Segmentation (public for preview)
-
-    /// Runs VNGenerateForegroundInstanceMaskRequest.
-    /// Returns the raw instanceMask CVPixelBuffer, the selected label, and a
-    /// coloured UIImage suitable for displaying as an on-screen overlay.
-    /// Returns nil if no foreground instance was found at the tap point.
+    /// Segments the object at `tapPoint` and returns the mask + a yellow preview image.
+    /// Returns nil if SAM produces no meaningful result at the tapped location.
     static func segmentWithPreview(
         pixelBuffer: CVPixelBuffer,
         tapPoint: CGPoint,
-        viewportSize: CGSize
-    ) -> (mask: CVPixelBuffer, label: UInt8, preview: UIImage)? {
+        viewportSize: CGSize,
+        samSegmenter: SAMSegmenter
+    ) -> (mask: [[Bool]], preview: UIImage)? {
 
-        let handler = VNImageRequestHandler(
-            cvPixelBuffer: pixelBuffer,
-            orientation: .right,    // capturedImage is landscape-right; rotate to portrait
-            options: [:]
+        let samPoint = portraitTapToSAMCoords(
+            tapPoint: tapPoint,
+            viewportSize: viewportSize,
+            pixelBuffer: pixelBuffer
         )
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        guard (try? handler.perform([request])) != nil,
-              let obs = request.results?.first as? VNInstanceMaskObservation
+
+        guard let mask = try? samSegmenter.segment(pixelBuffer: pixelBuffer,
+                                                    promptPoint: samPoint)
         else { return nil }
 
-        let instanceMask = obs.instanceMask
+        let trueCount = mask.joined().filter { $0 }.count
+        guard trueCount > 50 else { return nil }
 
-        // Map portrait-screen tap → normalized landscape-image coords
-        let normX = Float(tapPoint.y / viewportSize.height)
-        let normY = Float(1.0 - tapPoint.x / viewportSize.width)
-
-        let maskW = CVPixelBufferGetWidth(instanceMask)
-        let maskH = CVPixelBufferGetHeight(instanceMask)
-
-        let px = max(0, min(maskW - 1, Int(normX * Float(maskW))))
-        let py = max(0, min(maskH - 1, Int(normY * Float(maskH))))
-
-        CVPixelBufferLockBaseAddress(instanceMask, .readOnly)
-        let ptr = CVPixelBufferGetBaseAddress(instanceMask)!
-            .assumingMemoryBound(to: UInt8.self)
-        let label = ptr[py * maskW + px]
-        CVPixelBufferUnlockBaseAddress(instanceMask, .readOnly)
-
-        guard label != 0 else { return nil }   // 0 = background
-
-        let preview = buildPreviewImage(instanceMask: instanceMask, selectedLabel: label)
-        return (instanceMask, label, preview)
+        let preview = buildPreviewImage(mask: mask)
+        return (mask, preview)
     }
 
-    // MARK: - Preview image generation
+    /// Measures the 3D bounding box of the object covered by `mask`.
+    /// Delegates directly to PalletMeasurer which handles
+    /// LiDAR → crop-space → mask-space mapping and floor removal.
+    static func measure(frame: ARFrame, mask: [[Bool]]) -> Detection3D? {
+        PalletMeasurer.measure(frame: frame, mask: mask)
+    }
 
-    /// Creates a semitransparent RGBA UIImage (landscape) where:
-    ///   - selected instance pixels → yellow at 55% opacity
-    ///   - all other pixels         → transparent
-    /// The UIImage is given orientation .right so UIKit renders it in portrait.
-    private static func buildPreviewImage(
-        instanceMask: CVPixelBuffer,
-        selectedLabel: UInt8
-    ) -> UIImage {
+    // MARK: - Coordinate mapping
 
-        let w = CVPixelBufferGetWidth(instanceMask)
-        let h = CVPixelBufferGetHeight(instanceMask)
+    /// Maps a portrait-screen tap to SAM 1024×1024 image coordinates.
+    ///
+    /// capturedImage is landscape (width > height, e.g. 1920×1440).
+    /// Screen is portrait. SAM encoder center-crops to a square then scales to 1024.
+    static func portraitTapToSAMCoords(
+        tapPoint: CGPoint,
+        viewportSize: CGSize,
+        pixelBuffer: CVPixelBuffer
+    ) -> CGPoint {
 
-        CVPixelBufferLockBaseAddress(instanceMask, .readOnly)
-        let src = CVPixelBufferGetBaseAddress(instanceMask)!
-            .assumingMemoryBound(to: UInt8.self)
+        let bufW = Float(CVPixelBufferGetWidth(pixelBuffer))   // e.g. 1920
+        let bufH = Float(CVPixelBufferGetHeight(pixelBuffer))  // e.g. 1440
 
-        // RGBA buffer — yellow (255,220,0) at alpha 140 (~55%) for the selected instance
-        var rgba = [UInt8](repeating: 0, count: w * h * 4)
-        for i in 0 ..< w * h {
-            if src[i] == selectedLabel {
-                rgba[i * 4 + 0] = 255   // R
-                rgba[i * 4 + 1] = 220   // G
-                rgba[i * 4 + 2] = 0     // B
-                rgba[i * 4 + 3] = 140   // A
+        // Portrait screen (tapX, tapY) → landscape image (imgX, imgY)
+        let imgX = Float(tapPoint.y / viewportSize.height) * bufW
+        let imgY = (1.0 - Float(tapPoint.x / viewportSize.width)) * bufH
+
+        // Center-crop to square (matches SAM encoder crop in SAMSegmenter.swift)
+        let side = min(bufW, bufH)
+        let ox = (bufW - side) / 2
+        let oy = (bufH - side) / 2
+
+        let cropX = imgX - ox
+        let cropY = imgY - oy
+
+        // Scale crop coords to 1024×1024
+        let S = Float(SAMSegmenter.imageSize)
+        let samX = max(0, min(S - 1, cropX / side * S))
+        let samY = max(0, min(S - 1, cropY / side * S))
+
+        return CGPoint(x: CGFloat(samX), y: CGFloat(samY))
+    }
+
+    // MARK: - Preview image
+
+    /// Yellow semi-transparent UIImage from a [[Bool]] mask.
+    /// Mask rows are in landscape orientation; .right orientation rotates to portrait for display.
+    private static func buildPreviewImage(mask: [[Bool]]) -> UIImage {
+        let mH = mask.count
+        guard mH > 0 else { return UIImage() }
+        let mW = mask[0].count
+
+        var rgba = [UInt8](repeating: 0, count: mW * mH * 4)
+        for y in 0..<mH {
+            for x in 0..<mW {
+                if mask[y][x] {
+                    let i = (y * mW + x) * 4
+                    rgba[i + 0] = 255   // R
+                    rgba[i + 1] = 220   // G
+                    rgba[i + 2] = 0     // B
+                    rgba[i + 3] = 140   // A ~55%
+                }
             }
-            // else stays 0,0,0,0 (transparent)
         }
-        CVPixelBufferUnlockBaseAddress(instanceMask, .readOnly)
 
         let colorSpace = CGColorSpaceCreateDeviceRGB()
-        let ctx = CGContext(
+        guard let ctx = CGContext(
             data: &rgba,
-            width: w, height: h,
+            width: mW, height: mH,
             bitsPerComponent: 8,
-            bytesPerRow: w * 4,
+            bytesPerRow: mW * 4,
             space: colorSpace,
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        )!
-        let cgImage = ctx.makeImage()!
-        // .right orientation rotates the landscape image 90° CW → displays in portrait
+        ), let cgImage = ctx.makeImage() else { return UIImage() }
+
         return UIImage(cgImage: cgImage, scale: 1.0, orientation: .right)
-    }
-
-    // Private wrapper used by measure()
-    private static func segmentAtPoint(
-        pixelBuffer: CVPixelBuffer,
-        tapPoint: CGPoint,
-        viewportSize: CGSize
-    ) -> (CVPixelBuffer, UInt8)? {
-        guard let result = segmentWithPreview(pixelBuffer: pixelBuffer,
-                                              tapPoint: tapPoint,
-                                              viewportSize: viewportSize)
-        else { return nil }
-        return (result.mask, result.label)
-    }
-
-    // MARK: - Point cloud
-
-    private static func buildPointCloud(
-        frame: ARFrame,
-        depthBuffer: CVPixelBuffer,
-        instanceMask: CVPixelBuffer,
-        selectedLabel: UInt8
-    ) -> [simd_float3] {
-
-        let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
-        let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
-
-        let dW = CVPixelBufferGetWidth(depthBuffer)
-        let dH = CVPixelBufferGetHeight(depthBuffer)
-        let maskW = CVPixelBufferGetWidth(instanceMask)
-        let maskH = CVPixelBufferGetHeight(instanceMask)
-
-        let intr = frame.camera.intrinsics
-        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
-        let T  = frame.camera.transform
-
-        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
-        CVPixelBufferLockBaseAddress(instanceMask, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
-            CVPixelBufferUnlockBaseAddress(instanceMask, .readOnly)
-        }
-
-        guard let depthBase = CVPixelBufferGetBaseAddress(depthBuffer),
-              let maskBase  = CVPixelBufferGetBaseAddress(instanceMask)
-        else { return [] }
-
-        let depthRB = CVPixelBufferGetBytesPerRow(depthBuffer)
-        let maskPtr = maskBase.assumingMemoryBound(to: UInt8.self)
-
-        var pts: [simd_float3] = []
-        pts.reserveCapacity(2000)
-
-        for py in 0 ..< dH {
-            let depthRow = depthBase
-                .advanced(by: py * depthRB)
-                .assumingMemoryBound(to: Float32.self)
-
-            for px in 0 ..< dW {
-                let d = depthRow[px]
-                guard d > 0.05, d < 8.0 else { continue }
-
-                // depth pixel → full-res camera image pixel
-                let ix = Float(px) / Float(dW) * bufW
-                let iy = Float(py) / Float(dH) * bufH
-
-                // full-res camera (landscape) → instanceMask pixel
-                // instanceMask is in the same orientation as capturedImage (landscape)
-                let mx = max(0, min(maskW - 1, Int(ix / bufW * Float(maskW))))
-                let my = max(0, min(maskH - 1, Int(iy / bufH * Float(maskH))))
-
-                guard maskPtr[my * maskW + mx] == selectedLabel else { continue }
-
-                // Unproject (same convention as PalletMeasurer / BoxMeasurer2)
-                let cam = simd_float4((ix - cx) / fx * d,
-                                     (iy - cy) / fy * d,
-                                     -d, 1)
-                let w = T * cam
-                pts.append(simd_float3(w.x, w.y, w.z) / w.w)
-            }
-        }
-
-        return pts
-    }
-
-    // MARK: - PCA OBB in XZ plane
-
-    /// Returns (width, depth, centerXZ, principalAxis1) in metres.
-    private static func obbXZ(
-        points: [simd_float3]
-    ) -> (width: Float, depth: Float, center: simd_float2, axis1: simd_float2) {
-
-        let n = Float(points.count)
-        let cx = points.map { $0.x }.reduce(0, +) / n
-        let cz = points.map { $0.z }.reduce(0, +) / n
-
-        // 2×2 covariance matrix
-        var cxx: Float = 0, cxz: Float = 0, czz: Float = 0
-        for p in points {
-            let dx = p.x - cx, dz = p.z - cz
-            cxx += dx * dx; cxz += dx * dz; czz += dz * dz
-        }
-        cxx /= n; cxz /= n; czz /= n
-
-        // Analytic eigenvalue / eigenvector for 2×2 symmetric matrix
-        let trace    = cxx + czz
-        let det      = cxx * czz - cxz * cxz
-        let disc     = max(0, trace * trace / 4 - det)
-        let lambda1  = trace / 2 + sqrt(disc)
-
-        var axis1: simd_float2
-        if abs(cxz) > 1e-6 {
-            axis1 = simd_normalize(simd_float2(lambda1 - czz, cxz))
-        } else {
-            axis1 = cxx >= czz ? simd_float2(1, 0) : simd_float2(0, 1)
-        }
-        let axis2 = simd_float2(-axis1.y, axis1.x)
-
-        // Project all points onto principal axes → extents
-        var min1: Float = .infinity, max1: Float = -.infinity
-        var min2: Float = .infinity, max2: Float = -.infinity
-        for p in points {
-            let dx = p.x - cx, dz = p.z - cz
-            let p1 = dx * axis1.x + dz * axis1.y
-            let p2 = dx * axis2.x + dz * axis2.y
-            min1 = min(min1, p1); max1 = max(max1, p1)
-            min2 = min(min2, p2); max2 = max(max2, p2)
-        }
-
-        // Trim 1% outliers each side
-        // (PalletMeasurer uses 2%–98%; approximate here with simple min/max)
-
-        return (max1 - min1, max2 - min2, simd_float2(cx, cz), axis1)
     }
 }
