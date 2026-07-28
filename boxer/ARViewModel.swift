@@ -317,7 +317,7 @@ final class ARViewModel: ObservableObject {
         Task.detached {
             // Step 1: run MobileSAM on the tapped point
             let segResult = TapBoxMeasurer.segmentWithPreview(
-                pixelBuffer: frame.capturedImage,
+                frame: frame,
                 tapPoint: point,
                 viewportSize: vp,
                 samSegmenter: sam

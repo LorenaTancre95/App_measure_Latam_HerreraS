@@ -6,24 +6,27 @@ import simd
 ///
 /// Flow:
 ///   1. User taps a portrait screen point
-///   2. Tap coords mapped → SAM 1024×1024 prompt (center-crop of landscape capturedImage)
-///   3. SAMSegmenter encoder+decoder → [[Bool]] mask at decoder resolution
-///   4. Yellow preview UIImage built from mask so user can verify
-///   5. PalletMeasurer filters LiDAR depth through mask → OBB → Detection3D
+///   2. ARKit displayTransform (inverted) maps tap → normalized image coords → landscape pixel
+///   3. Landscape pixel → SAM center-crop → 1024×1024 prompt
+///   4. SAMSegmenter encoder+decoder → [[Bool]] mask at decoder resolution
+///   5. Yellow preview UIImage built from mask so user can verify
+///   6. PalletMeasurer filters LiDAR depth through mask → OBB → Detection3D
 struct TapBoxMeasurer {
 
     // MARK: - Public API
 
     /// Segments the object at `tapPoint` and returns the mask + a yellow preview image.
-    /// Returns nil if SAM produces no meaningful result at the tapped location.
+    /// Requires `frame` so we can use `displayTransform` for correct coordinate mapping.
     static func segmentWithPreview(
-        pixelBuffer: CVPixelBuffer,
+        frame: ARFrame,
         tapPoint: CGPoint,
         viewportSize: CGSize,
         samSegmenter: SAMSegmenter
     ) -> (mask: [[Bool]], preview: UIImage)? {
 
+        let pixelBuffer = frame.capturedImage
         let samPoint = portraitTapToSAMCoords(
+            frame: frame,
             tapPoint: tapPoint,
             viewportSize: viewportSize,
             pixelBuffer: pixelBuffer
@@ -41,8 +44,6 @@ struct TapBoxMeasurer {
     }
 
     /// Measures the 3D bounding box of the object covered by `mask`.
-    /// Delegates directly to PalletMeasurer which handles
-    /// LiDAR → crop-space → mask-space mapping and floor removal.
     static func measure(frame: ARFrame, mask: [[Bool]]) -> Detection3D? {
         PalletMeasurer.measure(frame: frame, mask: mask)
     }
@@ -51,36 +52,41 @@ struct TapBoxMeasurer {
 
     /// Maps a portrait-screen tap to SAM 1024×1024 image coordinates.
     ///
-    /// capturedImage is landscape (width > height, e.g. 1920×1440).
-    /// Screen is portrait. SAM encoder center-crops to a square then scales to 1024.
+    /// Uses `frame.displayTransform(for: .portrait, viewportSize:)` — the authoritative
+    /// ARKit mapping from normalized image coords to normalized viewport coords.
+    /// Inverting it gives viewport → image, no hand-rolled rotation guesswork needed.
     static func portraitTapToSAMCoords(
+        frame: ARFrame,
         tapPoint: CGPoint,
         viewportSize: CGSize,
         pixelBuffer: CVPixelBuffer
     ) -> CGPoint {
 
-        let bufW = Float(CVPixelBufferGetWidth(pixelBuffer))   // e.g. 1920
-        let bufH = Float(CVPixelBufferGetHeight(pixelBuffer))  // e.g. 1440
+        let bufW = Float(CVPixelBufferGetWidth(pixelBuffer))
+        let bufH = Float(CVPixelBufferGetHeight(pixelBuffer))
 
-        // Portrait screen → landscape capturedImage coordinate mapping.
-        // ARKit capturedImage orientation (.right): rotating it 90° CCW gives portrait display.
-        // Inverse (portrait tap → landscape pixel):
-        //   portrait top (tapY=0)    → landscape right (imgX=bufW)
-        //   portrait bottom (tapY=H) → landscape left  (imgX=0)
-        //   portrait left  (tapX=0)  → landscape top   (imgY=0)
-        //   portrait right (tapX=W)  → landscape bottom (imgY=bufH)
-        let imgX = (1.0 - Float(tapPoint.y / viewportSize.height)) * bufW
-        let imgY = Float(tapPoint.x / viewportSize.width) * bufH
+        // ARKit: image normalized [0,1] → viewport normalized [0,1]
+        // Inverse: viewport normalized → image normalized
+        let displayT  = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
+        let invertedT = displayT.inverted()
 
-        // Center-crop to square (matches SAM encoder crop in SAMSegmenter.swift)
+        let normTap = CGPoint(x: tapPoint.x / viewportSize.width,
+                              y: tapPoint.y / viewportSize.height)
+        let normImg = normTap.applying(invertedT)
+
+        // Normalized image → landscape pixel
+        let imgX = Float(normImg.x) * bufW
+        let imgY = Float(normImg.y) * bufH
+
+        // Center-crop to square (mirrors what SAMSegmenter.encodeImage does)
         let side = min(bufW, bufH)
-        let ox = (bufW - side) / 2
-        let oy = (bufH - side) / 2
+        let ox   = (bufW - side) / 2
+        let oy   = (bufH - side) / 2
 
         let cropX = imgX - ox
         let cropY = imgY - oy
 
-        // Scale crop coords to 1024×1024
+        // Scale crop to 1024×1024
         let S = Float(SAMSegmenter.imageSize)
         let samX = max(0, min(S - 1, cropX / side * S))
         let samY = max(0, min(S - 1, cropY / side * S))
@@ -91,7 +97,7 @@ struct TapBoxMeasurer {
     // MARK: - Preview image
 
     /// Yellow semi-transparent UIImage from a [[Bool]] mask.
-    /// Mask rows are in landscape orientation; .right orientation rotates to portrait for display.
+    /// Mask is in landscape orientation; .right orientation rotates 90° for portrait display.
     private static func buildPreviewImage(mask: [[Bool]]) -> UIImage {
         let mH = mask.count
         guard mH > 0 else { return UIImage() }
