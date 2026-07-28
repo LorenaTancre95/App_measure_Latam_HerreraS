@@ -32,11 +32,25 @@ struct TapBoxMeasurer {
             pixelBuffer: pixelBuffer
         )
 
+        print("[TAP-DBG] SAM prompt: (\(Int(samPoint.x)), \(Int(samPoint.y)))")
+
         guard let mask = try? samSegmenter.segment(pixelBuffer: pixelBuffer,
                                                     promptPoint: samPoint)
-        else { return nil }
+        else { print("[TAP-DBG] SAM returned nil"); return nil }
 
         let trueCount = mask.joined().filter { $0 }.count
+        print("[TAP-DBG] mask \(mask.count)×\(mask.first?.count ?? 0), true pixels: \(trueCount)")
+
+        // bounding box of true pixels
+        var minR = mask.count, maxR = 0, minC = mask.first?.count ?? 0, maxC = 0
+        for (r, row) in mask.enumerated() {
+            for (c, v) in row.enumerated() where v {
+                minR = min(minR, r); maxR = max(maxR, r)
+                minC = min(minC, c); maxC = max(maxC, c)
+            }
+        }
+        print("[TAP-DBG] mask bbox rows \(minR)-\(maxR) cols \(minC)-\(maxC)")
+
         guard trueCount > 50 else { return nil }
 
         let preview = buildPreviewImage(mask: mask)
