@@ -6,10 +6,12 @@ import simd
 ///
 /// Flow:
 ///   1. Portrait tap → landscape image pixel via ARKit displayTransform
-///   2. VNGenerateForegroundInstanceMaskRequest segments all foreground objects
-///   3. Sample each instance mask at the tap pixel → identify the tapped object
-///   4. Filter LiDAR depth map through that instance mask → clean point cloud
-///   5. Floor removal + PCA OBB → Detection3D
+///   2. VNGenerateForegroundInstanceMaskRequest (.right = portrait content in landscape buffer)
+///   3. generateScaledMaskForImage returns mask at original buffer dimensions (landscape coords)
+///   4. Sample mask at landscape tap pixel → identify tapped instance
+///   5. Filter LiDAR depth through that mask → clean point cloud (no floor bleed)
+///   6. Percentile Y range for height (no ARPlane floor removal — Vision mask already excludes floor)
+///   7. PCA OBB in XZ
 @available(iOS 17.0, *)
 struct VisionBoxMeasurer {
 
@@ -32,36 +34,28 @@ struct VisionBoxMeasurer {
         let tapImgX   = Int(max(0, min(Float(normImg.x) * bufW, bufW - 1)))
         let tapImgY   = Int(max(0, min(Float(normImg.y) * bufH, bufH - 1)))
 
-        // 2. Foreground instance segmentation on landscape image
+        // 2. Foreground segmentation
+        // .right = buffer is landscape but represents portrait content (rotate 90° CW to view)
+        // generateScaledMaskForImage always returns at the original buffer size (landscape coords)
         let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .right)
         try handler.perform([request])
 
         guard let observation = request.results?.first,
               !observation.allInstances.isEmpty else {
-            print("[VISION] No foreground instances found")
+            print("[VISION] no foreground instances")
             return nil
         }
         print("[VISION] \(observation.allInstances.count) instance(s)")
 
-        // 3. Find which instance the tap falls in; keep the mask we already generated
+        // 3. Find which instance the tap hits; reuse the already-generated mask
         var selectedMask: CVPixelBuffer? = nil
         for instanceLabel in observation.allInstances {
             let mask = try observation.generateScaledMaskForImage(
                 forInstances: IndexSet(integer: instanceLabel),
                 from: handler
             )
-            CVPixelBufferLockBaseAddress(mask, .readOnly)
-            let mW  = CVPixelBufferGetWidth(mask)
-            let mH  = CVPixelBufferGetHeight(mask)
-            let rb  = CVPixelBufferGetBytesPerRow(mask)
-            let ptr = CVPixelBufferGetBaseAddress(mask)!
-                        .assumingMemoryBound(to: UInt8.self)
-            let mx  = min(mW - 1, tapImgX)
-            let my  = min(mH - 1, tapImgY)
-            let hit = ptr[my * rb + mx] > 127
-            CVPixelBufferUnlockBaseAddress(mask, .readOnly)
-
+            let hit = sampleMask(mask, x: tapImgX, y: tapImgY)
             if hit {
                 selectedMask = mask
                 print("[VISION] tapped instance \(instanceLabel)")
@@ -70,12 +64,35 @@ struct VisionBoxMeasurer {
         }
 
         guard let instanceMask = selectedMask else {
-            print("[VISION] tap did not hit any foreground instance")
+            print("[VISION] tap missed all instances (tapImgX=\(tapImgX) tapImgY=\(tapImgY) bufW=\(Int(bufW)) bufH=\(Int(bufH)))")
             return nil
         }
 
-        // 4. LiDAR + mask → point cloud → OBB
         return measureWithMask(frame: frame, maskBuffer: instanceMask)
+    }
+
+    // MARK: - Mask sampling (handles UInt8 and Float32 buffers)
+
+    private static func sampleMask(_ mask: CVPixelBuffer, x: Int, y: Int) -> Bool {
+        CVPixelBufferLockBaseAddress(mask, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(mask, .readOnly) }
+
+        let mW  = CVPixelBufferGetWidth(mask)
+        let mH  = CVPixelBufferGetHeight(mask)
+        let mRB = CVPixelBufferGetBytesPerRow(mask)
+        let fmt = CVPixelBufferGetPixelFormatType(mask)
+        let basePtr = CVPixelBufferGetBaseAddress(mask)!
+
+        let mx = min(mW - 1, max(0, x))
+        let my = min(mH - 1, max(0, y))
+
+        if fmt == kCVPixelFormatType_OneComponent32Float {
+            let fPtr = basePtr.advanced(by: my * mRB).assumingMemoryBound(to: Float32.self)
+            return fPtr[mx] > 0.5
+        } else {
+            let bPtr = basePtr.advanced(by: my * mRB).assumingMemoryBound(to: UInt8.self)
+            return bPtr[mx] > 127
+        }
     }
 
     // MARK: - LiDAR + mask → OBB
@@ -109,62 +126,59 @@ struct VisionBoxMeasurer {
         let dRB   = CVPixelBufferGetBytesPerRow(depthBuffer)
         let mBase = CVPixelBufferGetBaseAddress(maskBuffer)!
         let mRB   = CVPixelBufferGetBytesPerRow(maskBuffer)
+        let fmt   = CVPixelBufferGetPixelFormatType(maskBuffer)
 
         var pts: [simd_float3] = []
         pts.reserveCapacity(2000)
 
         for py in 0..<dH {
-            let dRow = dBase.advanced(by: py * dRB)
-                            .assumingMemoryBound(to: Float32.self)
-            // depth row py → mask row (proportional to mask height)
+            let dRow = dBase.advanced(by: py * dRB).assumingMemoryBound(to: Float32.self)
             let my   = min(mH - 1, py * mH / dH)
-            let mRow = mBase.advanced(by: my * mRB)
-                            .assumingMemoryBound(to: UInt8.self)
 
             for px in 0..<dW {
                 let d = dRow[px]
                 guard d > 0.1, d < 8.0 else { continue }
 
                 let mx = min(mW - 1, px * mW / dW)
-                guard mRow[mx] > 127 else { continue }
+
+                let inMask: Bool
+                if fmt == kCVPixelFormatType_OneComponent32Float {
+                    let fRow = mBase.advanced(by: my * mRB).assumingMemoryBound(to: Float32.self)
+                    inMask = fRow[mx] > 0.5
+                } else {
+                    let bRow = mBase.advanced(by: my * mRB).assumingMemoryBound(to: UInt8.self)
+                    inMask = bRow[mx] > 127
+                }
+                guard inMask else { continue }
 
                 let ix  = Float(px) / Float(dW) * bufW
                 let iy  = Float(py) / Float(dH) * bufH
-                let cam = simd_float4((ix - cx) / fx * d,
-                                      (iy - cy) / fy * d, -d, 1)
+                let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
                 let w   = T * cam
                 pts.append(simd_float3(w.x, w.y, w.z) / w.w)
             }
         }
 
+        print("[VISION] \(pts.count) LiDAR points inside mask")
         guard pts.count >= 20 else { return nil }
 
-        // Floor removal
-        let rawYMin = pts.map { $0.y }.min()!
-        let anchorY = frame.anchors
-            .compactMap { $0 as? ARPlaneAnchor }
-            .filter { $0.alignment == .horizontal }
-            .map { Float($0.transform.columns.3.y) }.min()
-        let floorY: Float
-        if let a = anchorY, a <= rawYMin + 0.08 { floorY = a } else { floorY = rawYMin }
-
-        let above = pts.filter { $0.y > floorY + 0.05 }
-        guard above.count >= 20 else { return nil }
-
-        // PCA OBB in XZ
+        // Percentile Y range — Vision mask already excludes floor so no plane-snap needed.
+        // 3% trim removes boundary leaks at box base; 97% removes LiDAR noise above top.
         func pct(_ vals: [Float], _ p: Float) -> Float {
             let s = vals.sorted()
             return s[max(0, Int(Float(s.count) * p))]
         }
-        let yMax   = pct(above.map { $0.y }, 0.97)
-        let height = yMax - floorY
+        let ys     = pts.map { $0.y }
+        let yLo    = pct(ys, 0.03)
+        let yHi    = pct(ys, 0.97)
+        let height = yHi - yLo
         guard height > 0.03, height < 3.0 else { return nil }
 
-        let (width, depth, center2D, axis1) = obbXZ(points: above)
+        let (width, depth, center2D, axis1) = obbXZ(points: pts)
         guard width > 0.03, width < 4.0,
               depth > 0.03, depth < 4.0 else { return nil }
 
-        let centerY = (floorY + yMax) / 2
+        let centerY = (yLo + yHi) / 2
         let center  = simd_float3(center2D.x, centerY, center2D.y)
 
         let yaw  = atan2(axis1.y, axis1.x)

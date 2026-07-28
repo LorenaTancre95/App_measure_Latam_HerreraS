@@ -306,11 +306,12 @@ final class ARViewModel: ObservableObject {
                     }
                     return
                 }
-                print("[TAP] Vision segmentation failed — falling back to depth sphere")
+                // Vision returned nil — show diagnostic so user knows which path ran
+                await MainActor.run { self.status = "[Vision→LiDAR] Midiendo..." }
             }
 
             // Fallback: LiDAR depth sphere (3 shots → median)
-            await MainActor.run { self.status = "Midiendo..." }
+            await MainActor.run { self.status = "Midiendo con LiDAR..." }
             let nShots = 3
             var shots: [Detection3D] = []
             for i in 1...nShots {
