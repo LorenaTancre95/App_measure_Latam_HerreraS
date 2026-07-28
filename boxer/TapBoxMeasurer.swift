@@ -62,9 +62,15 @@ struct TapBoxMeasurer {
         let bufW = Float(CVPixelBufferGetWidth(pixelBuffer))   // e.g. 1920
         let bufH = Float(CVPixelBufferGetHeight(pixelBuffer))  // e.g. 1440
 
-        // Portrait screen (tapX, tapY) → landscape image (imgX, imgY)
-        let imgX = Float(tapPoint.y / viewportSize.height) * bufW
-        let imgY = (1.0 - Float(tapPoint.x / viewportSize.width)) * bufH
+        // Portrait screen → landscape capturedImage coordinate mapping.
+        // ARKit capturedImage orientation (.right): rotating it 90° CCW gives portrait display.
+        // Inverse (portrait tap → landscape pixel):
+        //   portrait top (tapY=0)    → landscape right (imgX=bufW)
+        //   portrait bottom (tapY=H) → landscape left  (imgX=0)
+        //   portrait left  (tapX=0)  → landscape top   (imgY=0)
+        //   portrait right (tapX=W)  → landscape bottom (imgY=bufH)
+        let imgX = (1.0 - Float(tapPoint.y / viewportSize.height)) * bufW
+        let imgY = Float(tapPoint.x / viewportSize.width) * bufH
 
         // Center-crop to square (matches SAM encoder crop in SAMSegmenter.swift)
         let side = min(bufW, bufH)
