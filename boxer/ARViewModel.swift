@@ -280,7 +280,7 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Tap-to-select (MobileSAM — loaded lazily on first use)
+    // MARK: - Tap-to-select (LiDAR sphere — no ML, no memory issues)
 
     func measureAtTap(at point: CGPoint) {
         guard let sceneView, let frame = sceneView.session.currentFrame else {
@@ -289,74 +289,30 @@ final class ARViewModel: ObservableObject {
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
         guard !isProcessing else { return }
 
-        // First tap: SAM not loaded yet → kick off background load and return.
-        // Subsequent taps use the cached instance.
-        if samSegmenter == nil {
-            isProcessing = true
-            status = "Cargando SAM (primera vez)..."
-            Task.detached {
-                let sam = try? SAMSegmenter()
-                await MainActor.run {
-                    self.samSegmenter = sam
-                    self.isProcessing = false
-                    self.status = sam != nil
-                        ? "SAM listo — toque la caja"
-                        : "SAM no disponible — revisá sam_encoder.mlpackage"
-                }
-            }
-            return
-        }
-
-        guard let sam = samSegmenter else { return }
-
         isProcessing = true
         clearAll()
-        status = "Segmentando..."
+        status = "Midiendo..."
 
         let vp = viewportSize
         Task.detached {
-            // Step 1: run MobileSAM on the tapped point
-            let segResult = TapBoxMeasurer.segmentWithPreview(
-                frame: frame,
-                tapPoint: point,
-                viewportSize: vp,
-                samSegmenter: sam
-            )
-
-            guard let seg = segResult else {
-                await MainActor.run {
-                    self.status = "Nenhum objeto detectado — toque diretamente na caixa"
-                    self.isProcessing = false
-                }
-                return
-            }
-
-            // Step 2: show yellow mask overlay for 1.5 s so user can verify coverage
-            await MainActor.run {
-                self.segmentationOverlay = seg.preview
-                self.status = "Verificando segmentação..."
-            }
-
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-
-            // Step 3: 3 LiDAR shots filtered through the SAM mask → median
-            let mask = seg.mask
+            // 3 LiDAR shots → median for noise reduction
             let nShots = 3
             var shots: [Detection3D] = []
             for i in 1...nShots {
                 await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                 let f = await MainActor.run { self.sceneView?.session.currentFrame }
                 if let f, f.sceneDepth != nil,
-                   let det = TapBoxMeasurer.measure(frame: f, mask: mask) {
+                   let det = DepthBoxMeasurer.measure(frame: f,
+                                                       tapPoint: point,
+                                                       viewportSize: vp) {
                     shots.append(det)
                 }
-                if i < nShots { try? await Task.sleep(nanoseconds: 200_000_000) }
+                if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
             }
 
             await MainActor.run {
-                self.segmentationOverlay = nil
                 if shots.isEmpty {
-                    self.status = "Sin geometría — acercate más o apuntá de frente"
+                    self.status = "Sin geometría — tocá directo en la caja o acercate"
                 } else if let sv = self.sceneView {
                     self.placeBoxes([self.medianDetection(shots)], in: sv)
                 }
