@@ -280,7 +280,7 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Tap-to-select (LiDAR sphere — no ML, no memory issues)
+    // MARK: - Tap-to-select
 
     func measureAtTap(at point: CGPoint) {
         guard let sceneView, let frame = sceneView.session.currentFrame else {
@@ -291,11 +291,26 @@ final class ARViewModel: ObservableObject {
 
         isProcessing = true
         clearAll()
-        status = "Midiendo..."
+        status = "Segmentando..."
 
         let vp = viewportSize
         Task.detached {
-            // 3 LiDAR shots → median for noise reduction
+            // Primary: Vision foreground segmentation → semantic mask → LiDAR OBB
+            if #available(iOS 17, *) {
+                if let det = try? VisionBoxMeasurer.measure(frame: frame,
+                                                             tapPoint: point,
+                                                             viewportSize: vp) {
+                    await MainActor.run {
+                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                        self.isProcessing = false
+                    }
+                    return
+                }
+                print("[TAP] Vision segmentation failed — falling back to depth sphere")
+            }
+
+            // Fallback: LiDAR depth sphere (3 shots → median)
+            await MainActor.run { self.status = "Midiendo..." }
             let nShots = 3
             var shots: [Detection3D] = []
             for i in 1...nShots {
