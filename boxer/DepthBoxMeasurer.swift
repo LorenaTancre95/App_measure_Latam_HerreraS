@@ -16,8 +16,8 @@ struct DepthBoxMeasurer {
         frame: ARFrame,
         tapPoint: CGPoint,
         viewportSize: CGSize,
-        depthTolerance: Float = 0.20,   // ±20 cm in LiDAR depth — isolates the tapped surface
-        spatialRadius: Float = 0.40     // 40 cm 3D sphere — excludes neighbours at same depth
+        depthTolerance: Float = 0.10,   // ±10 cm in LiDAR depth — isolates the tapped surface
+        spatialRadius: Float = 0.30     // 30 cm 3D sphere — excludes neighbours at same depth
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -99,18 +99,26 @@ struct DepthBoxMeasurer {
         let floorY: Float
         if let a = anchorY, a <= rawYMin + 0.08 { floorY = a } else { floorY = rawYMin }
 
-        let above = pts.filter { $0.y > floorY + 0.04 }
+        let above = pts.filter { $0.y > floorY + 0.08 }
         guard above.count >= 20 else { return nil }
 
         // 5. PCA-OBB in XZ plane — handles rotated boxes correctly
         func pct(_ vals: [Float], _ p: Float) -> Float {
             let s = vals.sorted(); return s[max(0, Int(Float(s.count) * p))]
         }
-        let yMax = pct(above.map { $0.y }, 0.97)
+
+        // Trim XZ outliers (stray floor/background points) before OBB
+        let xs = above.map { $0.x }, zs = above.map { $0.z }
+        let xLo = pct(xs, 0.05), xHi = pct(xs, 0.95)
+        let zLo = pct(zs, 0.05), zHi = pct(zs, 0.95)
+        let trimmed = above.filter { $0.x >= xLo && $0.x <= xHi && $0.z >= zLo && $0.z <= zHi }
+        guard trimmed.count >= 20 else { return nil }
+
+        let yMax = pct(trimmed.map { $0.y }, 0.97)
         let height = yMax - floorY
         guard height > 0.03, height < 3.0 else { return nil }
 
-        let (width, depth, center2D, axis1) = obbXZ(points: above)
+        let (width, depth, center2D, axis1) = obbXZ(points: trimmed)
         guard width > 0.03, width < 4.0,
               depth > 0.03, depth < 4.0 else { return nil }
 
