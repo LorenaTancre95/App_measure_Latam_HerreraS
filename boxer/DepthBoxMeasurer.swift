@@ -102,40 +102,78 @@ struct DepthBoxMeasurer {
         let above = pts.filter { $0.y > floorY + 0.04 }
         guard above.count >= 20 else { return nil }
 
-        // 5. Percentile-trimmed AABB (same as PalletMeasurer)
+        // 5. PCA-OBB in XZ plane — handles rotated boxes correctly
         func pct(_ vals: [Float], _ p: Float) -> Float {
             let s = vals.sorted(); return s[max(0, Int(Float(s.count) * p))]
         }
-        let xs = above.map { $0.x }
-        let ys = above.map { $0.y }
-        let zs = above.map { $0.z }
+        let yMax = pct(above.map { $0.y }, 0.97)
+        let height = yMax - floorY
+        guard height > 0.03, height < 3.0 else { return nil }
 
-        let xMin = pct(xs, 0.02), xMax = pct(xs, 0.98)
-        let yMin = floorY
-        let yMax = pct(ys, 0.97)
-        let zMin = pct(zs, 0.02), zMax = pct(zs, 0.98)
+        let (width, depth, center2D, axis1) = obbXZ(points: above)
+        guard width > 0.03, width < 4.0,
+              depth > 0.03, depth < 4.0 else { return nil }
 
-        let width  = xMax - xMin
-        let height = yMax - yMin
-        let depth  = zMax - zMin
+        let centerY = (floorY + yMax) / 2
+        let center  = simd_float3(center2D.x, centerY, center2D.y)
 
-        guard width  > 0.03, width  < 4.0,
-              height > 0.03, height < 3.0,
-              depth  > 0.03, depth  < 4.0 else { return nil }
-
-        let center = simd_float3((xMin + xMax) / 2, (yMin + yMax) / 2, (zMin + zMax) / 2)
+        let yaw  = atan2(axis1.y, axis1.x)
+        let cosY = cos(yaw), sinY = sin(yaw)
         let worldTransform = simd_float4x4(
-            simd_float4(1, 0, 0, 0),
-            simd_float4(0, 1, 0, 0),
-            simd_float4(0, 0, 1, 0),
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
             simd_float4(center.x, center.y, center.z, 1)
         )
 
         return Detection3D(center: center,
                            size: simd_float3(width, height, depth),
-                           yaw: 0,
+                           yaw: yaw,
                            confidence: 1.0,
                            worldTransform: worldTransform,
                            label: "caja")
+    }
+
+    // MARK: - PCA OBB in XZ plane
+
+    private static func obbXZ(
+        points: [simd_float3]
+    ) -> (width: Float, depth: Float, center: simd_float2, axis1: simd_float2) {
+
+        let n  = Float(points.count)
+        let cx = points.map { $0.x }.reduce(0, +) / n
+        let cz = points.map { $0.z }.reduce(0, +) / n
+
+        var cxx: Float = 0, cxz: Float = 0, czz: Float = 0
+        for p in points {
+            let dx = p.x - cx, dz = p.z - cz
+            cxx += dx * dx; cxz += dx * dz; czz += dz * dz
+        }
+        cxx /= n; cxz /= n; czz /= n
+
+        let trace   = cxx + czz
+        let det     = cxx * czz - cxz * cxz
+        let disc    = max(0, trace * trace / 4 - det)
+        let lambda1 = trace / 2 + sqrt(disc)
+
+        var axis1: simd_float2
+        if abs(cxz) > 1e-6 {
+            axis1 = simd_normalize(simd_float2(lambda1 - czz, cxz))
+        } else {
+            axis1 = cxx >= czz ? simd_float2(1, 0) : simd_float2(0, 1)
+        }
+        let axis2 = simd_float2(-axis1.y, axis1.x)
+
+        var min1: Float = .infinity, max1: Float = -.infinity
+        var min2: Float = .infinity, max2: Float = -.infinity
+        for p in points {
+            let dx = p.x - cx, dz = p.z - cz
+            let p1 = dx * axis1.x + dz * axis1.y
+            let p2 = dx * axis2.x + dz * axis2.y
+            min1 = min(min1, p1); max1 = max(max1, p1)
+            min2 = min(min2, p2); max2 = max(max2, p2)
+        }
+
+        return (max1 - min1, max2 - min2, simd_float2(cx, cz), axis1)
     }
 }
