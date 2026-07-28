@@ -295,43 +295,18 @@ final class ARViewModel: ObservableObject {
 
         let vp = viewportSize
         Task.detached {
-            // Primary: Vision foreground segmentation → semantic mask → LiDAR OBB
-            if #available(iOS 17, *) {
-                if let det = try? VisionBoxMeasurer.measure(frame: frame,
-                                                             tapPoint: point,
-                                                             viewportSize: vp) {
-                    await MainActor.run {
-                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                        self.isProcessing = false
-                    }
-                    return
+            // Primary: depth flood fill — works even when box and floor have same color.
+            // Flood fill follows depth discontinuities, stopping at box edges.
+            if let det = DepthBoxMeasurer.measure(frame: frame, tapPoint: point, viewportSize: vp) {
+                await MainActor.run {
+                    if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                    self.isProcessing = false
                 }
-                // Vision returned nil — show diagnostic so user knows which path ran
-                await MainActor.run { self.status = "[Vision→LiDAR] Midiendo..." }
-            }
-
-            // Fallback: LiDAR depth sphere (3 shots → median)
-            await MainActor.run { self.status = "Midiendo con LiDAR..." }
-            let nShots = 3
-            var shots: [Detection3D] = []
-            for i in 1...nShots {
-                await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
-                let f = await MainActor.run { self.sceneView?.session.currentFrame }
-                if let f, f.sceneDepth != nil,
-                   let det = DepthBoxMeasurer.measure(frame: f,
-                                                       tapPoint: point,
-                                                       viewportSize: vp) {
-                    shots.append(det)
-                }
-                if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
+                return
             }
 
             await MainActor.run {
-                if shots.isEmpty {
-                    self.status = "Sin geometría — tocá directo en la caja o acercate"
-                } else if let sv = self.sceneView {
-                    self.placeBoxes([self.medianDetection(shots)], in: sv)
-                }
+                self.status = "Sin geometría — acercate más o tocá el centro de la caja"
                 self.isProcessing = false
             }
         }

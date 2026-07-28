@@ -1,23 +1,22 @@
 import ARKit
 import simd
 
-/// Tap-to-select measurement using only LiDAR — no ML models required.
+/// Tap-to-select measurement using LiDAR depth flood fill.
 ///
 /// Flow:
-///   1. Portrait tap → image pixel via ARKit displayTransform
-///   2. LiDAR depth at that pixel → anchor 3D world point
-///   3. Keep only depth pixels within ±depthTolerance of tap depth   ← isolates the surface
-///   4. Among those, keep only points within spatialRadius of anchor  ← excludes same-depth neighbours
-///   5. Floor removal via ARPlaneAnchor
-///   6. Axis-aligned OBB (percentile-trimmed, same as PalletMeasurer)
+///   1. Portrait tap → depth map pixel via ARKit displayTransform
+///   2. Flood fill from that pixel in depth space (±10 cm tolerance)
+///      — stops naturally at depth discontinuities (box edge vs floor/wall)
+///      — works even when box and floor have the same color
+///   3. Unproject flood-fill pixels to 3D world space
+///   4. Floor removal via ARPlaneAnchor
+///   5. PCA OBB in XZ plane
 struct DepthBoxMeasurer {
 
     static func measure(
         frame: ARFrame,
         tapPoint: CGPoint,
-        viewportSize: CGSize,
-        depthTolerance: Float = 0.10,   // ±10 cm in LiDAR depth — isolates the tapped surface
-        spatialRadius: Float = 0.30     // 30 cm 3D sphere — excludes neighbours at same depth
+        viewportSize: CGSize
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -33,92 +32,102 @@ struct DepthBoxMeasurer {
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
         let T  = frame.camera.transform
 
-        // 1. Map portrait tap → landscape image pixel
+        // 1. Portrait tap → depth map pixel
         let displayT  = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
         let invertedT = displayT.inverted()
         let normTap   = CGPoint(x: tapPoint.x / viewportSize.width,
                                 y: tapPoint.y / viewportSize.height)
         let normImg   = normTap.applying(invertedT)
-        let tapImgX   = Float(normImg.x) * bufW
-        let tapImgY   = Float(normImg.y) * bufH
-
-        // 2. Map image pixel → depth map pixel and read depth
-        let tapDX = max(0, min(dW - 1, Int(tapImgX / bufW * Float(dW))))
-        let tapDY = max(0, min(dH - 1, Int(tapImgY / bufH * Float(dH))))
+        let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
+        let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
 
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
-        let rb    = CVPixelBufferGetBytesPerRow(depthBuffer)
-        let base  = CVPixelBufferGetBaseAddress(depthBuffer)!
-        let tapD  = base.advanced(by: tapDY * rb).assumingMemoryBound(to: Float32.self)[tapDX]
+        let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
+        let base = CVPixelBufferGetBaseAddress(depthBuffer)!
+
+        func depthAt(_ px: Int, _ py: Int) -> Float {
+            base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)[px]
+        }
+
+        let tapD = depthAt(tapDX, tapDY)
         guard tapD > 0.10, tapD < 8.0 else {
             CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
             return nil
         }
 
-        // Unproject tap pixel to world space
-        let tapCam  = simd_float4((tapImgX - cx) / fx * tapD,
-                                  (tapImgY - cy) / fy * tapD,
-                                  -tapD, 1)
-        let tapW    = T * tapCam
-        let tapPos  = simd_float3(tapW.x, tapW.y, tapW.z) / tapW.w
+        // 2. Flood fill in depth image space
+        // Depth discontinuities at box edges stop the fill — robust to color similarity.
+        let maxRegion = dW * dH * 2 / 5        // bail if >40% of depth map (runaway)
+        var visited   = [Bool](repeating: false, count: dW * dH)
+        var stack     = [(Int, Int)]()
+        stack.reserveCapacity(512)
+        stack.append((tapDX, tapDY))
 
-        // 3. Collect all nearby LiDAR points
-        var pts: [simd_float3] = []
-        pts.reserveCapacity(3000)
+        var region = [(px: Int, py: Int, d: Float)]()
+        region.reserveCapacity(500)
 
-        for py in 0..<dH {
-            let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
-            for px in 0..<dW {
-                let d = row[px]
-                guard d > 0.10, d < 8.0 else { continue }
-                // Primary filter: only surfaces at similar depth as the tapped point.
-                // Excludes background objects, walls, and far neighbours immediately.
-                guard abs(d - tapD) < depthTolerance else { continue }
+        while !stack.isEmpty {
+            let (px, py) = stack.removeLast()
+            guard px >= 0, px < dW, py >= 0, py < dH else { continue }
+            let flatIdx = py * dW + px
+            guard !visited[flatIdx] else { continue }
+            visited[flatIdx] = true
 
-                let ix = Float(px) / Float(dW) * bufW
-                let iy = Float(py) / Float(dH) * bufH
-                let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
-                let w   = T * cam
-                let p   = simd_float3(w.x, w.y, w.z) / w.w
+            let d = depthAt(px, py)
+            // Asymmetric tolerance: capture surfaces closer to camera (top/side face of box)
+            // but stop quickly when depth increases (floor, wall behind box).
+            // tapD − 0.25: 25 cm closer captures top face at most viewing angles.
+            // tapD + 0.08: 8 cm deeper allows natural surface variation without bleeding into floor.
+            guard d > 0.10, d < 8.0,
+                  d >= tapD - 0.25,
+                  d <= tapD + 0.08 else { continue }
 
-                if simd_distance(p, tapPos) < spatialRadius {
-                    pts.append(p)
-                }
-            }
+            region.append((px, py, d))
+            guard region.count < maxRegion else { break }
+
+            stack.append((px + 1, py))
+            stack.append((px - 1, py))
+            stack.append((px, py + 1))
+            stack.append((px, py - 1))
+        }
+
+        // 3. Unproject to world space
+        var pts = [simd_float3]()
+        pts.reserveCapacity(region.count)
+        for (px, py, d) in region {
+            let ix  = Float(px) / Float(dW) * bufW
+            let iy  = Float(py) / Float(dH) * bufH
+            let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
+            let w   = T * cam
+            pts.append(simd_float3(w.x, w.y, w.z) / w.w)
         }
         CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
 
-        guard pts.count >= 30 else { return nil }
+        // Too few → didn't hit anything; too many → runaway into floor
+        guard pts.count >= 20, region.count < maxRegion else { return nil }
 
-        // 4. Floor removal (same logic as PalletMeasurer)
+        // 4. Floor removal
         let rawYMin = pts.map { $0.y }.min()!
-        let anchorY: Float? = frame.anchors
+        let anchorY = frame.anchors
             .compactMap { $0 as? ARPlaneAnchor }
             .filter { $0.alignment == .horizontal }
             .map { Float($0.transform.columns.3.y) }.min()
         let floorY: Float
         if let a = anchorY, a <= rawYMin + 0.08 { floorY = a } else { floorY = rawYMin }
 
-        let above = pts.filter { $0.y > floorY + 0.08 }
+        let above = pts.filter { $0.y > floorY + 0.05 }
         guard above.count >= 20 else { return nil }
 
-        // 5. PCA-OBB in XZ plane — handles rotated boxes correctly
+        // 5. PCA OBB in XZ
         func pct(_ vals: [Float], _ p: Float) -> Float {
-            let s = vals.sorted(); return s[max(0, Int(Float(s.count) * p))]
+            let s = vals.sorted()
+            return s[max(0, Int(Float(s.count) * p))]
         }
-
-        // Trim XZ outliers (stray floor/background points) before OBB
-        let xs = above.map { $0.x }, zs = above.map { $0.z }
-        let xLo = pct(xs, 0.05), xHi = pct(xs, 0.95)
-        let zLo = pct(zs, 0.05), zHi = pct(zs, 0.95)
-        let trimmed = above.filter { $0.x >= xLo && $0.x <= xHi && $0.z >= zLo && $0.z <= zHi }
-        guard trimmed.count >= 20 else { return nil }
-
-        let yMax = pct(trimmed.map { $0.y }, 0.97)
+        let yMax   = pct(above.map { $0.y }, 0.97)
         let height = yMax - floorY
         guard height > 0.03, height < 3.0 else { return nil }
 
-        let (width, depth, center2D, axis1) = obbXZ(points: trimmed)
+        let (width, depth, center2D, axis1) = obbXZ(points: above)
         guard width > 0.03, width < 4.0,
               depth > 0.03, depth < 4.0 else { return nil }
 
@@ -142,7 +151,7 @@ struct DepthBoxMeasurer {
                            label: "caja")
     }
 
-    // MARK: - PCA OBB in XZ plane
+    // MARK: - PCA OBB in XZ (2×2 covariance, analytic eigenvalues)
 
     private static func obbXZ(
         points: [simd_float3]
