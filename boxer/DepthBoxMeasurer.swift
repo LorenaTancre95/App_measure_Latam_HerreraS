@@ -6,16 +6,18 @@ import simd
 /// Flow:
 ///   1. Portrait tap → image pixel via ARKit displayTransform
 ///   2. LiDAR depth at that pixel → anchor 3D world point
-///   3. Collect all LiDAR points within `spatialRadius` metres of the anchor
-///   4. Floor removal via ARPlaneAnchor
-///   5. Axis-aligned OBB (percentile-trimmed, same as PalletMeasurer)
+///   3. Keep only depth pixels within ±depthTolerance of tap depth   ← isolates the surface
+///   4. Among those, keep only points within spatialRadius of anchor  ← excludes same-depth neighbours
+///   5. Floor removal via ARPlaneAnchor
+///   6. Axis-aligned OBB (percentile-trimmed, same as PalletMeasurer)
 struct DepthBoxMeasurer {
 
     static func measure(
         frame: ARFrame,
         tapPoint: CGPoint,
         viewportSize: CGSize,
-        spatialRadius: Float = 0.45
+        depthTolerance: Float = 0.20,   // ±20 cm in LiDAR depth — isolates the tapped surface
+        spatialRadius: Float = 0.40     // 40 cm 3D sphere — excludes neighbours at same depth
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -69,6 +71,9 @@ struct DepthBoxMeasurer {
             for px in 0..<dW {
                 let d = row[px]
                 guard d > 0.10, d < 8.0 else { continue }
+                // Primary filter: only surfaces at similar depth as the tapped point.
+                // Excludes background objects, walls, and far neighbours immediately.
+                guard abs(d - tapD) < depthTolerance else { continue }
 
                 let ix = Float(px) / Float(dW) * bufW
                 let iy = Float(py) / Float(dH) * bufH
