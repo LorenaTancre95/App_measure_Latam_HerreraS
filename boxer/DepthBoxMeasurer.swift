@@ -1,16 +1,11 @@
 import ARKit
 import simd
 
-/// Tap-to-select measurement using LiDAR depth flood fill.
+/// Tap-to-select measurement using LiDAR depth flood fill with inline floor rejection.
 ///
-/// Flow:
-///   1. Portrait tap → depth map pixel via ARKit displayTransform
-///   2. Flood fill from that pixel in depth space (±10 cm tolerance)
-///      — stops naturally at depth discontinuities (box edge vs floor/wall)
-///      — works even when box and floor have the same color
-///   3. Unproject flood-fill pixels to 3D world space
-///   4. Floor removal via ARPlaneAnchor
-///   5. PCA OBB in XZ plane
+/// The flood fill follows depth discontinuities (box edge vs wall/other box) AND
+/// rejects pixels whose 3D world Y is at floor height. This combination handles the
+/// common case where camera is nearly level and box/floor have similar LiDAR depth.
 struct DepthBoxMeasurer {
 
     static func measure(
@@ -41,6 +36,13 @@ struct DepthBoxMeasurer {
         let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
         let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
 
+        // Floor Y from ARPlaneAnchor — used inline during flood fill to stop at floor.
+        // IMPORTANT: apuntá al suelo antes de medir para que ARKit lo detecte.
+        let anchorFloorY: Float? = frame.anchors
+            .compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal }
+            .map { Float($0.transform.columns.3.y) }.min()
+
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
         let base = CVPixelBufferGetBaseAddress(depthBuffer)!
@@ -49,22 +51,31 @@ struct DepthBoxMeasurer {
             base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)[px]
         }
 
+        func unproject(_ px: Int, _ py: Int, _ d: Float) -> simd_float3 {
+            let ix  = Float(px) / Float(dW) * bufW
+            let iy  = Float(py) / Float(dH) * bufH
+            let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
+            let w   = T * cam
+            return simd_float3(w.x, w.y, w.z) / w.w
+        }
+
         let tapD = depthAt(tapDX, tapDY)
         guard tapD > 0.10, tapD < 8.0 else {
             CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
             return nil
         }
 
-        // 2. Flood fill in depth image space
-        // Depth discontinuities at box edges stop the fill — robust to color similarity.
-        let maxRegion = dW * dH * 2 / 5        // bail if >40% of depth map (runaway)
-        var visited   = [Bool](repeating: false, count: dW * dH)
-        var stack     = [(Int, Int)]()
+        // 2. Flood fill with dual filter:
+        //    a) Depth: tapD−25cm (top/side face) to tapD+5cm (surface variation only)
+        //    b) World Y: stop if pixel projects to floor height (even at similar depth)
+        let maxPts = dW * dH / 5        // bail if >20% of depth map (runaway)
+        var visited = [Bool](repeating: false, count: dW * dH)
+        var stack   = [(Int, Int)]()
         stack.reserveCapacity(512)
         stack.append((tapDX, tapDY))
 
-        var region = [(px: Int, py: Int, d: Float)]()
-        region.reserveCapacity(500)
+        var pts = [simd_float3]()
+        pts.reserveCapacity(500)
 
         while !stack.isEmpty {
             let (px, py) = stack.removeLast()
@@ -74,51 +85,37 @@ struct DepthBoxMeasurer {
             visited[flatIdx] = true
 
             let d = depthAt(px, py)
-            // Asymmetric tolerance: capture surfaces closer to camera (top/side face of box)
-            // but stop quickly when depth increases (floor, wall behind box).
-            // tapD − 0.25: 25 cm closer captures top face at most viewing angles.
-            // tapD + 0.08: 8 cm deeper allows natural surface variation without bleeding into floor.
             guard d > 0.10, d < 8.0,
                   d >= tapD - 0.25,
-                  d <= tapD + 0.08 else { continue }
+                  d <= tapD + 0.05 else { continue }
 
-            region.append((px, py, d))
-            guard region.count < maxRegion else { break }
+            let p3d = unproject(px, py, d)
+
+            // Floor barrier: if this pixel is at floor height, mark visited and stop
+            // expanding — acts as a wall that prevents the fill from reaching the floor.
+            if let floorY = anchorFloorY, p3d.y <= floorY + 0.07 { continue }
+
+            pts.append(p3d)
+            guard pts.count < maxPts else { break }
 
             stack.append((px + 1, py))
             stack.append((px - 1, py))
             stack.append((px, py + 1))
             stack.append((px, py - 1))
         }
-
-        // 3. Unproject to world space
-        var pts = [simd_float3]()
-        pts.reserveCapacity(region.count)
-        for (px, py, d) in region {
-            let ix  = Float(px) / Float(dW) * bufW
-            let iy  = Float(py) / Float(dH) * bufH
-            let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
-            let w   = T * cam
-            pts.append(simd_float3(w.x, w.y, w.z) / w.w)
-        }
         CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
 
-        // Too few → didn't hit anything; too many → runaway into floor
-        guard pts.count >= 20, region.count < maxRegion else { return nil }
+        guard pts.count >= 20, pts.count < maxPts else { return nil }
 
-        // 4. Floor removal
+        // 3. Floor removal (safety net for pixels at boundary)
         let rawYMin = pts.map { $0.y }.min()!
-        let anchorY = frame.anchors
-            .compactMap { $0 as? ARPlaneAnchor }
-            .filter { $0.alignment == .horizontal }
-            .map { Float($0.transform.columns.3.y) }.min()
         let floorY: Float
-        if let a = anchorY, a <= rawYMin + 0.08 { floorY = a } else { floorY = rawYMin }
+        if let a = anchorFloorY, a <= rawYMin + 0.10 { floorY = a } else { floorY = rawYMin }
 
-        let above = pts.filter { $0.y > floorY + 0.05 }
+        let above = pts.filter { $0.y > floorY + 0.06 }
         guard above.count >= 20 else { return nil }
 
-        // 5. PCA OBB in XZ
+        // 4. PCA OBB in XZ
         func pct(_ vals: [Float], _ p: Float) -> Float {
             let s = vals.sorted()
             return s[max(0, Int(Float(s.count) * p))]
@@ -151,7 +148,7 @@ struct DepthBoxMeasurer {
                            label: "caja")
     }
 
-    // MARK: - PCA OBB in XZ (2×2 covariance, analytic eigenvalues)
+    // MARK: - PCA OBB in XZ
 
     private static func obbXZ(
         points: [simd_float3]
