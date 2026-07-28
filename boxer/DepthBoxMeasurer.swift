@@ -15,7 +15,7 @@ struct DepthBoxMeasurer {
         frame: ARFrame,
         tapPoint: CGPoint,
         viewportSize: CGSize,
-        spatialRadius: Float = 0.80
+        spatialRadius: Float = 0.45
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
