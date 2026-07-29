@@ -109,9 +109,15 @@ struct DepthBoxMeasurer {
             .filter { $0.alignment == .horizontal }
             .map { Float($0.transform.columns.3.y) }.min()
 
-        let margin = 4                                 // expand bbox by 4 depth pixels
+        // Expand upward by full face height to include the top face of the box.
+        // Phase-1 only found the front face; the top face is directly above it in the
+        // depth image and is shallower by sin(camera_angle) × box_height — which fits
+        // within the tapD-0.30 depth window used in Phase-2.
+        let faceH  = maxDY - minDY          // front-face pixel height in depth map
+        let margin = 4
         let pxLo = max(0, minDX - margin),    pxHi = min(dW - 1, maxDX + margin)
-        let pyLo = max(0, minDY - margin),    pyHi = min(dH - 1, maxDY + margin)
+        let pyLo = max(0, minDY - faceH - margin)   // look UP by one full face height
+        let pyHi = min(dH - 1, maxDY + margin)
 
         var pts = [simd_float3]()
         pts.reserveCapacity((pxHi - pxLo + 1) * (pyHi - pyLo + 1))
