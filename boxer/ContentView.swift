@@ -64,6 +64,23 @@ struct ContentView: View {
                     }
             }
 
+            // Debug panel (top-left, always visible in TAP mode)
+            if viewModel.measureMode == .tap, !viewModel.debugInfo.isEmpty {
+                VStack {
+                    Text(viewModel.debugInfo)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.white)
+                        .padding(8)
+                        .background(.black.opacity(0.75))
+                        .cornerRadius(8)
+                        .padding(.top, 60)
+                        .padding(.leading, 12)
+                    Spacer()
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .allowsHitTesting(false)
+            }
+
             // TAP mode instruction banner
             if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty {
                 VStack {
