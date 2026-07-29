@@ -311,60 +311,22 @@ final class ARViewModel: ObservableObject {
         let vp = viewportSize
 
         Task.detached {
-            // Lazy-load SAM off the main thread (MLModel init blocks ~0.5 s)
-            let sam: SAMSegmenter?
-            if let s = existingSam {
-                sam = s
-            } else {
-                let s = try? SAMSegmenter()
-                await MainActor.run { self.samSegmenter = s }
-                sam = s
-            }
-
-            let samLoaded = sam != nil
-            var samMaskPixels = 0
-            var samMeasured = false
-
-            // ── Primary: SAM visual segmentation + LiDAR measurement ──────
-            if let sam,
-               let segResult = TapBoxMeasurer.segmentWithPreview(
-                   frame: frame, tapPoint: point, viewportSize: vp,
-                   samSegmenter: sam) {
-
-                samMaskPixels = segResult.mask.joined().filter { $0 }.count
-                await MainActor.run { self.segmentationOverlay = segResult.preview }
-
-                if let det = TapBoxMeasurer.measure(frame: frame, mask: segResult.mask) {
-                    samMeasured = true
-                    let dbg = "SAM✓ mask=\(samMaskPixels)px\n\(String(format:"%.0fx%.0fx%.0f cm",det.size.x*100,det.size.y*100,det.size.z*100))"
-                    try? await Task.sleep(nanoseconds: 700_000_000)
-                    await MainActor.run {
-                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                        self.segmentationOverlay = nil
-                        self.debugInfo = dbg
-                        self.isProcessing = false
-                    }
-                    return
-                }
-                await MainActor.run { self.segmentationOverlay = nil }
-            }
-
-            // ── Fallback: depth flood fill (same-colored box/floor) ────────
+            var dbg = ""
             if let det = DepthBoxMeasurer.measure(
-                    frame: frame, tapPoint: point, viewportSize: vp) {
-                let dbg = "SAM:\(samLoaded ? "load✓" : "no")/mask=\(samMaskPixels)/meas:\(samMeasured)\nFloodFill→\(String(format:"%.0fx%.0fx%.0f cm",det.size.x*100,det.size.y*100,det.size.z*100))"
+                    frame: frame, tapPoint: point, viewportSize: vp,
+                    debugOut: &dbg) {
+                let result = String(format: "%.0fx%.0fx%.0f cm",
+                                    det.size.x*100, det.size.y*100, det.size.z*100)
                 await MainActor.run {
                     if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                    self.debugInfo = dbg
+                    self.debugInfo = dbg + "\n→ " + result
                     self.isProcessing = false
                 }
                 return
             }
-
-            let dbg = "SAM:\(samLoaded ? "load✓" : "no")/mask=\(samMaskPixels)\nSin geometría"
             await MainActor.run {
-                self.status = "Sin geometría — acercate más o tocá el centro de la caja"
-                self.debugInfo = dbg
+                self.status = "Sin geometría — acercate más o tocá el centro"
+                self.debugInfo = dbg.isEmpty ? "DepthBoxMeasurer: nil" : dbg
                 self.isProcessing = false
             }
         }

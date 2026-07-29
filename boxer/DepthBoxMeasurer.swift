@@ -21,7 +21,8 @@ struct DepthBoxMeasurer {
     static func measure(
         frame: ARFrame,
         tapPoint: CGPoint,
-        viewportSize: CGSize
+        viewportSize: CGSize,
+        debugOut: UnsafeMutablePointer<String>? = nil
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -97,7 +98,7 @@ struct DepthBoxMeasurer {
         }
 
         guard faceCount >= 15 else {
-            // Tap missed any clear surface (air, LiDAR invalid region)
+            debugOut?.pointee = "tapD=\(String(format:"%.2f",tapD))m face=\(faceCount)<15"
             CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
             return nil
         }
@@ -134,14 +135,26 @@ struct DepthBoxMeasurer {
         }
         CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
 
-        guard pts.count >= 20 else { return nil }
+        guard pts.count >= 20 else {
+            debugOut?.pointee = "tapD=\(String(format:"%.2f",tapD))m face=\(faceCount) pts=\(pts.count)<20"
+            return nil
+        }
 
         // Floor removal (fallback when no ARPlane anchor)
         let rawYMin = pts.map { $0.y }.min()!
+        let rawYMax = pts.map { $0.y }.max()!
         let floorY: Float
-        if let a = anchorFloorY, a <= rawYMin + 0.10 { floorY = a } else { floorY = rawYMin }
+        let floorSrc: String
+        if let a = anchorFloorY, a <= rawYMin + 0.10 {
+            floorY = a; floorSrc = "plane"
+        } else {
+            floorY = rawYMin; floorSrc = "raw"
+        }
         let above = pts.filter { $0.y > floorY + 0.05 }
-        guard above.count >= 20 else { return nil }
+        guard above.count >= 20 else {
+            debugOut?.pointee = "tapD=\(String(format:"%.2f",tapD))m floorY=\(String(format:"%.2f",floorY))(\(floorSrc)) above=\(above.count)<20"
+            return nil
+        }
 
         // ── PCA OBB in XZ ────────────────────────────────────────────────────
         func pct(_ vals: [Float], _ p: Float) -> Float {
@@ -150,11 +163,18 @@ struct DepthBoxMeasurer {
         }
         let yMax   = pct(above.map { $0.y }, 0.97)
         let height = yMax - floorY
-        guard height > 0.03, height < 3.0 else { return nil }
+        guard height > 0.03, height < 3.0 else {
+            debugOut?.pointee = "floorY=\(String(format:"%.2f",floorY))(\(floorSrc)) yMax=\(String(format:"%.2f",yMax)) h=\(String(format:"%.0f",height*100))cm OOB"
+            return nil
+        }
 
         let (width, depth, center2D, axis1) = obbXZ(points: above)
         guard width > 0.03, width < 4.0,
-              depth > 0.03, depth < 4.0 else { return nil }
+              depth > 0.03, depth < 4.0 else {
+            debugOut?.pointee = "h=\(String(format:"%.0f",height*100))cm w=\(String(format:"%.0f",width*100)) d=\(String(format:"%.0f",depth*100)) OOB"
+            return nil
+        }
+        debugOut?.pointee = "D=\(String(format:"%.2f",tapD))m fl=\(String(format:"%.2f",floorY))(\(floorSrc)) rawY[\(String(format:"%.2f",rawYMin)),\(String(format:"%.2f",rawYMax))] pts=\(pts.count)/\(above.count)"
 
         let centerY = (floorY + yMax) / 2
         let center  = simd_float3(center2D.x, centerY, center2D.y)
