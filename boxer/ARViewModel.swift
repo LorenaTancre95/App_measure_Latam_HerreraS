@@ -22,6 +22,7 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
+    @Published var cornerInstruction: String = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
 
     enum MeasureMode { case box, oversize, tap }
 
@@ -32,25 +33,19 @@ final class ARViewModel: ObservableObject {
     private var palletDetector: PalletDetector?
     private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
+    private var cornerPts: [simd_float3] = []
+    private var markerNodes: [SCNNode] = []
 
     func setup(sceneView: ARSCNView) {
         self.sceneView = sceneView
         Task.detached { await self.loadTAPModels() }
     }
 
-    // Loads SAM + Pallet (used in TAP and OVERSIZE modes).
-    // YOLO is NOT loaded here — only loaded lazily when switching to CAJA mode.
-    // SAM 1024×1024 encoder spikes ~200 MB during inference; keeping YOLO
-    // (ONNX runtime, ~200 MB) out of memory prevents jetsam kills.
     nonisolated private func loadTAPModels() async {
-        await MainActor.run { self.status = "Cargando SAM..." }
-        let sam   = try? SAMSegmenter()
         let pallet = try? PalletDetector()
         await MainActor.run {
-            self.samSegmenter   = sam
             self.palletDetector = pallet
-            self.status = sam != nil ? "Listo — tocá la caja a medir"
-                                     : "SAM no disponible — usá modo CAJA"
+            self.status = "Listo — tocá las esquinas de la caja"
         }
     }
 
@@ -294,65 +289,143 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Tap-to-select
+    // MARK: - Corner tap measurement (4 taps → exact OBB)
+    //
+    // Tap order:
+    //   P0: front-top-LEFT
+    //   P1: front-top-RIGHT  → width = |P1−P0|
+    //   P2: front-bottom-RIGHT → height = |P2−P1|
+    //   P3: any point on side or top face → depth via projection onto face normal
 
     func measureAtTap(at point: CGPoint) {
         guard let sceneView, let frame = sceneView.session.currentFrame else {
             status = "Sin frame AR"; return
         }
-        guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
+        guard frame.sceneDepth != nil else { status = "Sin LiDAR depth"; return }
         guard !isProcessing else { return }
 
-        isProcessing = true
-        clearAll()
-        debugInfo = ""
-        status = "Segmentando..."
-
-        let vp = viewportSize
-
-        // Task inherits @MainActor isolation — all self access and @MainActor
-        // framework calls (ARFrame, Vision) are safe without MainActor.run wrappers.
-        // Vision inference runs synchronously on the main thread but is fast (~0.3 s
-        // per shot on the Neural Engine); the Task.sleep yields between shots so the
-        // UI updates ("Midiendo 1/3…") are visible.
-        Task { @MainActor in
-            guard #available(iOS 17.0, *) else {
-                self.status = "Requiere iOS 17+"
-                self.isProcessing = false
-                return
-            }
-
-            var shots: [Detection3D] = []
-            var lastMask: CVPixelBuffer? = nil
-
-            for shot in 1...3 {
-                self.status = "Midiendo \(shot)/3..."
-                let f = self.sceneView?.session.currentFrame ?? frame
-                var capturedMask: CVPixelBuffer? = nil
-                if let det = try? VisionBoxMeasurer.measure(
-                        frame: f, tapPoint: point, viewportSize: vp,
-                        maskOut: { capturedMask = $0 }) {
-                    shots.append(det)
-                    if lastMask == nil { lastMask = capturedMask }
-                }
-                if shot < 3 { try? await Task.sleep(nanoseconds: 400_000_000) }
-            }
-
-            guard !shots.isEmpty else {
-                self.status = "Tocá directamente sobre la caja"
-                self.debugInfo = "Vision: ningún objeto en ese punto"
-                self.isProcessing = false
-                return
-            }
-
-            let det = self.medianDetection(shots)
-            self.segmentationOverlay = lastMask.flatMap { maskToUIImage($0) }
-            if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-            self.isProcessing = false
-
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
-            self.segmentationOverlay = nil
+        guard let pt3D = tapTo3D(point: point, frame: frame) else {
+            status = "Sin profundidad — tocá directamente la caja"
+            return
         }
+
+        cornerPts.append(pt3D)
+        placeMarker(at: pt3D, in: sceneView)
+
+        switch cornerPts.count {
+        case 1:
+            cornerInstruction = "2/4 — Tocá la esquina superior DERECHA (frente)"
+            status = "Esquina 1 marcada ✓"
+        case 2:
+            cornerInstruction = "3/4 — Tocá la esquina inferior DERECHA (frente)"
+            status = "Esquina 2 marcada ✓"
+        case 3:
+            cornerInstruction = "4/4 — Tocá cualquier punto de la cara lateral o superior"
+            status = "Esquina 3 marcada ✓"
+        case 4:
+            cornerInstruction = ""
+            isProcessing = true
+            if let det = computeBox() {
+                placeBoxes([det], in: sceneView)
+            } else {
+                status = "Geometría inválida — tocá las esquinas con más precisión"
+                cornerInstruction = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
+            }
+            cornerPts.removeAll()
+            markerNodes.forEach { $0.removeFromParentNode() }
+            markerNodes.removeAll()
+            isProcessing = false
+        default:
+            break
+        }
+    }
+
+    private func tapTo3D(point: CGPoint, frame: ARFrame) -> simd_float3? {
+        guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
+
+        let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
+        let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
+        let dW   = CVPixelBufferGetWidth(depthBuffer)
+        let dH   = CVPixelBufferGetHeight(depthBuffer)
+
+        let displayT  = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
+        let invertedT = displayT.inverted()
+        let normTap   = CGPoint(x: point.x / viewportSize.width, y: point.y / viewportSize.height)
+        let normImg   = normTap.applying(invertedT)
+        let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
+        let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
+
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
+        let base = CVPixelBufferGetBaseAddress(depthBuffer)!
+        let d    = base.advanced(by: tapDY * rb).assumingMemoryBound(to: Float32.self)[tapDX]
+        CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly)
+
+        guard d > 0.05, d < 8.0 else { return nil }
+
+        let intr = frame.camera.intrinsics
+        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+        let ix  = Float(tapDX) / Float(dW) * bufW
+        let iy  = Float(tapDY) / Float(dH) * bufH
+        let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
+        let w   = frame.camera.transform * cam
+        return simd_float3(w.x, w.y, w.z) / w.w
+    }
+
+    private func computeBox() -> Detection3D? {
+        guard cornerPts.count == 4 else { return nil }
+        let P0 = cornerPts[0]  // front-top-left
+        let P1 = cornerPts[1]  // front-top-right
+        let P2 = cornerPts[2]  // front-bottom-right
+        let P3 = cornerPts[3]  // depth reference on side or top
+
+        let widthVec  = P1 - P0
+        let heightVec = P2 - P1
+
+        let width  = simd_length(widthVec)
+        let height = simd_length(heightVec)
+        guard width > 0.01, height > 0.01 else { return nil }
+
+        let widthAxis  = simd_normalize(widthVec)
+        let heightAxis = simd_normalize(heightVec)
+        // Normal to the front face = depth axis of the box
+        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
+        let depthProj  = simd_dot(P3 - P0, depthAxis)
+        let depth      = abs(depthProj)
+        guard depth > 0.01 else { return nil }
+
+        // Center of the box = center of front face + half depth toward P3
+        let frontCenter = P0 + widthVec * 0.5 + heightVec * 0.5
+        let depthSign: Float = depthProj >= 0 ? 1 : -1
+        let center = frontCenter + depthAxis * depthSign * depth * 0.5
+
+        // Yaw from widthAxis projected to XZ plane
+        let yaw  = atan2(widthAxis.z, widthAxis.x)
+        let cosY = cos(yaw), sinY = sin(yaw)
+        let worldTransform = simd_float4x4(
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
+            simd_float4(center.x, center.y, center.z, 1)
+        )
+
+        return Detection3D(center: center,
+                           size: simd_float3(width, height, depth),
+                           yaw: yaw,
+                           confidence: 1.0,
+                           worldTransform: worldTransform,
+                           label: "caja")
+    }
+
+    private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
+        let sphere = SCNSphere(radius: 0.012)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.systemGreen
+        sphere.materials = [mat]
+        let node = SCNNode(geometry: sphere)
+        node.simdPosition = position
+        sceneView.scene.rootNode.addChildNode(node)
+        markerNodes.append(node)
     }
 
     func floorDetected() {
@@ -362,7 +435,14 @@ final class ARViewModel: ObservableObject {
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
-    func clearAll() { clearBoxes(); debugBBoxes.removeAll() }
+    func clearAll() {
+        clearBoxes()
+        debugBBoxes.removeAll()
+        cornerPts.removeAll()
+        markerNodes.forEach { $0.removeFromParentNode() }
+        markerNodes.removeAll()
+        cornerInstruction = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
+    }
 
     // MARK: - Dataset capture
 

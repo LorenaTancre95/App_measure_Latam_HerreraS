@@ -81,23 +81,23 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            // TAP mode instruction banner
-            if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty {
+            // TAP mode corner instruction banner
+            if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty
+               && !viewModel.cornerInstruction.isEmpty {
                 VStack {
                     Spacer()
                     HStack(spacing: 8) {
-                        Image(systemName: "hand.tap")
+                        Image(systemName: "scope")
                             .font(.system(size: 18))
                             .foregroundColor(.yellow)
-                        Text(viewModel.isCalibrated
-                             ? "Toque na caixa que deseja medir"
-                             : "Apuntá al piso para calibrar primero")
+                        Text(viewModel.cornerInstruction)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
                     }
                     .padding(.horizontal, 20)
                     .padding(.vertical, 12)
-                    .background(.black.opacity(0.65))
+                    .background(.black.opacity(0.75))
                     .cornerRadius(20)
                     .padding(.bottom, 160)
                 }
