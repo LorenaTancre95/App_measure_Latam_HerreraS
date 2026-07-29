@@ -353,23 +353,9 @@ final class ARViewModel: ObservableObject {
                     return
                 }
 
-                // Fallback for iOS < 17: depth flood fill.
-                var dbg = ""
-                if let det = DepthBoxMeasurer.measure(
-                        frame: frame, tapPoint: point, viewportSize: vp,
-                        debugOut: &dbg) {
-                    let result = String(format: "%.0fx%.0fx%.0f cm",
-                                        det.size.x*100, det.size.y*100, det.size.z*100)
-                    await MainActor.run {
-                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                        self.debugInfo = dbg + "\n→ " + result
-                        self.isProcessing = false
-                    }
-                    return
-                }
+                // LiDAR requires iPhone 12 Pro+ which always supports iOS 17+.
                 await MainActor.run {
-                    self.status = "Sin geometría — acercate más o tocá el centro"
-                    self.debugInfo = dbg.isEmpty ? "Sin resultado" : dbg
+                    self.status = "Requiere iOS 17+"
                     self.isProcessing = false
                 }
             } catch {
