@@ -87,8 +87,20 @@ struct VisionBoxMeasurer {
             return nil
         }
 
+        // Unproject tap point to 3D for XZ radius filter in measureWithMask.
+        var tapWorld: simd_float3? = nil
+        if tapD > 0 {
+            let intr = frame.camera.intrinsics
+            let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+            let ix = Float(tapImgX) / bufW * Float(CVPixelBufferGetWidth(frame.capturedImage))
+            let iy = Float(tapImgY) / bufH * Float(CVPixelBufferGetHeight(frame.capturedImage))
+            let cam = simd_float4((ix - cx) / fx * tapD, (iy - cy) / fy * tapD, -tapD, 1)
+            let w = frame.camera.transform * cam
+            tapWorld = simd_float3(w.x, w.y, w.z) / w.w
+        }
+
         maskOut?(instanceMask)
-        return measureWithMask(frame: frame, maskBuffer: instanceMask, tapD: tapD)
+        return measureWithMask(frame: frame, maskBuffer: instanceMask, tapD: tapD, tapWorld: tapWorld)
     }
 
     // MARK: - Mask sampling (handles UInt8 and Float32 buffers)
@@ -120,7 +132,8 @@ struct VisionBoxMeasurer {
     private static func measureWithMask(
         frame: ARFrame,
         maskBuffer: CVPixelBuffer,
-        tapD: Float = 0
+        tapD: Float = 0,
+        tapWorld: simd_float3? = nil
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -182,7 +195,15 @@ struct VisionBoxMeasurer {
                 let iy  = Float(py) / Float(dH) * bufH
                 let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
                 let w   = T * cam
-                pts.append(simd_float3(w.x, w.y, w.z) / w.w)
+                let p3d = simd_float3(w.x, w.y, w.z) / w.w
+
+                // XZ radius filter: reject points >50cm from tap in horizontal plane.
+                if let tw = tapWorld {
+                    let dx = p3d.x - tw.x, dz = p3d.z - tw.z
+                    guard dx*dx + dz*dz < 0.50 * 0.50 else { continue }
+                }
+
+                pts.append(p3d)
             }
         }
 

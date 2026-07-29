@@ -316,27 +316,40 @@ final class ARViewModel: ObservableObject {
                 // Segments the exact object the user tapped; filters LiDAR through
                 // that mask — no table/floor bleed, no coordinate confusion.
                 if #available(iOS 17.0, *) {
-                    var capturedMask: CVPixelBuffer? = nil
-                    if let det = try VisionBoxMeasurer.measure(
-                            frame: frame, tapPoint: point, viewportSize: vp,
-                            maskOut: { capturedMask = $0 }) {
-                        let overlay = capturedMask.flatMap { maskToUIImage($0) }
+                    // Multi-shot: 3 measurements → median per dimension for stability.
+                    var shots: [Detection3D] = []
+                    var lastMask: CVPixelBuffer? = nil
+                    for shot in 1...3 {
+                        await MainActor.run { self.status = "Midiendo \(shot)/3..." }
+                        let f = await MainActor.run { self.sceneView?.session.currentFrame } ?? frame
+                        var capturedMask: CVPixelBuffer? = nil
+                        if let det = try? VisionBoxMeasurer.measure(
+                                frame: f, tapPoint: point, viewportSize: vp,
+                                maskOut: { capturedMask = $0 }) {
+                            shots.append(det)
+                            if lastMask == nil { lastMask = capturedMask }
+                        }
+                        if shot < 3 { try? await Task.sleep(nanoseconds: 400_000_000) }
+                    }
+
+                    guard !shots.isEmpty else {
                         await MainActor.run {
-                            self.segmentationOverlay = overlay
-                            if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                            self.status = "Tocá directamente sobre la caja"
+                            self.debugInfo = "Vision: ningún objeto en ese punto"
                             self.isProcessing = false
                         }
-                        // Hide overlay after 2 s
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
-                        await MainActor.run { self.segmentationOverlay = nil }
                         return
                     }
-                    // Vision found no foreground object at tap point.
+
+                    let det = self.medianDetection(shots)
+                    let overlay = lastMask.flatMap { maskToUIImage($0) }
                     await MainActor.run {
-                        self.status = "Tocá directamente sobre la caja"
-                        self.debugInfo = "Vision: ningún objeto en ese punto"
+                        self.segmentationOverlay = overlay
+                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
                         self.isProcessing = false
                     }
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    await MainActor.run { self.segmentationOverlay = nil }
                     return
                 }
 
