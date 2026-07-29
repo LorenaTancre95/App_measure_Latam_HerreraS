@@ -189,19 +189,35 @@ struct VisionBoxMeasurer {
         print("[VISION] \(pts.count) LiDAR points inside mask")
         guard pts.count >= 20 else { return nil }
 
-        // Percentile Y range — Vision mask already excludes floor so no plane-snap needed.
-        // 3% trim removes boundary leaks at box base; 97% removes LiDAR noise above top.
+        // Floor Y from ARPlane anchor (same approach as DepthBoxMeasurer).
+        // Vision mask often includes floor pixels when the box rests on the floor.
+        let anchorFloorY: Float? = frame.anchors
+            .compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal }
+            .map { Float($0.transform.columns.3.y) }.min()
+
+        // Remove floor points (10 cm margin).
+        let above: [simd_float3]
+        if let floorY = anchorFloorY {
+            above = pts.filter { $0.y > floorY + 0.10 }
+        } else {
+            // No plane anchor: trim bottom 5% to remove floor leaks.
+            let rawYMin = pts.map { $0.y }.min()!
+            above = pts.filter { $0.y > rawYMin + 0.05 }
+        }
+        guard above.count >= 20 else { return nil }
+
         func pct(_ vals: [Float], _ p: Float) -> Float {
             let s = vals.sorted()
             return s[max(0, Int(Float(s.count) * p))]
         }
-        let ys     = pts.map { $0.y }
-        let yLo    = pct(ys, 0.03)
+        let ys     = above.map { $0.y }
+        let yLo    = anchorFloorY ?? pct(ys, 0.03)
         let yHi    = pct(ys, 0.97)
         let height = yHi - yLo
         guard height > 0.03, height < 3.0 else { return nil }
 
-        let (width, depth, center2D, axis1) = obbXZ(points: pts)
+        let (width, depth, center2D, axis1) = obbXZ(points: above)
         guard width > 0.03, width < 4.0,
               depth > 0.03, depth < 4.0 else { return nil }
 
