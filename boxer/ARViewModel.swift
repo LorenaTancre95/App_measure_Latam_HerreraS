@@ -305,29 +305,58 @@ final class ARViewModel: ObservableObject {
 
         isProcessing = true
         clearAll()
+        debugInfo = ""
         status = "Segmentando..."
 
-        let existingSam = samSegmenter
         let vp = viewportSize
 
         Task.detached {
-            var dbg = ""
-            if let det = DepthBoxMeasurer.measure(
-                    frame: frame, tapPoint: point, viewportSize: vp,
-                    debugOut: &dbg) {
-                let result = String(format: "%.0fx%.0fx%.0f cm",
-                                    det.size.x*100, det.size.y*100, det.size.z*100)
+            do {
+                // Primary: Vision instance segmentation (iOS 17+).
+                // Segments the exact object the user tapped; filters LiDAR through
+                // that mask — no table/floor bleed, no coordinate confusion.
+                if #available(iOS 17.0, *) {
+                    if let det = try VisionBoxMeasurer.measure(
+                            frame: frame, tapPoint: point, viewportSize: vp) {
+                        await MainActor.run {
+                            if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                            self.isProcessing = false
+                        }
+                        return
+                    }
+                    // Vision found no foreground object at tap point.
+                    await MainActor.run {
+                        self.status = "Tocá directamente sobre la caja"
+                        self.debugInfo = "Vision: ningún objeto en ese punto"
+                        self.isProcessing = false
+                    }
+                    return
+                }
+
+                // Fallback for iOS < 17: depth flood fill.
+                var dbg = ""
+                if let det = DepthBoxMeasurer.measure(
+                        frame: frame, tapPoint: point, viewportSize: vp,
+                        debugOut: &dbg) {
+                    let result = String(format: "%.0fx%.0fx%.0f cm",
+                                        det.size.x*100, det.size.y*100, det.size.z*100)
+                    await MainActor.run {
+                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                        self.debugInfo = dbg + "\n→ " + result
+                        self.isProcessing = false
+                    }
+                    return
+                }
                 await MainActor.run {
-                    if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                    self.debugInfo = dbg + "\n→ " + result
+                    self.status = "Sin geometría — acercate más o tocá el centro"
+                    self.debugInfo = dbg.isEmpty ? "Sin resultado" : dbg
                     self.isProcessing = false
                 }
-                return
-            }
-            await MainActor.run {
-                self.status = "Sin geometría — acercate más o tocá el centro"
-                self.debugInfo = dbg.isEmpty ? "DepthBoxMeasurer: nil" : dbg
-                self.isProcessing = false
+            } catch {
+                await MainActor.run {
+                    self.status = "Error: \(error.localizedDescription)"
+                    self.isProcessing = false
+                }
             }
         }
     }
