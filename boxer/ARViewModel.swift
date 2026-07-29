@@ -310,60 +310,48 @@ final class ARViewModel: ObservableObject {
 
         let vp = viewportSize
 
-        Task.detached {
-            do {
-                // Primary: Vision instance segmentation (iOS 17+).
-                // Segments the exact object the user tapped; filters LiDAR through
-                // that mask — no table/floor bleed, no coordinate confusion.
-                if #available(iOS 17.0, *) {
-                    // Multi-shot: 3 measurements → median per dimension for stability.
-                    var shots: [Detection3D] = []
-                    var lastMask: CVPixelBuffer? = nil
-                    for shot in 1...3 {
-                        await MainActor.run { self.status = "Midiendo \(shot)/3..." }
-                        let f = await MainActor.run { self.sceneView?.session.currentFrame } ?? frame
-                        var capturedMask: CVPixelBuffer? = nil
-                        if let det = try? VisionBoxMeasurer.measure(
-                                frame: f, tapPoint: point, viewportSize: vp,
-                                maskOut: { capturedMask = $0 }) {
-                            shots.append(det)
-                            if lastMask == nil { lastMask = capturedMask }
-                        }
-                        if shot < 3 { try? await Task.sleep(nanoseconds: 400_000_000) }
-                    }
-
-                    guard !shots.isEmpty else {
-                        await MainActor.run {
-                            self.status = "Tocá directamente sobre la caja"
-                            self.debugInfo = "Vision: ningún objeto en ese punto"
-                            self.isProcessing = false
-                        }
-                        return
-                    }
-
-                    let det = self.medianDetection(shots)
-                    let overlay = lastMask.flatMap { maskToUIImage($0) }
-                    await MainActor.run {
-                        self.segmentationOverlay = overlay
-                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
-                        self.isProcessing = false
-                    }
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    await MainActor.run { self.segmentationOverlay = nil }
-                    return
-                }
-
-                // LiDAR requires iPhone 12 Pro+ which always supports iOS 17+.
-                await MainActor.run {
-                    self.status = "Requiere iOS 17+"
-                    self.isProcessing = false
-                }
-            } catch {
-                await MainActor.run {
-                    self.status = "Error: \(error.localizedDescription)"
-                    self.isProcessing = false
-                }
+        // Task inherits @MainActor isolation — all self access and @MainActor
+        // framework calls (ARFrame, Vision) are safe without MainActor.run wrappers.
+        // Vision inference runs synchronously on the main thread but is fast (~0.3 s
+        // per shot on the Neural Engine); the Task.sleep yields between shots so the
+        // UI updates ("Midiendo 1/3…") are visible.
+        Task { @MainActor in
+            guard #available(iOS 17.0, *) else {
+                self.status = "Requiere iOS 17+"
+                self.isProcessing = false
+                return
             }
+
+            var shots: [Detection3D] = []
+            var lastMask: CVPixelBuffer? = nil
+
+            for shot in 1...3 {
+                self.status = "Midiendo \(shot)/3..."
+                let f = self.sceneView?.session.currentFrame ?? frame
+                var capturedMask: CVPixelBuffer? = nil
+                if let det = try? VisionBoxMeasurer.measure(
+                        frame: f, tapPoint: point, viewportSize: vp,
+                        maskOut: { capturedMask = $0 }) {
+                    shots.append(det)
+                    if lastMask == nil { lastMask = capturedMask }
+                }
+                if shot < 3 { try? await Task.sleep(nanoseconds: 400_000_000) }
+            }
+
+            guard !shots.isEmpty else {
+                self.status = "Tocá directamente sobre la caja"
+                self.debugInfo = "Vision: ningún objeto en ese punto"
+                self.isProcessing = false
+                return
+            }
+
+            let det = self.medianDetection(shots)
+            self.segmentationOverlay = lastMask.flatMap { maskToUIImage($0) }
+            if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+            self.isProcessing = false
+
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self.segmentationOverlay = nil
         }
     }
 
