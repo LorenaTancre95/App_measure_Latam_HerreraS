@@ -18,7 +18,8 @@ struct VisionBoxMeasurer {
     static func measure(
         frame: ARFrame,
         tapPoint: CGPoint,
-        viewportSize: CGSize
+        viewportSize: CGSize,
+        maskOut: ((CVPixelBuffer) -> Void)? = nil
     ) throws -> Detection3D? {
 
         let pixelBuffer = frame.capturedImage
@@ -33,6 +34,24 @@ struct VisionBoxMeasurer {
         let normImg   = normTap.applying(invertedT)
         let tapImgX   = Int(max(0, min(Float(normImg.x) * bufW, bufW - 1)))
         let tapImgY   = Int(max(0, min(Float(normImg.y) * bufH, bufH - 1)))
+
+        // Get LiDAR depth at tap point — used later to reject background points.
+        let tapD: Float
+        if let depthBuf = frame.sceneDepth?.depthMap {
+            let dW = CVPixelBufferGetWidth(depthBuf)
+            let dH = CVPixelBufferGetHeight(depthBuf)
+            let dpx = max(0, min(dW - 1, Int(Float(tapImgX) / bufW * Float(dW))))
+            let dpy = max(0, min(dH - 1, Int(Float(tapImgY) / bufH * Float(dH))))
+            CVPixelBufferLockBaseAddress(depthBuf, .readOnly)
+            let rb  = CVPixelBufferGetBytesPerRow(depthBuf)
+            let d   = CVPixelBufferGetBaseAddress(depthBuf)!
+                        .advanced(by: dpy * rb)
+                        .assumingMemoryBound(to: Float32.self)[dpx]
+            CVPixelBufferUnlockBaseAddress(depthBuf, .readOnly)
+            tapD = (d > 0.10 && d < 8.0) ? d : 0
+        } else {
+            tapD = 0
+        }
 
         // 2. Foreground segmentation
         // .right = buffer is landscape but represents portrait content (rotate 90° CW to view)
@@ -68,7 +87,8 @@ struct VisionBoxMeasurer {
             return nil
         }
 
-        return measureWithMask(frame: frame, maskBuffer: instanceMask)
+        maskOut?(instanceMask)
+        return measureWithMask(frame: frame, maskBuffer: instanceMask, tapD: tapD)
     }
 
     // MARK: - Mask sampling (handles UInt8 and Float32 buffers)
@@ -99,7 +119,8 @@ struct VisionBoxMeasurer {
 
     private static func measureWithMask(
         frame: ARFrame,
-        maskBuffer: CVPixelBuffer
+        maskBuffer: CVPixelBuffer,
+        tapD: Float = 0
     ) -> Detection3D? {
 
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
@@ -138,6 +159,12 @@ struct VisionBoxMeasurer {
             for px in 0..<dW {
                 let d = dRow[px]
                 guard d > 0.1, d < 8.0 else { continue }
+
+                // Depth window around the tap point: rejects wall/background behind the box.
+                // Skip if tapD is unknown (0) — fallback to no depth constraint.
+                if tapD > 0 {
+                    guard d >= tapD - 0.35, d <= tapD + 0.35 else { continue }
+                }
 
                 let mx = min(mW - 1, px * mW / dW)
 

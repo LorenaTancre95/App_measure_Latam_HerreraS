@@ -316,12 +316,19 @@ final class ARViewModel: ObservableObject {
                 // Segments the exact object the user tapped; filters LiDAR through
                 // that mask — no table/floor bleed, no coordinate confusion.
                 if #available(iOS 17.0, *) {
+                    var capturedMask: CVPixelBuffer? = nil
                     if let det = try VisionBoxMeasurer.measure(
-                            frame: frame, tapPoint: point, viewportSize: vp) {
+                            frame: frame, tapPoint: point, viewportSize: vp,
+                            maskOut: { capturedMask = $0 }) {
+                        let overlay = capturedMask.flatMap { maskToUIImage($0) }
                         await MainActor.run {
+                            self.segmentationOverlay = overlay
                             if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
                             self.isProcessing = false
                         }
+                        // Hide overlay after 2 s
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        await MainActor.run { self.segmentationOverlay = nil }
                         return
                     }
                     // Vision found no foreground object at tap point.
@@ -414,6 +421,21 @@ func pixelBufferToFloatArray(_ pb: CVPixelBuffer, targetSize: Int = 640) -> ([Fl
     let n = targetSize*targetSize; var out = [Float](repeating: 0, count: 3*n)
     for i in 0..<n { out[i]=Float(rgba[i*4])/255; out[n+i]=Float(rgba[i*4+1])/255; out[2*n+i]=Float(rgba[i*4+2])/255 }
     return (out, targetSize, targetSize)
+}
+
+/// Renders a Vision segmentation mask as a yellow-tinted UIImage for debug overlay.
+func maskToUIImage(_ mask: CVPixelBuffer) -> UIImage? {
+    let ci = CIImage(cvPixelBuffer: mask)
+    // Tint yellow: multiply R and G channels, zero B
+    guard let colorized = CIFilter(name: "CIColorMatrix", parameters: [
+        kCIInputImageKey: ci,
+        "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+        "inputGVector": CIVector(x: 1, y: 0, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0.55),
+        "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 0)
+    ])?.outputImage else { return nil }
+    return UIImage(ciImage: colorized.oriented(.right))
 }
 
 func extractDepthMap(_ buf: CVPixelBuffer) -> [[Float]] {
