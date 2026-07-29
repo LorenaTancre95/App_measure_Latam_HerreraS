@@ -106,15 +106,21 @@ final class SAMSegmenter {
         guard let masksArr = output.featureValue(for: "masks")?.multiArrayValue
         else { throw SAMError.outputMissing("masks") }
 
-        // masks shape [1, 4, H, W] — take mask 0 (best), threshold at 0
-        let mH  = masksArr.shape[2].intValue
-        let mW  = masksArr.shape[3].intValue
+        // masks shape [1, 4, H, W] — take mask 0 (best), threshold at 0.
+        // CoreML may return non-C-order strides; use masksArr.strides to
+        // compute the correct offset rather than assuming ptr[y*W + x].
+        let mH = masksArr.shape[2].intValue
+        let mW = masksArr.shape[3].intValue
+        let s0 = masksArr.strides[0].intValue  // batch
+        let s1 = masksArr.strides[1].intValue  // mask index
+        let s2 = masksArr.strides[2].intValue  // row
+        let s3 = masksArr.strides[3].intValue  // col
         let ptr = masksArr.dataPointer.assumingMemoryBound(to: Float32.self)
 
         var result = [[Bool]](repeating: [Bool](repeating: false, count: mW), count: mH)
         for y in 0..<mH {
             for x in 0..<mW {
-                result[y][x] = ptr[y * mW + x] > 0
+                result[y][x] = ptr[s2 * y + s3 * x] > 0  // batch=0, mask=0
             }
         }
         return result
