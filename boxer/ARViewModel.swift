@@ -293,11 +293,43 @@ final class ARViewModel: ObservableObject {
         clearAll()
         status = "Segmentando..."
 
+        let existingSam = samSegmenter
         let vp = viewportSize
+
         Task.detached {
-            // Primary: depth flood fill — works even when box and floor have same color.
-            // Flood fill follows depth discontinuities, stopping at box edges.
-            if let det = DepthBoxMeasurer.measure(frame: frame, tapPoint: point, viewportSize: vp) {
+            // Lazy-load SAM off the main thread (MLModel init blocks ~0.5 s)
+            let sam: SAMSegmenter?
+            if let s = existingSam {
+                sam = s
+            } else {
+                let s = try? SAMSegmenter()
+                await MainActor.run { self.samSegmenter = s }
+                sam = s
+            }
+
+            // ── Primary: SAM visual segmentation + LiDAR measurement ──────
+            if let sam,
+               let segResult = TapBoxMeasurer.segmentWithPreview(
+                   frame: frame, tapPoint: point, viewportSize: vp,
+                   samSegmenter: sam) {
+
+                await MainActor.run { self.segmentationOverlay = segResult.preview }
+
+                if let det = TapBoxMeasurer.measure(frame: frame, mask: segResult.mask) {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    await MainActor.run {
+                        if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
+                        self.segmentationOverlay = nil
+                        self.isProcessing = false
+                    }
+                    return
+                }
+                await MainActor.run { self.segmentationOverlay = nil }
+            }
+
+            // ── Fallback: depth flood fill (same-colored box/floor) ────────
+            if let det = DepthBoxMeasurer.measure(
+                    frame: frame, tapPoint: point, viewportSize: vp) {
                 await MainActor.run {
                     if let sv = self.sceneView { self.placeBoxes([det], in: sv) }
                     self.isProcessing = false
