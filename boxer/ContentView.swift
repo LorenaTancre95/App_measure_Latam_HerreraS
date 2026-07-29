@@ -44,6 +44,26 @@ struct ContentView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
+            // Frozen frame overlay (TAP mode: shown while user taps corners)
+            if let frozen = viewModel.frozenFrameImage {
+                Image(uiImage: frozen)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+                    .opacity(0.80)
+                    .allowsHitTesting(false)
+                    .overlay(alignment: .top) {
+                        Label("FOTO CONGELADA — tocá las esquinas", systemImage: "camera.metering.spot")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(.black)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.yellow.opacity(0.9))
+                            .cornerRadius(10)
+                            .padding(.top, 54)
+                    }
+            }
+
             // Segmentation mask overlay (TAP mode — shown for 1.5 s before OBB)
             if let overlay = viewModel.segmentationOverlay {
                 Image(uiImage: overlay)
@@ -231,23 +251,41 @@ struct ContentView: View {
                         }
                         .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                     } else {
-                        // TAP mode: show finger icon as visual hint
-                        ZStack {
-                            Circle()
-                                .fill(.white)
-                                .frame(width: 70, height: 70)
-                            Circle()
-                                .fill(viewModel.isProcessing ? .gray : .green)
-                                .frame(width: 60, height: 60)
-                            if viewModel.isProcessing {
-                                ProgressView().tint(.white)
-                            } else {
-                                Image(systemName: "hand.tap.fill")
-                                    .font(.system(size: 26))
-                                    .foregroundColor(.white)
+                        // TAP mode: CAPTURAR freezes the frame; CANCELAR clears and goes back
+                        let isFrozen = viewModel.frozenFrameImage != nil
+                        Button(action: {
+                            if isFrozen { viewModel.clearAll() } else { viewModel.captureFrame() }
+                        }) {
+                            ZStack {
+                                Circle().fill(.white).frame(width: 70, height: 70)
+                                Circle()
+                                    .fill(viewModel.isProcessing ? Color.gray
+                                          : isFrozen ? Color.red : Color.green)
+                                    .frame(width: 60, height: 60)
+                                if viewModel.isProcessing {
+                                    ProgressView().tint(.white)
+                                } else if isFrozen {
+                                    VStack(spacing: 1) {
+                                        Image(systemName: "xmark")
+                                            .font(.system(size: 16, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Text("CANCELAR")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.white)
+                                    }
+                                } else {
+                                    VStack(spacing: 1) {
+                                        Image(systemName: "camera.viewfinder")
+                                            .font(.system(size: 20))
+                                            .foregroundColor(.white)
+                                        Text("CAPTURAR")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.white)
+                                    }
+                                }
                             }
                         }
-                        .opacity(0.85)
+                        .disabled(viewModel.isProcessing)
                     }
 
                     // Botón de captura de foto para dataset
