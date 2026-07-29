@@ -13,9 +13,10 @@ final class SAMSegmenter {
 
     init() throws {
         let config = MLModelConfiguration()
-        // cpuOnly: spikes 400–500 MB RAM on device → jetsam kill.
-        // NeuralEngine: also spikes RAM (original comment). GPU uses Metal VRAM, no RAM pressure.
-        config.computeUnits = .cpuAndGPU
+        // .all → CoreML prefers Apple Neural Engine (dedicated HW, does not count
+        // against app RAM for jetsam purposes). Previously cpuAndGPU caused crashes
+        // when YOLO was also loaded because combined GPU+CPU buffers hit the limit.
+        config.computeUnits = .all
 
         guard let encURL = Bundle.main.url(forResource: "sam_encoder", withExtension: "mlpackage")
                         ?? Bundle.main.url(forResource: "sam_encoder", withExtension: "mlmodelc")

@@ -293,6 +293,12 @@ final class ARViewModel: ObservableObject {
         clearAll()
         status = "Segmentando..."
 
+        // Release YOLO + Pallet before SAM inference — their combined memory
+        // plus the SAM 1024×1024 encoder spike causes jetsam kills on device.
+        // TAP mode can't call detectNow simultaneously so this is safe.
+        yoloDetector = nil
+        palletDetector = nil
+
         let existingSam = samSegmenter
         let vp = viewportSize
 
