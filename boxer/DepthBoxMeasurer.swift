@@ -119,6 +119,9 @@ struct DepthBoxMeasurer {
         let pyLo = max(0, minDY - faceH - margin)   // look UP by one full face height
         let pyHi = min(dH - 1, maxDY + margin)
 
+        // 3D position of the tap point — used to reject table/floor points far from the box.
+        let tapWorld = unproject(tapDX, tapDY, tapD)
+
         var pts = [simd_float3]()
         pts.reserveCapacity((pxHi - pxLo + 1) * (pyHi - pyLo + 1))
 
@@ -132,9 +135,15 @@ struct DepthBoxMeasurer {
 
                 let p3d = unproject(px, py, d)
 
-                // Height filter: drop pixels at floor level
+                // XZ radius filter: reject table/floor surface extending beyond the box.
+                // 0.6 m covers boxes up to ~1.2 m wide when tapped at the center.
+                let dxz = (p3d.x - tapWorld.x) * (p3d.x - tapWorld.x)
+                        + (p3d.z - tapWorld.z) * (p3d.z - tapWorld.z)
+                guard dxz < 0.6 * 0.6 else { continue }
+
+                // Height filter: drop pixels at floor/table level (10 cm margin).
                 if let floorY = anchorFloorY {
-                    guard p3d.y > floorY + 0.06 else { continue }
+                    guard p3d.y > floorY + 0.10 else { continue }
                 }
                 pts.append(p3d)
             }
