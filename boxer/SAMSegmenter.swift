@@ -9,11 +9,7 @@ final class SAMSegmenter {
     private let encoder: MLModel
     private let decoder: MLModel
 
-    // 512 instead of 1024: 4× less memory during encoder inference.
-    // MobileSAM CoreML models exported with coremltools ≥9 accept flexible
-    // input shapes; if this device's model is fixed-1024 the encoder throws
-    // (caught by try? in TapBoxMeasurer) and we fall back to DepthBoxMeasurer.
-    static let imageSize = 512
+    static let imageSize = 1024
 
     init() throws {
         let config = MLModelConfiguration()

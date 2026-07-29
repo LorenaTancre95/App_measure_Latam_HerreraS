@@ -19,7 +19,7 @@ final class ARViewModel: ObservableObject {
     @Published var confidenceThreshold: Float = 0.3
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
     @Published var isCalibrated: Bool = false
-    @Published var measureMode: MeasureMode = .box
+    @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
 
     enum MeasureMode { case box, oversize, tap }
@@ -34,34 +34,43 @@ final class ARViewModel: ObservableObject {
 
     func setup(sceneView: ARSCNView) {
         self.sceneView = sceneView
-        Task.detached { await self.loadModelsInBackground() }
+        Task.detached { await self.loadTAPModels() }
     }
 
-    nonisolated private func loadModelsInBackground() async {
-        let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx")
-        await MainActor.run { self.status = "Loading YOLO..." }
-        guard let yoloPath else {
-            await MainActor.run { self.status = "best.onnx not found" }
-            return
-        }
-        let yolo: YOLODetector
-        do { yolo = try YOLODetector(modelPath: yoloPath) }
-        catch {
-            await MainActor.run { self.status = "YOLO failed: \(error.localizedDescription)" }
-            return
-        }
-
-        // Load PalletDetector (non-fatal)
+    // Loads SAM + Pallet (used in TAP and OVERSIZE modes).
+    // YOLO is NOT loaded here — only loaded lazily when switching to CAJA mode.
+    // SAM 1024×1024 encoder spikes ~200 MB during inference; keeping YOLO
+    // (ONNX runtime, ~200 MB) out of memory prevents jetsam kills.
+    nonisolated private func loadTAPModels() async {
+        await MainActor.run { self.status = "Cargando SAM..." }
+        let sam   = try? SAMSegmenter()
         let pallet = try? PalletDetector()
-
-        // SAMSegmenter is NOT loaded here — it's loaded lazily on first TAP use.
-        // Loading YOLO + Pallet + SAM simultaneously causes an OOM kill on device
-        // because the SAM encoder (1024×1024 cpuOnly) spikes memory by ~300 MB.
-
         await MainActor.run {
-            self.yoloDetector = yolo
+            self.samSegmenter   = sam
             self.palletDetector = pallet
-            self.status = "Apuntá al piso para calibrar..."
+            self.status = sam != nil ? "Listo — tocá la caja a medir"
+                                     : "SAM no disponible — usá modo CAJA"
+        }
+    }
+
+    // Loads YOLO for CAJA mode. Frees SAM first to make room.
+    nonisolated private func loadYOLO() async {
+        await MainActor.run {
+            self.samSegmenter = nil   // free SAM memory before ONNX runtime loads
+            self.status = "Cargando detector CAJA..."
+        }
+        guard let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx") else {
+            await MainActor.run { self.status = "best.onnx no encontrado" }
+            return
+        }
+        do {
+            let yolo = try YOLODetector(modelPath: yoloPath)
+            await MainActor.run {
+                self.yoloDetector = yolo
+                self.status = "Apuntá la caja al visor"
+            }
+        } catch {
+            await MainActor.run { self.status = "YOLO falló: \(error.localizedDescription)" }
         }
     }
 
@@ -73,7 +82,11 @@ final class ARViewModel: ObservableObject {
             detectPallet(frame: frame, sceneView: sceneView); return
         }
 
-        guard let yoloDetector else { status = "YOLO no cargado"; return }
+        // Lazy-load YOLO on first CAJA use (frees SAM first)
+        guard let yoloDetector else {
+            Task.detached { await self.loadYOLO() }
+            return
+        }
         let hasFloor = frame.anchors.contains { ($0 as? ARPlaneAnchor)?.alignment == .horizontal }
         isProcessing = true
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
@@ -292,12 +305,6 @@ final class ARViewModel: ObservableObject {
         isProcessing = true
         clearAll()
         status = "Segmentando..."
-
-        // Release YOLO + Pallet before SAM inference — their combined memory
-        // plus the SAM 1024×1024 encoder spike causes jetsam kills on device.
-        // TAP mode can't call detectNow simultaneously so this is safe.
-        yoloDetector = nil
-        palletDetector = nil
 
         let existingSam = samSegmenter
         let vp = viewportSize
