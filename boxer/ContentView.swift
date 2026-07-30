@@ -101,9 +101,9 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            // TAP mode corner instruction banner
+            // TAP mode corner instruction banner (only before frame is frozen)
             if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty
-               && !viewModel.cornerInstruction.isEmpty {
+               && !viewModel.cornerInstruction.isEmpty && viewModel.frozenFrameImage == nil {
                 VStack {
                     Spacer()
                     HStack(spacing: 8) {
@@ -120,6 +120,25 @@ struct ContentView: View {
                     .background(.black.opacity(0.75))
                     .cornerRadius(20)
                     .padding(.bottom, 160)
+                }
+            }
+
+            // Box guide diagram (TAP mode, frozen frame — replaces text-only banner)
+            if viewModel.measureMode == .tap,
+               viewModel.frozenFrameImage != nil,
+               !viewModel.isProcessing,
+               viewModel.detections.isEmpty {
+                VStack {
+                    Spacer()
+                    HStack(alignment: .bottom) {
+                        BoxGuideView(
+                            tappedCount: viewModel.cornerStep,
+                            instruction: viewModel.cornerInstruction
+                        )
+                        .padding(.leading, 16)
+                        .padding(.bottom, 96)
+                        Spacer()
+                    }
                 }
             }
 
@@ -378,6 +397,109 @@ struct DetectionCard: View {
 func boxColor(_ index: Int) -> Color {
     let colors: [Color] = [.red, .green, .blue]
     return colors[index % colors.count]
+}
+
+// MARK: - Box Guide
+
+/// Perspective wireframe diagram with 3 numbered tap-point markers on the front face.
+/// Corner order: 1=front-top-left, 2=front-top-right, 3=front-bottom-right
+/// Depth is computed automatically from LiDAR — no 4th tap needed.
+struct BoxGuideView: View {
+    let tappedCount: Int   // 0..3: how many corners have been recorded
+    let instruction: String
+
+    private static let W: CGFloat = 168
+    private static let H: CGFloat = 118
+
+    // Front face vertices
+    private static let fTL = CGPoint(x: 14,  y: 36)
+    private static let fTR = CGPoint(x: 104, y: 36)
+    private static let fBR = CGPoint(x: 104, y: 110)
+    private static let fBL = CGPoint(x: 14,  y: 110)
+    // Perspective back face
+    private static let tTL = CGPoint(x: 64,  y: 16)
+    private static let tTR = CGPoint(x: 154, y: 16)
+    private static let tBR = CGPoint(x: 154, y: 90)
+    private static let tBL = CGPoint(x: 64,  y: 90)
+
+    // Only 3 tap positions: the 3 front-face corners
+    private static let tapPositions: [CGPoint] = [fTL, fTR, fBR]
+
+    private func markerColor(_ idx: Int) -> Color {
+        if idx < tappedCount { return .green }
+        if idx == tappedCount { return .yellow }
+        return .white.opacity(0.25)
+    }
+
+    var body: some View {
+        VStack(spacing: 6) {
+            ZStack {
+                Canvas { ctx, _ in
+                    func edge(_ a: CGPoint, _ b: CGPoint, dashed: Bool = false) {
+                        var p = Path(); p.move(to: a); p.addLine(to: b)
+                        let style = dashed
+                            ? StrokeStyle(lineWidth: 1.2, dash: [4, 3])
+                            : StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
+                        ctx.stroke(p, with: .color(.white.opacity(0.75)), style: style)
+                    }
+                    let fTL = BoxGuideView.fTL, fTR = BoxGuideView.fTR
+                    let fBR = BoxGuideView.fBR, fBL = BoxGuideView.fBL
+                    let tTL = BoxGuideView.tTL, tTR = BoxGuideView.tTR
+                    let tBR = BoxGuideView.tBR, tBL = BoxGuideView.tBL
+
+                    // Visible edges (solid)
+                    edge(fTL, fTR); edge(fTR, fBR); edge(fBR, fBL); edge(fBL, fTL)
+                    edge(fTL, tTL); edge(fTR, tTR); edge(tTL, tTR)
+                    edge(fBR, tBR); edge(tTR, tBR)
+                    // Hidden edges (dashed)
+                    edge(fBL, tBL, dashed: true)
+                    edge(tTL, tBL, dashed: true)
+                    edge(tBL, tBR, dashed: true)
+                }
+                .frame(width: BoxGuideView.W, height: BoxGuideView.H)
+
+                ForEach(0..<3, id: \.self) { i in
+                    ZStack {
+                        Circle()
+                            .fill(markerColor(i))
+                            .frame(width: 22, height: 22)
+                        if i < tappedCount {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 9, weight: .heavy))
+                                .foregroundColor(.black)
+                        } else {
+                            Text("\(i + 1)")
+                                .font(.system(size: 11, weight: .heavy))
+                                .foregroundColor(i == tappedCount ? .black : .white.opacity(0.7))
+                        }
+                    }
+                    .position(BoxGuideView.tapPositions[i])
+                }
+            }
+            .frame(width: BoxGuideView.W, height: BoxGuideView.H)
+
+            if !shortInstruction.isEmpty {
+                Text(shortInstruction)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: BoxGuideView.W)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.black.opacity(0.80))
+        .cornerRadius(14)
+    }
+
+    // Strip "X/4 — " prefix so only the action text is shown below the diagram
+    private var shortInstruction: String {
+        if let r = instruction.range(of: " — ") {
+            return String(instruction[r.upperBound...])
+        }
+        return instruction
+    }
 }
 
 // MARK: - Viewfinder

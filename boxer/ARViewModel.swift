@@ -25,6 +25,13 @@ final class ARViewModel: ObservableObject {
     @Published var cornerInstruction: String = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
     @Published var frozenFrameImage: UIImage? = nil   // frozen photo shown while user taps corners
 
+    // 0 = nothing tapped yet, 1 = P0 done, 2 = P0+P1 done
+    var cornerStep: Int {
+        if cornerInstruction.hasPrefix("2/") { return 1 }
+        if cornerInstruction.hasPrefix("3/") { return 2 }
+        return 0
+    }
+
     enum MeasureMode { case box, oversize, tap }
 
     var sceneView: ARSCNView?
@@ -324,22 +331,23 @@ final class ARViewModel: ObservableObject {
         frozenFrameImage       = UIImage(cgImage: cg)
 
         status             = "Foto congelada ✓"
-        cornerInstruction  = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
+        cornerInstruction  = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
     }
 
-    // MARK: - Corner tap measurement (4 taps on frozen photo → exact OBB)
+    // MARK: - Corner tap measurement (3 taps on frozen photo → OBB with auto depth)
     //
     // Tap order (tapped on the frozen image displayed on screen):
     //   P0: front-top-LEFT
     //   P1: front-top-RIGHT  → width = |P1−P0|
     //   P2: front-bottom-RIGHT → height = |P2−P1|
-    //   P3: any point on side or top face → depth via projection onto face normal
+    //
+    // After 3 taps, depth is computed automatically by scanning the frozen LiDAR map
+    // for points behind the front face within its width×height footprint.
 
     func measureAtTap(at point: CGPoint) {
         guard !isProcessing else { return }
         guard let sceneView else { status = "Sin AR view"; return }
 
-        // Require frozen frame — user must press CAPTURAR first
         guard frozenDepthMap != nil else {
             status = "Primero presioná CAPTURAR"
             return
@@ -353,37 +361,133 @@ final class ARViewModel: ObservableObject {
         let n = cornerPts.count
         cornerPts.append(pt3D)
         placeMarker(at: pt3D, in: sceneView)
-        debugInfo += "P\(n): (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z))m)\n"
+        debugInfo += "P\(n): (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
 
         switch cornerPts.count {
         case 1:
-            debugInfo = "P0: (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z))m)\n"
-            cornerInstruction = "2/4 — Tocá la esquina superior DERECHA (frente)"
+            debugInfo = "P0: (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
+            cornerInstruction = "2/3 — Tocá la esquina superior DERECHA (frente)"
             status = "Esquina 1 marcada ✓"
         case 2:
-            cornerInstruction = "3/4 — Tocá la esquina inferior DERECHA (frente)"
+            cornerInstruction = "3/3 — Tocá la esquina inferior DERECHA (frente)"
             status = "Esquina 2 marcada ✓"
         case 3:
-            cornerInstruction = "4/4 — Tocá un punto de la cara lateral o superior"
-            status = "Esquina 3 marcada ✓"
-        case 4:
             cornerInstruction = ""
             isProcessing = true
-            if let det = computeBox() {
-                placeBoxes([det], in: sceneView)
-                frozenFrameImage = nil   // unfreeze after successful measurement
-                frozenDepthMap   = nil
-            } else {
-                status = "Geometría inválida — intentá de nuevo"
-                cornerInstruction = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
+            status = "Calculando profundidad..."
+            let savedPts = cornerPts
+            let savedSV  = sceneView
+            Task.detached { [weak self] in
+                guard let self else { return }
+                let depth  = await self.autoDepthFromLiDAR(cornerPts: savedPts)
+                let detOpt = await self.computeBoxAutoDepth(cornerPts: savedPts, autoDepth: depth)
+                await MainActor.run {
+                    if let det = detOpt {
+                        self.placeBoxes([det], in: savedSV)
+                        self.frozenFrameImage = nil
+                        self.frozenDepthMap   = nil
+                    } else {
+                        self.status = "Sin datos de profundidad — intentá de nuevo"
+                        self.cornerInstruction = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
+                    }
+                    self.cornerPts.removeAll()
+                    self.markerNodes.forEach { $0.removeFromParentNode() }
+                    self.markerNodes.removeAll()
+                    self.isProcessing = false
+                }
             }
-            cornerPts.removeAll()
-            markerNodes.forEach { $0.removeFromParentNode() }
-            markerNodes.removeAll()
-            isProcessing = false
         default:
             break
         }
+    }
+
+    // Scans the frozen LiDAR depth map and finds the maximum depth projection
+    // in the depthAxis direction within the front face's width×height footprint.
+    nonisolated private func autoDepthFromLiDAR(cornerPts: [simd_float3]) async -> Float {
+        let depthBuffer = await MainActor.run { self.frozenDepthMap }
+        let bufSize     = await MainActor.run { self.frozenCapturedSize }
+        let intr        = await MainActor.run { self.frozenIntrinsics }
+        let camT        = await MainActor.run { self.frozenCameraTransform }
+
+        guard let depthBuffer, cornerPts.count >= 3 else { return 0 }
+
+        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
+        let widthVec  = P1 - P0
+        let heightVec = P2 - P1
+        let width  = simd_length(widthVec)
+        let height = simd_length(heightVec)
+        guard width > 0.01, height > 0.01 else { return 0 }
+
+        let widthAxis  = simd_normalize(widthVec)
+        let heightAxis = simd_normalize(heightVec)
+        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
+        let frontCenter = (P0 + P2) * 0.5
+
+        let bufW = Float(bufSize.width)
+        let bufH = Float(bufSize.height)
+        let dW   = CVPixelBufferGetWidth(depthBuffer)
+        let dH   = CVPixelBufferGetHeight(depthBuffer)
+        let fx   = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+
+        // Use 1.3× the face extents so we catch back corners even with slight misalignment
+        let halfW = width  * 0.65
+        let halfH = height * 0.65
+
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+        let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
+        guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return 0 }
+
+        var maxProj: Float = 0
+        for py in 0..<dH {
+            let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
+            for px in 0..<dW {
+                let d = row[px]
+                guard d > 0.05, d < 8.0 else { continue }
+                let ix  = Float(px) / Float(dW) * bufW
+                let iy  = Float(py) / Float(dH) * bufH
+                let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
+                let ww  = camT * cam
+                let p3d = simd_float3(ww.x, ww.y, ww.z) / ww.w
+                let dp  = p3d - frontCenter
+                let wP  = simd_dot(dp, widthAxis)
+                let hP  = simd_dot(dp, heightAxis)
+                let dP  = simd_dot(dp, depthAxis)
+                guard abs(wP) < halfW, abs(hP) < halfH,
+                      dP > 0.01, dP < 3.0 else { continue }
+                if dP > maxProj { maxProj = dP }
+            }
+        }
+        return maxProj
+    }
+
+    nonisolated private func computeBoxAutoDepth(cornerPts: [simd_float3], autoDepth: Float) async -> Detection3D? {
+        guard cornerPts.count >= 3, autoDepth > 0.02 else { return nil }
+        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
+        let widthVec  = P1 - P0
+        let heightVec = P2 - P1
+        let width     = simd_length(widthVec)
+        let height    = simd_length(heightVec)
+        guard width > 0.01, height > 0.01 else { return nil }
+        let widthAxis  = simd_normalize(widthVec)
+        let heightAxis = simd_normalize(heightVec)
+        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
+        let frontCenter = (P0 + P2) * 0.5
+        let center = frontCenter + depthAxis * autoDepth * 0.5
+        let yaw  = atan2(widthAxis.z, widthAxis.x)
+        let cosY = cos(yaw), sinY = sin(yaw)
+        let worldTransform = simd_float4x4(
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
+            simd_float4(center.x, center.y, center.z, 1)
+        )
+        return Detection3D(center: center,
+                           size: simd_float3(width, height, autoDepth),
+                           yaw: yaw,
+                           confidence: 1.0,
+                           worldTransform: worldTransform,
+                           label: "caja")
     }
 
     private func tapTo3DFrozen(point: CGPoint) -> simd_float3? {
@@ -474,50 +578,6 @@ final class ARViewModel: ObservableObject {
         return simd_float3(w.x, w.y, w.z) / w.w
     }
 
-    private func computeBox() -> Detection3D? {
-        guard cornerPts.count == 4 else { return nil }
-        let P0 = cornerPts[0]  // front-top-left
-        let P1 = cornerPts[1]  // front-top-right
-        let P2 = cornerPts[2]  // front-bottom-right
-        let P3 = cornerPts[3]  // depth reference on side or top
-
-        let widthVec  = P1 - P0
-        let heightVec = P2 - P1
-
-        let width  = simd_length(widthVec)
-        let height = simd_length(heightVec)
-        guard width > 0.01, height > 0.01 else { return nil }
-
-        let widthAxis  = simd_normalize(widthVec)
-        let heightAxis = simd_normalize(heightVec)
-        // Normal to the front face = depth axis of the box
-        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
-        let depthProj  = simd_dot(P3 - P0, depthAxis)
-        let depth      = abs(depthProj)
-        guard depth > 0.01 else { return nil }
-
-        // Center of the box = center of front face + half depth toward P3
-        let frontCenter = P0 + widthVec * 0.5 + heightVec * 0.5
-        let depthSign: Float = depthProj >= 0 ? 1 : -1
-        let center = frontCenter + depthAxis * depthSign * depth * 0.5
-
-        // Yaw from widthAxis projected to XZ plane
-        let yaw  = atan2(widthAxis.z, widthAxis.x)
-        let cosY = cos(yaw), sinY = sin(yaw)
-        let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(center.x, center.y, center.z, 1)
-        )
-
-        return Detection3D(center: center,
-                           size: simd_float3(width, height, depth),
-                           yaw: yaw,
-                           confidence: 1.0,
-                           worldTransform: worldTransform,
-                           label: "caja")
-    }
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
         let sphere = SCNSphere(radius: 0.012)
@@ -546,7 +606,7 @@ final class ARViewModel: ObservableObject {
         markerNodes.removeAll()
         frozenFrameImage = nil
         frozenDepthMap   = nil
-        cornerInstruction = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
+        cornerInstruction = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
     }
 
     // MARK: - Dataset capture
