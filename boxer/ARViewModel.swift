@@ -392,7 +392,7 @@ final class ARViewModel: ObservableObject {
                 let det = ARViewModel.buildBox(cornerPts: pts, depth: depth)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
-                    if let det, let sv {
+                    if let det {
                         self.placeBoxes([det], in: sv)
                         self.frozenFrameImage = nil
                         self.frozenDepthMap   = nil
@@ -414,7 +414,7 @@ final class ARViewModel: ObservableObject {
     // Scans the copied LiDAR depth buffer and returns the max depth projection
     // in the face-normal direction within the front face's width×height footprint.
     // Pure static function — no actor isolation, safe to call from Task.detached.
-    private static func scanDepth(
+    nonisolated private static func scanDepth(
         cornerPts: [simd_float3],
         depthBuffer: CVPixelBuffer?,
         bufSize: CGSize,
@@ -473,7 +473,7 @@ final class ARViewModel: ObservableObject {
         return maxProj
     }
 
-    private static func buildBox(cornerPts: [simd_float3], depth: Float) -> Detection3D? {
+    nonisolated private static func buildBox(cornerPts: [simd_float3], depth: Float) -> Detection3D? {
         guard cornerPts.count >= 3, depth > 0.01 else { return nil }
         let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
         let widthVec  = P1 - P0
@@ -501,7 +501,7 @@ final class ARViewModel: ObservableObject {
     }
 
     // Deep-copies a CVPixelBuffer so ARKit's buffer recycling cannot corrupt it.
-    private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+    nonisolated private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
         let fmt = CVPixelBufferGetPixelFormatType(src)
         let w   = CVPixelBufferGetWidth(src)
         let h   = CVPixelBufferGetHeight(src)
