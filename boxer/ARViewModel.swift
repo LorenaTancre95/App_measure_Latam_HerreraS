@@ -322,7 +322,9 @@ final class ARViewModel: ObservableObject {
 
         clearAll()  // reset corners, markers, boxes, frozen state
 
-        frozenDepthMap         = depthMap
+        // ARKit recycles pixel buffers between frames — copy the depth map so
+        // the background LiDAR scan can access it safely after the frame is gone.
+        frozenDepthMap         = ARViewModel.copyPixelBuffer(depthMap)
         frozenCameraTransform  = frame.camera.transform
         frozenIntrinsics       = frame.camera.intrinsics
         frozenDisplayTransform = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
@@ -331,7 +333,7 @@ final class ARViewModel: ObservableObject {
         frozenFrameImage       = UIImage(cgImage: cg)
 
         status             = "Foto congelada ✓"
-        cornerInstruction  = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
+        cornerInstruction  = "1/3 — Esquina sup. IZQUIERDA"
     }
 
     // MARK: - Corner tap measurement (3 taps on frozen photo → OBB with auto depth)
@@ -366,29 +368,37 @@ final class ARViewModel: ObservableObject {
         switch cornerPts.count {
         case 1:
             debugInfo = "P0: (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
-            cornerInstruction = "2/3 — Tocá la esquina superior DERECHA (frente)"
+            cornerInstruction = "2/3 — Esquina sup. DERECHA"
             status = "Esquina 1 marcada ✓"
         case 2:
-            cornerInstruction = "3/3 — Tocá la esquina inferior DERECHA (frente)"
+            cornerInstruction = "3/3 — Esquina inf. DERECHA"
             status = "Esquina 2 marcada ✓"
         case 3:
             cornerInstruction = ""
             isProcessing = true
             status = "Calculando profundidad..."
-            let savedPts = cornerPts
-            let savedSV  = sceneView
+            // Capture all data on main thread before going to background —
+            // avoids actor-isolation issues and ensures safe buffer access.
+            let pts  = cornerPts
+            let sv   = sceneView
+            let dBuf = frozenDepthMap          // already a copy made in captureFrame()
+            let bSz  = frozenCapturedSize
+            let intr = frozenIntrinsics
+            let camT = frozenCameraTransform
             Task.detached { [weak self] in
-                guard let self else { return }
-                let depth  = await self.autoDepthFromLiDAR(cornerPts: savedPts)
-                let detOpt = await self.computeBoxAutoDepth(cornerPts: savedPts, autoDepth: depth)
-                await MainActor.run {
-                    if let det = detOpt {
-                        self.placeBoxes([det], in: savedSV)
+                let depth = ARViewModel.scanDepth(
+                    cornerPts: pts, depthBuffer: dBuf,
+                    bufSize: bSz, intrinsics: intr, cameraT: camT)
+                let det = ARViewModel.buildBox(cornerPts: pts, depth: depth)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    if let det, let sv {
+                        self.placeBoxes([det], in: sv)
                         self.frozenFrameImage = nil
                         self.frozenDepthMap   = nil
                     } else {
-                        self.status = "Sin datos de profundidad — intentá de nuevo"
-                        self.cornerInstruction = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
+                        self.status = "Sin datos LiDAR — acercate más e intentá de nuevo"
+                        self.cornerInstruction = "1/3 — Esquina sup. IZQUIERDA"
                     }
                     self.cornerPts.removeAll()
                     self.markerNodes.forEach { $0.removeFromParentNode() }
@@ -401,15 +411,17 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Scans the frozen LiDAR depth map and finds the maximum depth projection
-    // in the depthAxis direction within the front face's width×height footprint.
-    nonisolated private func autoDepthFromLiDAR(cornerPts: [simd_float3]) async -> Float {
-        let depthBuffer = await MainActor.run { self.frozenDepthMap }
-        let bufSize     = await MainActor.run { self.frozenCapturedSize }
-        let intr        = await MainActor.run { self.frozenIntrinsics }
-        let camT        = await MainActor.run { self.frozenCameraTransform }
-
-        guard let depthBuffer, cornerPts.count >= 3 else { return 0 }
+    // Scans the copied LiDAR depth buffer and returns the max depth projection
+    // in the face-normal direction within the front face's width×height footprint.
+    // Pure static function — no actor isolation, safe to call from Task.detached.
+    private static func scanDepth(
+        cornerPts: [simd_float3],
+        depthBuffer: CVPixelBuffer?,
+        bufSize: CGSize,
+        intrinsics: simd_float3x3,
+        cameraT: simd_float4x4
+    ) -> Float {
+        guard let dBuf = depthBuffer, cornerPts.count >= 3 else { return 0 }
 
         let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
         let widthVec  = P1 - P0
@@ -418,25 +430,25 @@ final class ARViewModel: ObservableObject {
         let height = simd_length(heightVec)
         guard width > 0.01, height > 0.01 else { return 0 }
 
-        let widthAxis  = simd_normalize(widthVec)
-        let heightAxis = simd_normalize(heightVec)
-        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
+        let widthAxis   = simd_normalize(widthVec)
+        let heightAxis  = simd_normalize(heightVec)
+        let depthAxis   = simd_normalize(simd_cross(widthAxis, heightAxis))
         let frontCenter = (P0 + P2) * 0.5
 
         let bufW = Float(bufSize.width)
         let bufH = Float(bufSize.height)
-        let dW   = CVPixelBufferGetWidth(depthBuffer)
-        let dH   = CVPixelBufferGetHeight(depthBuffer)
-        let fx   = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+        let dW   = CVPixelBufferGetWidth(dBuf)
+        let dH   = CVPixelBufferGetHeight(dBuf)
+        let fx   = intrinsics[0][0], fy = intrinsics[1][1]
+        let cx   = intrinsics[2][0], cy = intrinsics[2][1]
+        // Allow 1.5× face extents to catch back corners even with slight tap error
+        let halfW = width  * 0.75
+        let halfH = height * 0.75
 
-        // Use 1.3× the face extents so we catch back corners even with slight misalignment
-        let halfW = width  * 0.65
-        let halfH = height * 0.65
-
-        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
-        let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
-        guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return 0 }
+        CVPixelBufferLockBaseAddress(dBuf, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(dBuf, .readOnly) }
+        let rb   = CVPixelBufferGetBytesPerRow(dBuf)
+        guard let base = CVPixelBufferGetBaseAddress(dBuf) else { return 0 }
 
         var maxProj: Float = 0
         for py in 0..<dH {
@@ -447,7 +459,7 @@ final class ARViewModel: ObservableObject {
                 let ix  = Float(px) / Float(dW) * bufW
                 let iy  = Float(py) / Float(dH) * bufH
                 let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
-                let ww  = camT * cam
+                let ww  = cameraT * cam
                 let p3d = simd_float3(ww.x, ww.y, ww.z) / ww.w
                 let dp  = p3d - frontCenter
                 let wP  = simd_dot(dp, widthAxis)
@@ -461,19 +473,19 @@ final class ARViewModel: ObservableObject {
         return maxProj
     }
 
-    nonisolated private func computeBoxAutoDepth(cornerPts: [simd_float3], autoDepth: Float) async -> Detection3D? {
-        guard cornerPts.count >= 3, autoDepth > 0.02 else { return nil }
+    private static func buildBox(cornerPts: [simd_float3], depth: Float) -> Detection3D? {
+        guard cornerPts.count >= 3, depth > 0.01 else { return nil }
         let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
         let widthVec  = P1 - P0
         let heightVec = P2 - P1
-        let width     = simd_length(widthVec)
-        let height    = simd_length(heightVec)
+        let width  = simd_length(widthVec)
+        let height = simd_length(heightVec)
         guard width > 0.01, height > 0.01 else { return nil }
         let widthAxis  = simd_normalize(widthVec)
         let heightAxis = simd_normalize(heightVec)
         let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
         let frontCenter = (P0 + P2) * 0.5
-        let center = frontCenter + depthAxis * autoDepth * 0.5
+        let center = frontCenter + depthAxis * depth * 0.5
         let yaw  = atan2(widthAxis.z, widthAxis.x)
         let cosY = cos(yaw), sinY = sin(yaw)
         let worldTransform = simd_float4x4(
@@ -483,11 +495,27 @@ final class ARViewModel: ObservableObject {
             simd_float4(center.x, center.y, center.z, 1)
         )
         return Detection3D(center: center,
-                           size: simd_float3(width, height, autoDepth),
-                           yaw: yaw,
-                           confidence: 1.0,
-                           worldTransform: worldTransform,
-                           label: "caja")
+                           size: simd_float3(width, height, depth),
+                           yaw: yaw, confidence: 1.0,
+                           worldTransform: worldTransform, label: "caja")
+    }
+
+    // Deep-copies a CVPixelBuffer so ARKit's buffer recycling cannot corrupt it.
+    private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
+        let fmt = CVPixelBufferGetPixelFormatType(src)
+        let w   = CVPixelBufferGetWidth(src)
+        let h   = CVPixelBufferGetHeight(src)
+        var dst: CVPixelBuffer?
+        guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, nil, &dst) == kCVReturnSuccess,
+              let dst else { return nil }
+        CVPixelBufferLockBaseAddress(src, .readOnly)
+        CVPixelBufferLockBaseAddress(dst, [])
+        memcpy(CVPixelBufferGetBaseAddress(dst)!,
+               CVPixelBufferGetBaseAddress(src)!,
+               CVPixelBufferGetBytesPerRow(src) * h)
+        CVPixelBufferUnlockBaseAddress(dst, [])
+        CVPixelBufferUnlockBaseAddress(src, .readOnly)
+        return dst
     }
 
     private func tapTo3DFrozen(point: CGPoint) -> simd_float3? {
@@ -606,7 +634,7 @@ final class ARViewModel: ObservableObject {
         markerNodes.removeAll()
         frozenFrameImage = nil
         frozenDepthMap   = nil
-        cornerInstruction = "1/3 — Tocá la esquina superior IZQUIERDA (frente)"
+        cornerInstruction = "1/3 — Esquina sup. IZQUIERDA"
     }
 
     // MARK: - Dataset capture
