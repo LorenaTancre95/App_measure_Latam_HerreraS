@@ -315,12 +315,12 @@ final class ARViewModel: ObservableObject {
             status = "Sin LiDAR depth — esperá que se calibre"; return
         }
 
-        // Render landscape capturedImage to portrait UIImage (same rotation as live display)
-        let ci  = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
-        let ctx = CIContext()
-        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return }
+        clearAll()  // remove overlays before snapshot so they don't appear on the frozen image
 
-        clearAll()  // reset corners, markers, boxes, frozen state
+        // sceneView.snapshot() captures exactly what ARKit renders on screen.
+        // This guarantees that a tap at (tx, ty) on the frozen image maps to the same
+        // screen coordinate as displayTransform.inverted() expects — no aspect-ratio mismatch.
+        let screenShot = sceneView.snapshot()
 
         // ARKit recycles pixel buffers between frames — copy the depth map so
         // the background LiDAR scan can access it safely after the frame is gone.
@@ -330,7 +330,7 @@ final class ARViewModel: ObservableObject {
         frozenDisplayTransform = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
         frozenCapturedSize     = CGSize(width:  CVPixelBufferGetWidth(frame.capturedImage),
                                         height: CVPixelBufferGetHeight(frame.capturedImage))
-        frozenFrameImage       = UIImage(cgImage: cg)
+        frozenFrameImage       = screenShot
 
         status             = "Foto congelada ✓"
         cornerInstruction  = "1/3 — Esquina sup. IZQUIERDA"
