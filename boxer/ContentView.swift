@@ -44,26 +44,6 @@ struct ContentView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
-            // Frozen frame overlay (TAP mode: shown while user taps corners)
-            if let frozen = viewModel.frozenFrameImage {
-                Image(uiImage: frozen)
-                    .resizable()
-                    .scaledToFill()
-                    .ignoresSafeArea()
-                    .opacity(0.80)
-                    .allowsHitTesting(false)
-                    .overlay(alignment: .top) {
-                        Label("FOTO CONGELADA — tocá las esquinas", systemImage: "camera.metering.spot")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundColor(.black)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.yellow.opacity(0.9))
-                            .cornerRadius(10)
-                            .padding(.top, 54)
-                    }
-            }
-
             // Segmentation mask overlay (TAP mode — shown for 1.5 s before OBB)
             if let overlay = viewModel.segmentationOverlay {
                 Image(uiImage: overlay)
@@ -101,31 +81,8 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            // TAP mode corner instruction banner (only before frame is frozen)
-            if viewModel.measureMode == .tap && !viewModel.isProcessing && viewModel.detections.isEmpty
-               && !viewModel.cornerInstruction.isEmpty && viewModel.frozenFrameImage == nil {
-                VStack {
-                    Spacer()
-                    HStack(spacing: 8) {
-                        Image(systemName: "scope")
-                            .font(.system(size: 18))
-                            .foregroundColor(.yellow)
-                        Text(viewModel.cornerInstruction)
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundColor(.white)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 12)
-                    .background(.black.opacity(0.75))
-                    .cornerRadius(20)
-                    .padding(.bottom, 160)
-                }
-            }
-
-            // Box guide diagram (TAP mode, frozen frame — replaces text-only banner)
+            // TAP mode: box guide diagram shown while measuring
             if viewModel.measureMode == .tap,
-               viewModel.frozenFrameImage != nil,
                !viewModel.isProcessing,
                viewModel.detections.isEmpty {
                 VStack {
@@ -270,34 +227,22 @@ struct ContentView: View {
                         }
                         .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                     } else {
-                        // TAP mode: CAPTURAR freezes the frame; CANCELAR clears and goes back
-                        let isFrozen = viewModel.frozenFrameImage != nil
-                        Button(action: {
-                            if isFrozen { viewModel.clearAll() } else { viewModel.captureFrame() }
-                        }) {
+                        // TAP mode: tocá las esquinas directamente sobre la caja en vivo
+                        Button(action: { viewModel.clearAll() }) {
                             ZStack {
                                 Circle().fill(.white).frame(width: 70, height: 70)
                                 Circle()
                                     .fill(viewModel.isProcessing ? Color.gray
-                                          : isFrozen ? Color.red : Color.green)
+                                          : viewModel.cornerStep > 0 ? Color.red : Color.orange)
                                     .frame(width: 60, height: 60)
                                 if viewModel.isProcessing {
                                     ProgressView().tint(.white)
-                                } else if isFrozen {
-                                    VStack(spacing: 1) {
-                                        Image(systemName: "xmark")
-                                            .font(.system(size: 16, weight: .bold))
-                                            .foregroundColor(.white)
-                                        Text("CANCELAR")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundColor(.white)
-                                    }
                                 } else {
                                     VStack(spacing: 1) {
-                                        Image(systemName: "camera.viewfinder")
-                                            .font(.system(size: 20))
+                                        Image(systemName: viewModel.cornerStep > 0 ? "xmark" : "hand.tap")
+                                            .font(.system(size: 18, weight: .bold))
                                             .foregroundColor(.white)
-                                        Text("CAPTURAR")
+                                        Text(viewModel.cornerStep > 0 ? "BORRAR" : "TAP")
                                             .font(.system(size: 8, weight: .bold))
                                             .foregroundColor(.white)
                                     }

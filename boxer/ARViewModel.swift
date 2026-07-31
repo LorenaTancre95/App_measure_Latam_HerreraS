@@ -22,13 +22,13 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
-    @Published var cornerInstruction: String = "1/4 — Tocá la esquina superior IZQUIERDA (frente)"
-    @Published var frozenFrameImage: UIImage? = nil   // frozen photo shown while user taps corners
+    @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
 
-    // 0 = nothing tapped yet, 1 = P0 done, 2 = P0+P1 done
+    // 0 = none tapped, 1 = P0, 2 = P0+P1, 3 = P0..P2
     var cornerStep: Int {
         if cornerInstruction.hasPrefix("2/") { return 1 }
         if cornerInstruction.hasPrefix("3/") { return 2 }
+        if cornerInstruction.hasPrefix("4/") { return 3 }
         return 0
     }
 
@@ -43,12 +43,6 @@ final class ARViewModel: ObservableObject {
     private var boxNodes: [SCNNode] = []
     private var cornerPts: [simd_float3] = []
     private var markerNodes: [SCNNode] = []
-    // Frozen-frame data saved at captureFrame() time
-    private var frozenDepthMap: CVPixelBuffer? = nil
-    private var frozenCameraTransform: simd_float4x4 = matrix_identity_float4x4
-    private var frozenIntrinsics: simd_float3x3 = matrix_identity_float3x3
-    private var frozenDisplayTransform: CGAffineTransform = .identity
-    private var frozenCapturedSize: CGSize = .zero
 
     func setup(sceneView: ARSCNView) {
         self.sceneView = sceneView
@@ -59,7 +53,7 @@ final class ARViewModel: ObservableObject {
         let pallet = try? PalletDetector()
         await MainActor.run {
             self.palletDetector = pallet
-            self.status = "Encuadrá la caja y presioná CAPTURAR"
+            self.status = "Apuntá a la caja y tocá las esquinas"
         }
     }
 
@@ -303,60 +297,24 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Freeze-frame capture
-
-    /// Freezes the current ARKit frame (RGB + depth + camera data).
-    /// After calling this, the user taps corners on the frozen photo; measureAtTap uses the saved data.
-    func captureFrame() {
-        guard let sceneView, let frame = sceneView.session.currentFrame else {
-            status = "Sin frame AR"; return
-        }
-        guard let depthMap = frame.sceneDepth?.depthMap else {
-            status = "Sin LiDAR depth — esperá que se calibre"; return
-        }
-
-        clearAll()  // remove overlays before snapshot so they don't appear on the frozen image
-
-        // sceneView.snapshot() captures exactly what ARKit renders on screen.
-        // This guarantees that a tap at (tx, ty) on the frozen image maps to the same
-        // screen coordinate as displayTransform.inverted() expects — no aspect-ratio mismatch.
-        let screenShot = sceneView.snapshot()
-
-        // ARKit recycles pixel buffers between frames — copy the depth map so
-        // the background LiDAR scan can access it safely after the frame is gone.
-        frozenDepthMap         = ARViewModel.copyPixelBuffer(depthMap)
-        frozenCameraTransform  = frame.camera.transform
-        frozenIntrinsics       = frame.camera.intrinsics
-        frozenDisplayTransform = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
-        frozenCapturedSize     = CGSize(width:  CVPixelBufferGetWidth(frame.capturedImage),
-                                        height: CVPixelBufferGetHeight(frame.capturedImage))
-        frozenFrameImage       = screenShot
-
-        status             = "Foto congelada ✓"
-        cornerInstruction  = "1/4 — Esquina sup. IZQUIERDA"
-    }
-
-    // MARK: - Corner tap measurement (4 taps on frozen photo → exact OBB)
+    // MARK: - Corner tap measurement (4 taps on live view → exact OBB)
     //
-    // Tap order (tapped on the frozen image displayed on screen):
+    // Like the iPhone Measure app: tap on the live AR view, ARKit raycasts the surface
+    // and returns a 3D world-space point. Points are stable across phone movements
+    // because they're in ARKit's world coordinate frame.
+    //
+    // Tap order:
     //   P0: front-top-LEFT
     //   P1: front-top-RIGHT  → width  = |P1−P0|
     //   P2: front-bottom-RIGHT → height = |P2−P1|
-    //   P3: any point on side or top face → depth = |dot(P3−P0, cross(widthAxis, heightAxis))|
-    //
-    // No LiDAR depth scan needed — depth comes directly from the user-tapped P3.
+    //   P3: any point on side or top face → depth = |dot(P3−P0, cross(widthAxis,heightAxis))|
 
     func measureAtTap(at point: CGPoint) {
         guard !isProcessing else { return }
         guard let sceneView else { status = "Sin AR view"; return }
 
-        guard frozenDepthMap != nil else {
-            status = "Primero presioná CAPTURAR"
-            return
-        }
-
-        guard let pt3D = tapTo3DFrozen(point: point) else {
-            status = "Sin profundidad — tocá sobre la caja (no el fondo)"
+        guard let pt3D = tapTo3D(point: point) else {
+            status = "Sin superficie — tocá directamente sobre la caja"
             return
         }
 
@@ -381,8 +339,6 @@ final class ARViewModel: ObservableObject {
             isProcessing = true
             if let det = computeBox() {
                 placeBoxes([det], in: sceneView)
-                frozenFrameImage = nil
-                frozenDepthMap   = nil
             } else {
                 status = "Geometría inválida — intentá de nuevo"
                 cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
@@ -431,183 +387,47 @@ final class ARViewModel: ObservableObject {
                            worldTransform: worldTransform, label: "caja")
     }
 
-    // Scans the copied LiDAR depth buffer and returns the max depth projection
-    // in the face-normal direction within the front face's width×height footprint.
-    // Pure static function — no actor isolation, safe to call from Task.detached.
-    nonisolated private static func scanDepth(
-        cornerPts: [simd_float3],
-        depthBuffer: CVPixelBuffer?,
-        bufSize: CGSize,
-        intrinsics: simd_float3x3,
-        cameraT: simd_float4x4
-    ) -> Float {
-        guard let dBuf = depthBuffer, cornerPts.count >= 3 else { return 0 }
+    // Maps a screen tap to a 3D world-space point using ARKit raycasting + LiDAR depth fallback.
+    // Points are in ARKit world space → stable across phone movements between taps.
+    private func tapTo3D(point: CGPoint) -> simd_float3? {
+        guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
 
-        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
-        let widthVec  = P1 - P0
-        let heightVec = P2 - P1
-        let width  = simd_length(widthVec)
-        let height = simd_length(heightVec)
-        guard width > 0.01, height > 0.01 else { return 0 }
-
-        let widthAxis   = simd_normalize(widthVec)
-        let heightAxis  = simd_normalize(heightVec)
-        let depthAxis   = simd_normalize(simd_cross(widthAxis, heightAxis))
-        let frontCenter = (P0 + P2) * 0.5
-
-        let bufW = Float(bufSize.width)
-        let bufH = Float(bufSize.height)
-        let dW   = CVPixelBufferGetWidth(dBuf)
-        let dH   = CVPixelBufferGetHeight(dBuf)
-        let fx   = intrinsics[0][0], fy = intrinsics[1][1]
-        let cx   = intrinsics[2][0], cy = intrinsics[2][1]
-        // Allow 1.5× face extents to catch back corners even with slight tap error
-        let halfW = width  * 0.75
-        let halfH = height * 0.75
-
-        CVPixelBufferLockBaseAddress(dBuf, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(dBuf, .readOnly) }
-        let rb   = CVPixelBufferGetBytesPerRow(dBuf)
-        guard let base = CVPixelBufferGetBaseAddress(dBuf) else { return 0 }
-
-        var maxProj: Float = 0
-        for py in 0..<dH {
-            let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
-            for px in 0..<dW {
-                let d = row[px]
-                guard d > 0.05, d < 8.0 else { continue }
-                let ix  = Float(px) / Float(dW) * bufW
-                let iy  = Float(py) / Float(dH) * bufH
-                let cam = simd_float4((ix - cx) / fx * d, (iy - cy) / fy * d, -d, 1)
-                let ww  = cameraT * cam
-                let p3d = simd_float3(ww.x, ww.y, ww.z) / ww.w
-                let dp  = p3d - frontCenter
-                let wP  = simd_dot(dp, widthAxis)
-                let hP  = simd_dot(dp, heightAxis)
-                let dP  = simd_dot(dp, depthAxis)
-                guard abs(wP) < halfW, abs(hP) < halfH,
-                      dP > 0.01, dP < 3.0 else { continue }
-                if dP > maxProj { maxProj = dP }
-            }
+        // Primary: ARKit raycasting — uses LiDAR mesh if sceneReconstruction is enabled.
+        // Works on any detected surface (planes, mesh faces).
+        if let query = sceneView.raycastQuery(from: point,
+                                               allowing: .existingPlaneGeometry,
+                                               alignment: .any),
+           let result = sceneView.session.raycast(query).first {
+            let col = result.worldTransform.columns.3
+            return simd_float3(col.x, col.y, col.z)
         }
-        return maxProj
-    }
-
-    nonisolated private static func buildBox(cornerPts: [simd_float3], depth: Float) -> Detection3D? {
-        guard cornerPts.count >= 3, depth > 0.01 else { return nil }
-        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2]
-        let widthVec  = P1 - P0
-        let heightVec = P2 - P1
-        let width  = simd_length(widthVec)
-        let height = simd_length(heightVec)
-        guard width > 0.01, height > 0.01 else { return nil }
-        let widthAxis  = simd_normalize(widthVec)
-        let heightAxis = simd_normalize(heightVec)
-        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
-        let frontCenter = (P0 + P2) * 0.5
-        let center = frontCenter + depthAxis * depth * 0.5
-        let yaw  = atan2(widthAxis.z, widthAxis.x)
-        let cosY = cos(yaw), sinY = sin(yaw)
-        let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(center.x, center.y, center.z, 1)
-        )
-        return Detection3D(center: center,
-                           size: simd_float3(width, height, depth),
-                           yaw: yaw, confidence: 1.0,
-                           worldTransform: worldTransform, label: "caja")
-    }
-
-    // Deep-copies a CVPixelBuffer so ARKit's buffer recycling cannot corrupt it.
-    nonisolated private static func copyPixelBuffer(_ src: CVPixelBuffer) -> CVPixelBuffer? {
-        let fmt = CVPixelBufferGetPixelFormatType(src)
-        let w   = CVPixelBufferGetWidth(src)
-        let h   = CVPixelBufferGetHeight(src)
-        var dst: CVPixelBuffer?
-        guard CVPixelBufferCreate(kCFAllocatorDefault, w, h, fmt, nil, &dst) == kCVReturnSuccess,
-              let dst else { return nil }
-        CVPixelBufferLockBaseAddress(src, .readOnly)
-        CVPixelBufferLockBaseAddress(dst, [])
-        memcpy(CVPixelBufferGetBaseAddress(dst)!,
-               CVPixelBufferGetBaseAddress(src)!,
-               CVPixelBufferGetBytesPerRow(src) * h)
-        CVPixelBufferUnlockBaseAddress(dst, [])
-        CVPixelBufferUnlockBaseAddress(src, .readOnly)
-        return dst
-    }
-
-    private func tapTo3DFrozen(point: CGPoint) -> simd_float3? {
-        guard let depthBuffer = frozenDepthMap else { return nil }
-
-        let bufW = Float(frozenCapturedSize.width)
-        let bufH = Float(frozenCapturedSize.height)
-        let dW   = CVPixelBufferGetWidth(depthBuffer)
-        let dH   = CVPixelBufferGetHeight(depthBuffer)
-
-        let invertedT = frozenDisplayTransform.inverted()
-        let normTap   = CGPoint(x: point.x / viewportSize.width, y: point.y / viewportSize.height)
-        let normImg   = normTap.applying(invertedT)
-        let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
-        let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
-
-        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
-        let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
-        guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-
-        // 5×5 neighbourhood: minimum valid depth = closest surface (the box, not the background)
-        var bestD  = Float.infinity
-        var bestDX = tapDX, bestDY = tapDY
-        for dy in -2...2 {
-            let py = max(0, min(dH - 1, tapDY + dy))
-            let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
-            for dx in -2...2 {
-                let px = max(0, min(dW - 1, tapDX + dx))
-                let val = row[px]
-                if val > 0.05, val < 8.0, val < bestD { bestD = val; bestDX = px; bestDY = py }
-            }
+        if let query = sceneView.raycastQuery(from: point,
+                                               allowing: .estimatedPlane,
+                                               alignment: .any),
+           let result = sceneView.session.raycast(query).first {
+            let col = result.worldTransform.columns.3
+            return simd_float3(col.x, col.y, col.z)
         }
-        guard bestD < Float.infinity else { return nil }
 
-        let intr = frozenIntrinsics
-        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
-        let ix  = Float(bestDX) / Float(dW) * bufW
-        let iy  = Float(bestDY) / Float(dH) * bufH
-        let cam = simd_float4((ix - cx) / fx * bestD, (iy - cy) / fy * bestD, -bestD, 1)
-        let w   = frozenCameraTransform * cam
-        return simd_float3(w.x, w.y, w.z) / w.w
-    }
-
-    // Live tapTo3D (kept for reference, not used in frozen flow)
-    private func tapTo3D(point: CGPoint, frame: ARFrame) -> simd_float3? {
+        // Fallback: read LiDAR depth directly.
         guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
-
         let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let dW   = CVPixelBufferGetWidth(depthBuffer)
         let dH   = CVPixelBufferGetHeight(depthBuffer)
-
         let displayT  = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
         let invertedT = displayT.inverted()
         let normTap   = CGPoint(x: point.x / viewportSize.width, y: point.y / viewportSize.height)
         let normImg   = normTap.applying(invertedT)
         let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
         let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
-
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-
-        // Sample 5×5 neighbourhood around tap; use the CLOSEST valid depth.
-        // LiDAR at box edges/corners reads the background (wall, floor) in mixed pixels.
-        // The minimum valid depth selects the foreground surface (the box itself).
-        var bestD  = Float.infinity
-        var bestDX = tapDX, bestDY = tapDY
+        var bestD = Float.infinity, bestDX = tapDX, bestDY = tapDY
         for dy in -2...2 {
-            let py = max(0, min(dH - 1, tapDY + dy))
+            let py  = max(0, min(dH - 1, tapDY + dy))
             let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
             for dx in -2...2 {
                 let px = max(0, min(dW - 1, tapDX + dx))
@@ -616,7 +436,6 @@ final class ARViewModel: ObservableObject {
             }
         }
         guard bestD < Float.infinity else { return nil }
-
         let intr = frame.camera.intrinsics
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
         let ix  = Float(bestDX) / Float(dW) * bufW
@@ -652,8 +471,6 @@ final class ARViewModel: ObservableObject {
         cornerPts.removeAll()
         markerNodes.forEach { $0.removeFromParentNode() }
         markerNodes.removeAll()
-        frozenFrameImage = nil
-        frozenDepthMap   = nil
         cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
     }
 
