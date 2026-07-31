@@ -333,18 +333,18 @@ final class ARViewModel: ObservableObject {
         frozenFrameImage       = screenShot
 
         status             = "Foto congelada ✓"
-        cornerInstruction  = "1/3 — Esquina sup. IZQUIERDA"
+        cornerInstruction  = "1/4 — Esquina sup. IZQUIERDA"
     }
 
-    // MARK: - Corner tap measurement (3 taps on frozen photo → OBB with auto depth)
+    // MARK: - Corner tap measurement (4 taps on frozen photo → exact OBB)
     //
     // Tap order (tapped on the frozen image displayed on screen):
     //   P0: front-top-LEFT
-    //   P1: front-top-RIGHT  → width = |P1−P0|
+    //   P1: front-top-RIGHT  → width  = |P1−P0|
     //   P2: front-bottom-RIGHT → height = |P2−P1|
+    //   P3: any point on side or top face → depth = |dot(P3−P0, cross(widthAxis, heightAxis))|
     //
-    // After 3 taps, depth is computed automatically by scanning the frozen LiDAR map
-    // for points behind the front face within its width×height footprint.
+    // No LiDAR depth scan needed — depth comes directly from the user-tapped P3.
 
     func measureAtTap(at point: CGPoint) {
         guard !isProcessing else { return }
@@ -368,47 +368,67 @@ final class ARViewModel: ObservableObject {
         switch cornerPts.count {
         case 1:
             debugInfo = "P0: (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
-            cornerInstruction = "2/3 — Esquina sup. DERECHA"
-            status = "Esquina 1 marcada ✓"
+            cornerInstruction = "2/4 — Esquina sup. DERECHA"
+            status = "Esquina 1 ✓"
         case 2:
-            cornerInstruction = "3/3 — Esquina inf. DERECHA"
-            status = "Esquina 2 marcada ✓"
+            cornerInstruction = "3/4 — Esquina inf. DERECHA"
+            status = "Esquina 2 ✓"
         case 3:
+            cornerInstruction = "4/4 — Tocá la cara lateral o tapa"
+            status = "Esquina 3 ✓"
+        case 4:
             cornerInstruction = ""
             isProcessing = true
-            status = "Calculando profundidad..."
-            // Capture all data on main thread before going to background —
-            // avoids actor-isolation issues and ensures safe buffer access.
-            let pts  = cornerPts
-            let sv   = sceneView
-            let dBuf = frozenDepthMap          // already a copy made in captureFrame()
-            let bSz  = frozenCapturedSize
-            let intr = frozenIntrinsics
-            let camT = frozenCameraTransform
-            Task.detached { [weak self] in
-                let depth = ARViewModel.scanDepth(
-                    cornerPts: pts, depthBuffer: dBuf,
-                    bufSize: bSz, intrinsics: intr, cameraT: camT)
-                let det = ARViewModel.buildBox(cornerPts: pts, depth: depth)
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    if let det {
-                        self.placeBoxes([det], in: sv)
-                        self.frozenFrameImage = nil
-                        self.frozenDepthMap   = nil
-                    } else {
-                        self.status = "Sin datos LiDAR — acercate más e intentá de nuevo"
-                        self.cornerInstruction = "1/3 — Esquina sup. IZQUIERDA"
-                    }
-                    self.cornerPts.removeAll()
-                    self.markerNodes.forEach { $0.removeFromParentNode() }
-                    self.markerNodes.removeAll()
-                    self.isProcessing = false
-                }
+            if let det = computeBox() {
+                placeBoxes([det], in: sceneView)
+                frozenFrameImage = nil
+                frozenDepthMap   = nil
+            } else {
+                status = "Geometría inválida — intentá de nuevo"
+                cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
             }
+            cornerPts.removeAll()
+            markerNodes.forEach { $0.removeFromParentNode() }
+            markerNodes.removeAll()
+            isProcessing = false
         default:
             break
         }
+    }
+
+    // Exact OBB from 4 tapped corners.
+    // widthAxis = normalize(P1−P0), heightAxis = normalize(P2−P1)
+    // depthAxis = normalize(cross(widthAxis, heightAxis))
+    // depth = |dot(P3−P0, depthAxis)|
+    private func computeBox() -> Detection3D? {
+        guard cornerPts.count == 4 else { return nil }
+        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2], P3 = cornerPts[3]
+        let widthVec  = P1 - P0
+        let heightVec = P2 - P1
+        let width  = simd_length(widthVec)
+        let height = simd_length(heightVec)
+        guard width > 0.01, height > 0.01 else { return nil }
+        let widthAxis  = simd_normalize(widthVec)
+        let heightAxis = simd_normalize(heightVec)
+        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
+        let depthProj  = simd_dot(P3 - P0, depthAxis)
+        let depth      = abs(depthProj)
+        guard depth > 0.01 else { return nil }
+        let frontCenter = P0 + widthVec * 0.5 + heightVec * 0.5
+        let depthSign: Float = depthProj >= 0 ? 1 : -1
+        let center = frontCenter + depthAxis * depthSign * depth * 0.5
+        let yaw  = atan2(widthAxis.z, widthAxis.x)
+        let cosY = cos(yaw), sinY = sin(yaw)
+        let worldTransform = simd_float4x4(
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
+            simd_float4(center.x, center.y, center.z, 1)
+        )
+        return Detection3D(center: center,
+                           size: simd_float3(width, height, depth),
+                           yaw: yaw, confidence: 1.0,
+                           worldTransform: worldTransform, label: "caja")
     }
 
     // Scans the copied LiDAR depth buffer and returns the max depth projection
@@ -634,7 +654,7 @@ final class ARViewModel: ObservableObject {
         markerNodes.removeAll()
         frozenFrameImage = nil
         frozenDepthMap   = nil
-        cornerInstruction = "1/3 — Esquina sup. IZQUIERDA"
+        cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
     }
 
     // MARK: - Dataset capture
