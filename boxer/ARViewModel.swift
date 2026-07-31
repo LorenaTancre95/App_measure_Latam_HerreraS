@@ -332,8 +332,8 @@ final class ARViewModel: ObservableObject {
             cornerInstruction = "3/4 — Esquina inf. DERECHA"
             status = "Esquina 2 ✓"
         case 3:
-            cornerInstruction = "4/4 — Tocá la cara lateral o tapa"
-            status = "Esquina 3 ✓"
+            cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
+            status = "Esquina 3 ✓ — Moverse para ver la esquina de atrás"
         case 4:
             cornerInstruction = ""
             isProcessing = true
@@ -464,6 +464,25 @@ final class ARViewModel: ObservableObject {
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
+    func undoLastCorner() {
+        guard !cornerPts.isEmpty else { clearAll(); return }
+        cornerPts.removeLast()
+        if let last = markerNodes.last {
+            last.removeFromParentNode()
+            markerNodes.removeLast()
+        }
+        switch cornerPts.count {
+        case 0: cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
+        case 1: cornerInstruction = "2/4 — Esquina sup. DERECHA"
+        case 2: cornerInstruction = "3/4 — Esquina inf. DERECHA"
+        case 3: cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
+        default: break
+        }
+        debugInfo = cornerPts.isEmpty ? "" : cornerPts.enumerated().map { i, p in
+            "P\(i): (\(String(format:"%.2f",p.x)),\(String(format:"%.2f",p.y)),\(String(format:"%.2f",p.z))m)\n"
+        }.joined()
+    }
+
     func clearAll() {
         clearBoxes()
         debugBBoxes.removeAll()

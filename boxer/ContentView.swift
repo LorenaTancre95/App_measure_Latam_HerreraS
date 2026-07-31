@@ -228,21 +228,27 @@ struct ContentView: View {
                         .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                     } else {
                         // TAP mode: tocá las esquinas directamente sobre la caja en vivo
-                        Button(action: { viewModel.clearAll() }) {
+                        // UNDO deshace el último punto; tap cuando no hay puntos limpia todo
+                        Button(action: {
+                            if viewModel.cornerStep > 0 {
+                                viewModel.undoLastCorner()
+                            } else {
+                                viewModel.clearAll()
+                            }
+                        }) {
                             ZStack {
                                 Circle().fill(.white).frame(width: 70, height: 70)
                                 Circle()
-                                    .fill(viewModel.isProcessing ? Color.gray
-                                          : viewModel.cornerStep > 0 ? Color.red : Color.orange)
+                                    .fill(viewModel.isProcessing ? Color.gray : Color.orange)
                                     .frame(width: 60, height: 60)
                                 if viewModel.isProcessing {
                                     ProgressView().tint(.white)
                                 } else {
                                     VStack(spacing: 1) {
-                                        Image(systemName: viewModel.cornerStep > 0 ? "xmark" : "hand.tap")
+                                        Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "hand.tap")
                                             .font(.system(size: 18, weight: .bold))
                                             .foregroundColor(.white)
-                                        Text(viewModel.cornerStep > 0 ? "BORRAR" : "TAP")
+                                        Text(viewModel.cornerStep > 0 ? "UNDO" : "TAP")
                                             .font(.system(size: 8, weight: .bold))
                                             .foregroundColor(.white)
                                     }
@@ -346,9 +352,8 @@ func boxColor(_ index: Int) -> Color {
 
 // MARK: - Box Guide
 
-/// Perspective wireframe diagram with 3 numbered tap-point markers on the front face.
-/// Corner order: 1=front-top-left, 2=front-top-right, 3=front-bottom-right
-/// Depth is computed automatically from LiDAR — no 4th tap needed.
+/// Perspective wireframe diagram with 4 numbered tap-point markers.
+/// Tap order: 1=front-top-left, 2=front-top-right, 3=front-bottom-right, 4=back-top-right corner.
 struct BoxGuideView: View {
     let tappedCount: Int   // 0..3: how many corners have been recorded
     let instruction: String
@@ -367,8 +372,13 @@ struct BoxGuideView: View {
     private static let tBR = CGPoint(x: 154, y: 90)
     private static let tBL = CGPoint(x: 64,  y: 90)
 
-    // Only 3 tap positions: the 3 front-face corners
-    private static let tapPositions: [CGPoint] = [fTL, fTR, fBR]
+    // 4 tap positions: 3 front corners + back-top-right corner (gives full depth via dot product)
+    private static let tapPositions: [CGPoint] = [
+        fTL,   // 1 — front top left
+        fTR,   // 2 — front top right
+        fBR,   // 3 — front bottom right
+        tTR,   // 4 — back top right corner (depth = |dot(P3−P0, depthAxis)|)
+    ]
 
     private func markerColor(_ idx: Int) -> Color {
         if idx < tappedCount { return .green }
@@ -400,10 +410,19 @@ struct BoxGuideView: View {
                     edge(fBL, tBL, dashed: true)
                     edge(tTL, tBL, dashed: true)
                     edge(tBL, tBR, dashed: true)
+
+                    // Pulsing ring around tTR when waiting for the 4th tap
+                    if tappedCount == 3 {
+                        let target = BoxGuideView.tTR
+                        var ring = Path()
+                        ring.addEllipse(in: CGRect(x: target.x - 16, y: target.y - 16, width: 32, height: 32))
+                        ctx.stroke(ring, with: .color(.yellow.opacity(0.85)),
+                                   style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
+                    }
                 }
                 .frame(width: BoxGuideView.W, height: BoxGuideView.H)
 
-                ForEach(0..<3, id: \.self) { i in
+                ForEach(0..<4, id: \.self) { i in
                     ZStack {
                         Circle()
                             .fill(markerColor(i))
@@ -426,7 +445,7 @@ struct BoxGuideView: View {
             if !shortInstruction.isEmpty {
                 Text(shortInstruction)
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white)
+                    .foregroundColor(tappedCount == 3 ? .yellow : .white)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: BoxGuideView.W)
