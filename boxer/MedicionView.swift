@@ -12,6 +12,9 @@ struct MedicionView: View {
     @State private var volsVal = ""
     @State private var pesoUnitVal = ""
 
+    // Unidad usada en la última medición AR (determina labels y conversión)
+    @State private var measureUnit: ARViewModel.MeasureUnit = .cm
+
     // Ítems confirmados
     @State private var items: [MedicionItem] = []
 
@@ -59,11 +62,12 @@ struct MedicionView: View {
         }
         .sheet(isPresented: $showSheet) { tipoSheet }
         .fullScreenCover(isPresented: $showCamera) {
-            ARCameraWrapper { det in
-                // AR devuelve metros → convertir a cm
-                cVal = String(format: "%.0f", det.size.x * 100)
-                lVal = String(format: "%.0f", det.size.z * 100)
-                aVal = String(format: "%.0f", det.size.y * 100)
+            ARCameraWrapper { det, unit in
+                // Convertir metros → unidad seleccionada en el AR app
+                measureUnit = unit
+                cVal = unit.format(det.size.x)
+                lVal = unit.format(det.size.z)
+                aVal = unit.format(det.size.y)
                 if camTrigger == .unitario && !volsVal.isEmpty && !pesoUnitVal.isEmpty {
                     agregarItem()
                 }
@@ -94,9 +98,9 @@ struct MedicionView: View {
 
     private var dimensionesRow: some View {
         HStack(spacing: 8) {
-            MedicionField(label: "C (cm)", value: $cVal)
-            MedicionField(label: "L (cm)", value: $lVal)
-            MedicionField(label: "A (cm)", value: $aVal)
+            MedicionField(label: "C (\(measureUnit.rawValue))", value: $cVal)
+            MedicionField(label: "L (\(measureUnit.rawValue))", value: $lVal)
+            MedicionField(label: "A (\(measureUnit.rawValue))", value: $aVal)
             Button(action: { camTrigger = .manual; showCamera = true }) {
                 Image(systemName: "camera.fill")
                     .font(.system(size: 20)).foregroundColor(.white)
@@ -251,8 +255,18 @@ struct MedicionView: View {
     private var totalPesoReal: Double { items.reduce(0) { $0 + $1.pesoTotal } }
     private var totalPesoCubado: Double { items.reduce(0) { $0 + $1.pesoCubado } }
 
+    // Converts a field value (in measureUnit) to cm for internal storage.
+    private func toCm(_ str: String) -> Double? {
+        guard let val = Double(str) else { return nil }
+        switch measureUnit {
+        case .cm:     return val
+        case .m:      return val * 100
+        case .inches: return val * 2.54
+        }
+    }
+
     private func agregarItem() {
-        guard let c = Double(cVal), let l = Double(lVal), let a = Double(aVal),
+        guard let c = toCm(cVal), let l = toCm(lVal), let a = toCm(aVal),
               let v = Int(volsVal), let p = Double(pesoUnitVal),
               c > 0, l > 0, a > 0, v > 0 else { return }
         items.append(MedicionItem(c: c, l: l, a: a, vols: v, pesoUnit: p))
@@ -344,12 +358,12 @@ struct TipoCapturaSheet: View {
 
 // MARK: - Wrapper de la cámara AR
 struct ARCameraWrapper: View {
-    let onConfirm: (DetectionInfo) -> Void
+    let onConfirm: (DetectionInfo, ARViewModel.MeasureUnit) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ContentView(onConfirm: { det in
-            onConfirm(det)
+        ContentView(onConfirm: { det, unit in
+            onConfirm(det, unit)
         })
         .ignoresSafeArea()
         .overlay(alignment: .topLeading) {

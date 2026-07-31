@@ -12,7 +12,7 @@ struct ContentView: View {
     @StateObject private var viewModel = ARViewModel()
     @StateObject private var signInMgr = GoogleSignInManager.shared
     /// Cuando se pasa este callback, ContentView muestra USAR/REMEDIAR en lugar del modo standalone.
-    var onConfirm: ((DetectionInfo) -> Void)?
+    var onConfirm: ((DetectionInfo, ARViewModel.MeasureUnit) -> Void)?
 
     var body: some View {
         ZStack {
@@ -174,7 +174,7 @@ struct ContentView: View {
                                     .background(.white.opacity(0.15)).cornerRadius(10)
                                     .overlay(RoundedRectangle(cornerRadius: 10).stroke(.white.opacity(0.3), lineWidth: 1))
                             }
-                            Button(action: { confirm(viewModel.detections[0]) }) {
+                            Button(action: { confirm(viewModel.detections[0], viewModel.measureUnit) }) {
                                 Text("USAR")
                                     .font(.system(size: 14, weight: .heavy)).foregroundColor(.white)
                                     .frame(maxWidth: .infinity).frame(height: 46)
