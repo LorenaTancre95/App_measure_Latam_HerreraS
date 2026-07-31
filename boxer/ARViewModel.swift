@@ -23,6 +23,7 @@ final class ARViewModel: ObservableObject {
     @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
     @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
+    @Published var crosshairHit: Bool = false          // surface detected at center crosshair
 
     // 0=none, 1=P0, 2=P0+P1, 3=P0..P2, 4=all 4 placed (awaiting confirm)
     var cornerStep: Int {
@@ -332,6 +333,12 @@ final class ARViewModel: ObservableObject {
     //   P1: front-top-RIGHT  → width  = |P1−P0|
     //   P2: front-bottom-RIGHT → height = |P2−P1|
     //   P3: any point on side or top face → depth = |dot(P3−P0, cross(widthAxis,heightAxis))|
+
+    // Captures the 3D point at the screen center (crosshair aim-and-capture flow).
+    func captureCenter() {
+        let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
+        measureAtTap(at: center)
+    }
 
     func measureAtTap(at point: CGPoint) {
         guard !isProcessing else { return }

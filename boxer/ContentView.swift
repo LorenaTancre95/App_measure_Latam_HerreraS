@@ -81,10 +81,16 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            // TAP mode: box guide diagram shown while measuring
+            // TAP mode: aiming crosshair + guide diagram + CAPTURAR button
             if viewModel.measureMode == .tap,
                !viewModel.isProcessing,
                viewModel.detections.isEmpty {
+
+                // Crosshair in the absolute center of the screen
+                AimingCrosshairView(hit: viewModel.crosshairHit,
+                                    step: viewModel.cornerStep)
+                    .allowsHitTesting(false)
+
                 VStack {
                     Spacer()
                     HStack(alignment: .bottom) {
@@ -93,8 +99,48 @@ struct ContentView: View {
                             instruction: viewModel.cornerInstruction
                         )
                         .padding(.leading, 16)
-                        .padding(.bottom, 96)
                         Spacer()
+                    }
+                    // CAPTURAR / MEDIR button — bottom center, thumb-reachable
+                    if viewModel.cornerStep < 4 {
+                        Button(action: { viewModel.captureCenter() }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "scope")
+                                    .font(.system(size: 18, weight: .bold))
+                                Text("CAPTURAR")
+                                    .font(.system(size: 16, weight: .heavy))
+                            }
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 54)
+                            .background(viewModel.crosshairHit ? Color.yellow : Color.white.opacity(0.85))
+                            .cornerRadius(16)
+                            .padding(.horizontal, 60)
+                        }
+                        .padding(.bottom, 24)
+                    } else {
+                        HStack(spacing: 12) {
+                            Button(action: { viewModel.undoLastCorner() }) {
+                                Label("UNDO P3", systemImage: "arrow.uturn.backward")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(height: 50)
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color.orange.opacity(0.9))
+                                    .cornerRadius(14)
+                            }
+                            Button(action: { viewModel.confirmBox() }) {
+                                Label("MEDIR", systemImage: "checkmark.circle.fill")
+                                    .font(.system(size: 15, weight: .heavy))
+                                    .foregroundColor(.black)
+                                    .frame(height: 50)
+                                    .frame(maxWidth: .infinity)
+                                    .background(Color.green)
+                                    .cornerRadius(14)
+                            }
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 24)
                     }
                 }
             }
@@ -235,64 +281,31 @@ struct ContentView: View {
                         }
                         .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                     } else {
-                        // TAP mode: corners tapped directly on the live AR view.
-                        // cornerStep 0   → TAP (start)
-                        // cornerStep 1-3 → UNDO (remove last point)
-                        // cornerStep 4   → MEDIR (confirm + compute box)
-                        VStack(spacing: 6) {
-                            Button(action: {
-                                if viewModel.cornerStep == 4 {
-                                    viewModel.confirmBox()
-                                } else if viewModel.cornerStep > 0 {
-                                    viewModel.undoLastCorner()
+                        // TAP mode: CAPTURAR is at the bottom center; this button just resets/undoes
+                        Button(action: {
+                            if viewModel.cornerStep > 0 { viewModel.undoLastCorner() }
+                            else { viewModel.clearAll() }
+                        }) {
+                            ZStack {
+                                Circle().fill(.white).frame(width: 70, height: 70)
+                                Circle()
+                                    .fill(viewModel.isProcessing ? Color.gray : Color.orange)
+                                    .frame(width: 60, height: 60)
+                                if viewModel.isProcessing {
+                                    ProgressView().tint(.white)
                                 } else {
-                                    viewModel.clearAll()
-                                }
-                            }) {
-                                ZStack {
-                                    Circle().fill(.white).frame(width: 70, height: 70)
-                                    Circle()
-                                        .fill(viewModel.isProcessing ? Color.gray
-                                              : viewModel.cornerStep == 4 ? Color.green : Color.orange)
-                                        .frame(width: 60, height: 60)
-                                    if viewModel.isProcessing {
-                                        ProgressView().tint(.white)
-                                    } else if viewModel.cornerStep == 4 {
-                                        VStack(spacing: 1) {
-                                            Image(systemName: "checkmark.circle")
-                                                .font(.system(size: 18, weight: .bold))
-                                                .foregroundColor(.white)
-                                            Text("MEDIR")
-                                                .font(.system(size: 8, weight: .bold))
-                                                .foregroundColor(.white)
-                                        }
-                                    } else {
-                                        VStack(spacing: 1) {
-                                            Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "hand.tap")
-                                                .font(.system(size: 18, weight: .bold))
-                                                .foregroundColor(.white)
-                                            Text(viewModel.cornerStep > 0 ? "UNDO" : "TAP")
-                                                .font(.system(size: 8, weight: .bold))
-                                                .foregroundColor(.white)
-                                        }
+                                    VStack(spacing: 1) {
+                                        Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "xmark")
+                                            .font(.system(size: 18, weight: .bold))
+                                            .foregroundColor(.white)
+                                        Text(viewModel.cornerStep > 0 ? "UNDO" : "BORRAR")
+                                            .font(.system(size: 8, weight: .bold))
+                                            .foregroundColor(.white)
                                     }
                                 }
                             }
-                            .disabled(viewModel.isProcessing)
-
-                            // When all 4 are placed, show a small UNDO below to re-do P3
-                            if viewModel.cornerStep == 4 {
-                                Button(action: { viewModel.undoLastCorner() }) {
-                                    Text("UNDO P3")
-                                        .font(.system(size: 10, weight: .bold))
-                                        .foregroundColor(.white)
-                                        .padding(.horizontal, 10)
-                                        .padding(.vertical, 4)
-                                        .background(Color.orange.opacity(0.85))
-                                        .cornerRadius(8)
-                                }
-                            }
                         }
+                        .disabled(viewModel.isProcessing)
                     }
 
                     // Botón de captura de foto para dataset
@@ -393,6 +406,52 @@ struct DetectionCard: View {
 func boxColor(_ index: Int) -> Color {
     let colors: [Color] = [.red, .green, .blue]
     return colors[index % colors.count]
+}
+
+// MARK: - Aiming Crosshair
+
+/// Full-screen overlay with a crosshair at the center for aim-and-capture flow.
+/// Ring turns yellow when the surface under the crosshair is detected.
+struct AimingCrosshairView: View {
+    let hit: Bool    // surface detected at center
+    let step: Int    // 0-3: which corner is next
+
+    private let ringSize: CGFloat = 52
+    private let lineLen: CGFloat  = 14
+
+    var body: some View {
+        GeometryReader { geo in
+            let cx = geo.size.width  / 2
+            let cy = geo.size.height / 2
+            Canvas { ctx, _ in
+                let color: Color = hit ? .yellow : .white
+                // Outer ring
+                let ringRect = CGRect(x: cx - ringSize/2, y: cy - ringSize/2,
+                                      width: ringSize, height: ringSize)
+                ctx.stroke(Path(ellipseIn: ringRect), with: .color(color.opacity(0.9)),
+                           style: StrokeStyle(lineWidth: 2))
+                // Cross lines
+                func line(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
+                    var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
+                    ctx.stroke(p, with: .color(color.opacity(0.9)),
+                               style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                }
+                line(cx - ringSize/2 - lineLen, cy, cx - ringSize/2, cy)
+                line(cx + ringSize/2, cy, cx + ringSize/2 + lineLen, cy)
+                line(cx, cy - ringSize/2 - lineLen, cx, cy - ringSize/2)
+                line(cx, cy + ringSize/2, cx, cy + ringSize/2 + lineLen)
+                // Center dot
+                ctx.fill(Path(ellipseIn: CGRect(x: cx-3, y: cy-3, width: 6, height: 6)),
+                         with: .color(color))
+            }
+            // Step label inside the ring
+            Text("\(step + 1)/4")
+                .font(.system(size: 10, weight: .bold, design: .monospaced))
+                .foregroundColor(hit ? .yellow : .white.opacity(0.7))
+                .position(x: cx, y: cy + ringSize/2 + 18)
+        }
+        .ignoresSafeArea()
+    }
 }
 
 // MARK: - Box Guide
