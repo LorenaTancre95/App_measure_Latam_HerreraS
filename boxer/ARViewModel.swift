@@ -35,6 +35,29 @@ final class ARViewModel: ObservableObject {
 
     enum MeasureMode { case box, oversize, tap }
 
+    enum MeasureUnit: String, CaseIterable {
+        case cm = "cm", m = "m", inches = "in"
+        func convert(_ meters: Float) -> Float {
+            switch self {
+            case .cm:     return meters * 100
+            case .m:      return meters
+            case .inches: return meters * 39.3701
+            }
+        }
+        func format(_ meters: Float) -> String {
+            switch self {
+            case .cm:     return String(format: "%.0f",  convert(meters))
+            case .m:      return String(format: "%.2f",  convert(meters))
+            case .inches: return String(format: "%.1f",  convert(meters))
+            }
+        }
+        func formatBox(_ x: Float, _ y: Float, _ z: Float) -> String {
+            "\(format(x))×\(format(y))×\(format(z)) \(rawValue)"
+        }
+    }
+
+    @Published var measureUnit: MeasureUnit = .cm
+
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
     let viewfinderNorm = CGRect(x: 0.1, y: 0.18, width: 0.8, height: 0.64)
@@ -213,11 +236,11 @@ final class ARViewModel: ObservableObject {
             node.simdWorldTransform = det.worldTransform
             addWireframe(to: node, size: det.size, color: color, radius: 0.004)
             let label = det.label ?? "caja"
-            let sz = String(format: "%.0fx%.0fx%.0f cm", det.size.x*100, det.size.y*100, det.size.z*100)
+            let sz = measureUnit.formatBox(det.size.x, det.size.y, det.size.z)
             addLabel("\(label)\n\(sz)", to: node, offset: det.size.y/2+0.04)
             sceneView.scene.rootNode.addChildNode(node); boxNodes.append(node)
         }
-        let summary = detections.map { String(format:"%.0fx%.0fx%.0f cm",$0.size.x*100,$0.size.y*100,$0.size.z*100) }.joined(separator:" | ")
+        let summary = detections.map { measureUnit.formatBox($0.size.x, $0.size.y, $0.size.z) }.joined(separator:" | ")
         status = detections.isEmpty ? "Sin detecciones" : summary
         detections.forEach { self.detections.append(DetectionInfo(label: $0.label ?? "caja", size: $0.size, confidence: $0.confidence)) }
     }

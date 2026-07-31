@@ -114,8 +114,7 @@ struct ContentView: View {
                                 .font(.system(size: 14, weight: .semibold)).foregroundColor(.white)
                             Spacer()
                             let d = viewModel.detections[0]
-                            Text(String(format: "%.0fx%.0fx%.0f cm",
-                                        d.size.x*100, d.size.y*100, d.size.z*100))
+                            Text(viewModel.measureUnit.formatBox(d.size.x, d.size.y, d.size.z))
                                 .font(.system(size: 12, design: .monospaced)).foregroundColor(.white.opacity(0.8))
                         }
                         .padding(.horizontal, 14).padding(.vertical, 10)
@@ -148,7 +147,7 @@ struct ContentView: View {
                     HStack {
                         VStack(alignment: .leading, spacing: 6) {
                             ForEach(Array(viewModel.detections.enumerated()), id: \.element.id) { i, det in
-                                DetectionCard(detection: det, color: boxColor(i))
+                                DetectionCard(detection: det, color: boxColor(i), unit: viewModel.measureUnit)
                             }
                             Button(action: { viewModel.clearAll() }) {
                                 HStack(spacing: 6) {
@@ -198,6 +197,15 @@ struct ContentView: View {
                         modeButton("CAJA", mode: .box)
                         modeButton("OVERSIZE", mode: .oversize)
                         modeButton("TAP", mode: .tap)
+                    }
+                    .background(.black.opacity(0.45))
+                    .cornerRadius(8)
+
+                    // Unit selector: cm | m | in
+                    HStack(spacing: 0) {
+                        ForEach(ARViewModel.MeasureUnit.allCases, id: \.self) { unit in
+                            unitButton(unit)
+                        }
                     }
                     .background(.black.opacity(0.45))
                     .cornerRadius(8)
@@ -342,11 +350,25 @@ struct ContentView: View {
                 .cornerRadius(7)
         }
     }
+
+    @ViewBuilder
+    private func unitButton(_ unit: ARViewModel.MeasureUnit) -> some View {
+        let active = viewModel.measureUnit == unit
+        Button(action: { viewModel.measureUnit = unit }) {
+            Text(unit.rawValue)
+                .font(.system(size: 11, weight: .bold))
+                .foregroundColor(active ? .black : .white.opacity(0.6))
+                .padding(.horizontal, 10).padding(.vertical, 5)
+                .background(active ? Color.yellow : Color.clear)
+                .cornerRadius(7)
+        }
+    }
 }
 
 struct DetectionCard: View {
     let detection: DetectionInfo
     let color: Color
+    let unit: ARViewModel.MeasureUnit
 
     var body: some View {
         HStack(spacing: 8) {
@@ -356,15 +378,9 @@ struct DetectionCard: View {
             Text(detection.label)
                 .font(.system(size: 13, weight: .bold))
                 .foregroundColor(.white)
-            Text(String(format: "%.0fx%.0fx%.0f",
-                        detection.size.x * 100,
-                        detection.size.y * 100,
-                        detection.size.z * 100))
+            Text(unit.formatBox(detection.size.x, detection.size.y, detection.size.z))
                 .font(.system(size: 11, design: .monospaced))
-                .foregroundColor(.white.opacity(0.7))
-            Text("cm")
-                .font(.system(size: 11))
-                .foregroundColor(.white.opacity(0.5))
+                .foregroundColor(.white.opacity(0.8))
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
