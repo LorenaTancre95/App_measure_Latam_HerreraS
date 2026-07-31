@@ -24,11 +24,12 @@ final class ARViewModel: ObservableObject {
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
     @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
 
-    // 0 = none tapped, 1 = P0, 2 = P0+P1, 3 = P0..P2
+    // 0=none, 1=P0, 2=P0+P1, 3=P0..P2, 4=all 4 placed (awaiting confirm)
     var cornerStep: Int {
         if cornerInstruction.hasPrefix("2/") { return 1 }
         if cornerInstruction.hasPrefix("3/") { return 2 }
         if cornerInstruction.hasPrefix("4/") { return 3 }
+        if cornerInstruction.hasPrefix("✓")  { return 4 }
         return 0
     }
 
@@ -335,21 +336,28 @@ final class ARViewModel: ObservableObject {
             cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
             status = "Esquina 3 ✓ — Moverse para ver la esquina de atrás"
         case 4:
-            cornerInstruction = ""
-            isProcessing = true
-            if let det = computeBox() {
-                placeBoxes([det], in: sceneView)
-            } else {
-                status = "Geometría inválida — intentá de nuevo"
-                cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
-            }
-            cornerPts.removeAll()
-            markerNodes.forEach { $0.removeFromParentNode() }
-            markerNodes.removeAll()
-            isProcessing = false
+            // P3 placed — show marker so user can verify before computing
+            cornerInstruction = "✓ Verificá la esquina y tocá MEDIR"
+            status = "P3 colocado — ¿está bien? Tocá MEDIR o UNDO"
         default:
             break
         }
+    }
+
+    // Called by the MEDIR button after the user verifies all 4 markers.
+    func confirmBox() {
+        guard cornerPts.count == 4, let sceneView else { return }
+        isProcessing = true
+        if let det = computeBox() {
+            placeBoxes([det], in: sceneView)
+        } else {
+            status = "Geometría inválida — intentá de nuevo"
+            cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
+        }
+        cornerPts.removeAll()
+        markerNodes.forEach { $0.removeFromParentNode() }
+        markerNodes.removeAll()
+        isProcessing = false
     }
 
     // Exact OBB from 4 tapped corners.

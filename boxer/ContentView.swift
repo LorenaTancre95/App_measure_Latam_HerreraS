@@ -227,35 +227,64 @@ struct ContentView: View {
                         }
                         .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
                     } else {
-                        // TAP mode: tocá las esquinas directamente sobre la caja en vivo
-                        // UNDO deshace el último punto; tap cuando no hay puntos limpia todo
-                        Button(action: {
-                            if viewModel.cornerStep > 0 {
-                                viewModel.undoLastCorner()
-                            } else {
-                                viewModel.clearAll()
-                            }
-                        }) {
-                            ZStack {
-                                Circle().fill(.white).frame(width: 70, height: 70)
-                                Circle()
-                                    .fill(viewModel.isProcessing ? Color.gray : Color.orange)
-                                    .frame(width: 60, height: 60)
-                                if viewModel.isProcessing {
-                                    ProgressView().tint(.white)
+                        // TAP mode: corners tapped directly on the live AR view.
+                        // cornerStep 0   → TAP (start)
+                        // cornerStep 1-3 → UNDO (remove last point)
+                        // cornerStep 4   → MEDIR (confirm + compute box)
+                        VStack(spacing: 6) {
+                            Button(action: {
+                                if viewModel.cornerStep == 4 {
+                                    viewModel.confirmBox()
+                                } else if viewModel.cornerStep > 0 {
+                                    viewModel.undoLastCorner()
                                 } else {
-                                    VStack(spacing: 1) {
-                                        Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "hand.tap")
-                                            .font(.system(size: 18, weight: .bold))
-                                            .foregroundColor(.white)
-                                        Text(viewModel.cornerStep > 0 ? "UNDO" : "TAP")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundColor(.white)
+                                    viewModel.clearAll()
+                                }
+                            }) {
+                                ZStack {
+                                    Circle().fill(.white).frame(width: 70, height: 70)
+                                    Circle()
+                                        .fill(viewModel.isProcessing ? Color.gray
+                                              : viewModel.cornerStep == 4 ? Color.green : Color.orange)
+                                        .frame(width: 60, height: 60)
+                                    if viewModel.isProcessing {
+                                        ProgressView().tint(.white)
+                                    } else if viewModel.cornerStep == 4 {
+                                        VStack(spacing: 1) {
+                                            Image(systemName: "checkmark.circle")
+                                                .font(.system(size: 18, weight: .bold))
+                                                .foregroundColor(.white)
+                                            Text("MEDIR")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.white)
+                                        }
+                                    } else {
+                                        VStack(spacing: 1) {
+                                            Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "hand.tap")
+                                                .font(.system(size: 18, weight: .bold))
+                                                .foregroundColor(.white)
+                                            Text(viewModel.cornerStep > 0 ? "UNDO" : "TAP")
+                                                .font(.system(size: 8, weight: .bold))
+                                                .foregroundColor(.white)
+                                        }
                                     }
                                 }
                             }
+                            .disabled(viewModel.isProcessing)
+
+                            // When all 4 are placed, show a small UNDO below to re-do P3
+                            if viewModel.cornerStep == 4 {
+                                Button(action: { viewModel.undoLastCorner() }) {
+                                    Text("UNDO P3")
+                                        .font(.system(size: 10, weight: .bold))
+                                        .foregroundColor(.white)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 4)
+                                        .background(Color.orange.opacity(0.85))
+                                        .cornerRadius(8)
+                                }
+                            }
                         }
-                        .disabled(viewModel.isProcessing)
                     }
 
                     // Botón de captura de foto para dataset
@@ -411,7 +440,7 @@ struct BoxGuideView: View {
                     edge(tTL, tBL, dashed: true)
                     edge(tBL, tBR, dashed: true)
 
-                    // Pulsing ring around tTR when waiting for the 4th tap
+                    // Dashed ring around tTR when waiting for the 4th tap
                     if tappedCount == 3 {
                         let target = BoxGuideView.tTR
                         var ring = Path()
