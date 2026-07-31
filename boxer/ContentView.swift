@@ -212,25 +212,7 @@ struct ContentView: View {
                 }
             }
 
-            // Confidence slider bottom right
-            VStack {
-                Spacer()
-                HStack {
-                    Spacer()
-                    VStack(spacing: 2) {
-                        Text(String(format: "conf: %.1f", viewModel.confidenceThreshold))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.7))
-                        Slider(value: $viewModel.confidenceThreshold, in: 0.1...0.9, step: 0.1)
-                            .frame(width: 120)
-                            .tint(.white)
-                    }
-                }
-                .padding(.trailing, 20)
-                .padding(.bottom, 30)
-            }
-
-            // Capture button right centre + mode toggle + calibration state
+            // Right-side controls: unit selector + UNDO/BORRAR + Google sign-in
             HStack {
                 Spacer()
                 Text(viewModel.status)
@@ -238,15 +220,6 @@ struct ContentView: View {
                     .foregroundColor(.white.opacity(0.8))
                     .padding(.trailing, 12)
                 VStack(spacing: 8) {
-                    // CAJA / OVERSIZE / TAP toggle
-                    HStack(spacing: 0) {
-                        modeButton("CAJA", mode: .box)
-                        modeButton("OVERSIZE", mode: .oversize)
-                        modeButton("TAP", mode: .tap)
-                    }
-                    .background(.black.opacity(0.45))
-                    .cornerRadius(8)
-
                     // Unit selector: cm | m | in
                     HStack(spacing: 0) {
                         ForEach(ARViewModel.MeasureUnit.allCases, id: \.self) { unit in
@@ -256,71 +229,33 @@ struct ContentView: View {
                     .background(.black.opacity(0.45))
                     .cornerRadius(8)
 
-                    // Scan button (hidden in TAP mode — user taps directly on screen)
-                    if viewModel.measureMode != .tap {
-                        Button(action: { viewModel.detectNow() }) {
-                            ZStack {
-                                Circle()
-                                    .fill(.white)
-                                    .frame(width: 70, height: 70)
-                                Circle()
-                                    .fill(viewModel.isProcessing ? .gray : (viewModel.isCalibrated ? .blue : .orange))
-                                    .frame(width: 60, height: 60)
-                                if viewModel.isProcessing {
-                                    ProgressView().tint(.white)
-                                } else if !viewModel.isCalibrated {
-                                    Image(systemName: "arrow.down.to.line")
-                                        .font(.system(size: 22))
+                    // UNDO / BORRAR (secondary — primary action is CAPTURAR at bottom)
+                    Button(action: {
+                        if viewModel.cornerStep > 0 { viewModel.undoLastCorner() }
+                        else { viewModel.clearAll() }
+                    }) {
+                        ZStack {
+                            Circle().fill(.white).frame(width: 70, height: 70)
+                            Circle()
+                                .fill(viewModel.isProcessing ? Color.gray : Color.orange)
+                                .frame(width: 60, height: 60)
+                            if viewModel.isProcessing {
+                                ProgressView().tint(.white)
+                            } else {
+                                VStack(spacing: 1) {
+                                    Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "xmark")
+                                        .font(.system(size: 18, weight: .bold))
                                         .foregroundColor(.white)
-                                } else {
-                                    Image(systemName: viewModel.measureMode == .oversize ? "shippingbox.fill" : "cube.transparent.fill")
-                                        .font(.system(size: 24))
+                                    Text(viewModel.cornerStep > 0 ? "UNDO" : "BORRAR")
+                                        .font(.system(size: 8, weight: .bold))
                                         .foregroundColor(.white)
                                 }
                             }
                         }
-                        .disabled(viewModel.isProcessing || !viewModel.isCalibrated)
-                    } else {
-                        // TAP mode: CAPTURAR is at the bottom center; this button just resets/undoes
-                        Button(action: {
-                            if viewModel.cornerStep > 0 { viewModel.undoLastCorner() }
-                            else { viewModel.clearAll() }
-                        }) {
-                            ZStack {
-                                Circle().fill(.white).frame(width: 70, height: 70)
-                                Circle()
-                                    .fill(viewModel.isProcessing ? Color.gray : Color.orange)
-                                    .frame(width: 60, height: 60)
-                                if viewModel.isProcessing {
-                                    ProgressView().tint(.white)
-                                } else {
-                                    VStack(spacing: 1) {
-                                        Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "xmark")
-                                            .font(.system(size: 18, weight: .bold))
-                                            .foregroundColor(.white)
-                                        Text(viewModel.cornerStep > 0 ? "UNDO" : "BORRAR")
-                                            .font(.system(size: 8, weight: .bold))
-                                            .foregroundColor(.white)
-                                    }
-                                }
-                            }
-                        }
-                        .disabled(viewModel.isProcessing)
-                    }
-
-                    // Botón de captura de foto para dataset
-                    Button(action: { viewModel.captureAndUpload() }) {
-                        Image(systemName: "camera.fill")
-                            .font(.system(size: 18))
-                            .foregroundColor(.white)
-                            .frame(width: 44, height: 44)
-                            .background(.black.opacity(0.5))
-                            .clipShape(Circle())
-                            .overlay(Circle().stroke(.white.opacity(0.3), lineWidth: 1))
                     }
                     .disabled(viewModel.isProcessing)
 
-                    // Botón Google: sign-in si no hay sesión, o pedir Drive scope si falta
+                    // Google sign-in / Drive scope
                     if !signInMgr.isSignedIn || !signInMgr.hasDriveScope {
                         Button(action: {
                             if let vc = UIApplication.shared.connectedScenes
@@ -348,19 +283,6 @@ struct ContentView: View {
                 }
                 .padding(.trailing, 20)
             }
-        }
-    }
-
-    @ViewBuilder
-    private func modeButton(_ title: String, mode: ARViewModel.MeasureMode) -> some View {
-        let active = viewModel.measureMode == mode
-        Button(action: { viewModel.measureMode = mode }) {
-            Text(title)
-                .font(.system(size: 11, weight: .bold))
-                .foregroundColor(active ? .black : .white.opacity(0.6))
-                .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(active ? Color.white : Color.clear)
-                .cornerRadius(7)
         }
     }
 

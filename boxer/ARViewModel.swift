@@ -57,7 +57,14 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    @Published var measureUnit: MeasureUnit = .cm
+    @Published var measureUnit: MeasureUnit = .cm {
+        didSet {
+            // Rebuild 3D labels and status when unit changes
+            if let sv = sceneView, !lastDetections3D.isEmpty {
+                placeBoxes(lastDetections3D, in: sv)
+            }
+        }
+    }
 
     var sceneView: ARSCNView?
     var viewportSize: CGSize = UIScreen.main.bounds.size
@@ -68,6 +75,7 @@ final class ARViewModel: ObservableObject {
     private var boxNodes: [SCNNode] = []
     private var cornerPts: [simd_float3] = []
     private var markerNodes: [SCNNode] = []
+    private var lastDetections3D: [Detection3D] = []
 
     func setup(sceneView: ARSCNView) {
         self.sceneView = sceneView
@@ -226,6 +234,7 @@ final class ARViewModel: ObservableObject {
     // MARK: - Rendering
 
     private func placeBoxes(_ detections: [Detection3D], in sceneView: ARSCNView) {
+        lastDetections3D = detections
         clearBoxes()
         let colors: [UIColor] = [.systemGreen, .systemRed, .systemBlue]
         for (i, det) in detections.enumerated() {
@@ -523,6 +532,7 @@ final class ARViewModel: ObservableObject {
 
     func clearAll() {
         clearBoxes()
+        lastDetections3D.removeAll()
         debugBBoxes.removeAll()
         debugInfo = ""
         cornerPts.removeAll()
