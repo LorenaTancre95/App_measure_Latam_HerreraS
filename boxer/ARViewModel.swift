@@ -567,22 +567,35 @@ final class ARViewModel: ObservableObject {
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-        var bestD = Float.infinity, bestDX = tapDX, bestDY = tapDY
-        for dy in -2...2 {
-            let py  = max(0, min(dH - 1, tapDY + dy))
-            let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
-            for dx in -2...2 {
-                let px = max(0, min(dW - 1, tapDX + dx))
-                let val = row[px]
-                if val > 0.05, val < 8.0, val < bestD { bestD = val; bestDX = px; bestDY = py }
+
+        // Use the center pixel directly — critical for corners where the 5×5 minimum
+        // would grab a closer surface (e.g. box top) instead of the intended corner.
+        let centerRow = base.advanced(by: tapDY * rb).assumingMemoryBound(to: Float32.self)
+        let centerD   = centerRow[tapDX]
+        var chosenD   = Float.infinity
+        var chosenDX  = tapDX, chosenDY = tapDY
+        if centerD > 0.05, centerD < 8.0 {
+            chosenD = centerD
+        } else {
+            // Center invalid — find closest valid pixel in 3×3 neighborhood
+            for dy in -1...1 {
+                let py  = max(0, min(dH - 1, tapDY + dy))
+                let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
+                for dx in -1...1 {
+                    let px = max(0, min(dW - 1, tapDX + dx))
+                    let val = row[px]
+                    if val > 0.05, val < 8.0, val < chosenD {
+                        chosenD = val; chosenDX = px; chosenDY = py
+                    }
+                }
             }
         }
-        guard bestD < Float.infinity else { return nil }
+        guard chosenD < Float.infinity else { return nil }
         let intr = frame.camera.intrinsics
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
-        let ix  = Float(bestDX) / Float(dW) * bufW
-        let iy  = Float(bestDY) / Float(dH) * bufH
-        let cam = simd_float4((ix - cx) / fx * bestD, (iy - cy) / fy * bestD, -bestD, 1)
+        let ix  = Float(chosenDX) / Float(dW) * bufW
+        let iy  = Float(chosenDY) / Float(dH) * bufH
+        let cam = simd_float4((ix - cx) / fx * chosenD, (iy - cy) / fy * chosenD, -chosenD, 1)
         let w   = frame.camera.transform * cam
         return simd_float3(w.x, w.y, w.z) / w.w
     }
@@ -611,7 +624,7 @@ final class ARViewModel: ObservableObject {
 
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
-        let sphere = SCNSphere(radius: 0.012)
+        let sphere = SCNSphere(radius: 0.005)
         let mat = SCNMaterial()
         mat.diffuse.contents = UIColor.systemGreen
         sphere.materials = [mat]
