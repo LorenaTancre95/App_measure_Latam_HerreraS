@@ -29,25 +29,26 @@ final class ARViewModel: ObservableObject {
     @Published var lastCornerScreen: CGPoint? = nil
 
     // Nombres de las 3 dimensiones en orden de captura
-    // Instrucciones para cada tap en la cara superior (índice = tapPoints.count antes del tap)
+    // Instrucciones para cada uno de los 4 taps (2 para ANCHO + 2 para LARGO)
     static let stepLabels = [
-        "1° esquina — cara superior",
-        "2° esquina — misma arista",
-        "3° esquina — perpendicular"
+        "ANCHO — tocá el lado IZQUIERDO",
+        "ANCHO — tocá el lado DERECHO",
+        "LARGO — tocá el borde CERCANO (arriba)",
+        "LARGO — tocá el borde LEJANO (arriba)"
     ]
 
-    // Esquinas tocadas en la cara superior (máx 3)
+    // Puntos capturados: P0,P1 = ANCHO · P2,P3 = LARGO (máx 4)
     private(set) var tapPoints: [simd_float3] = []
     // Y del plano del suelo detectado por ARKit (espacio mundial, metros)
     @Published var floorY: Float? = nil
 
-    // 0=esperando 1°, 1=esperando 2°, 2=esperando 3°, 3=completo
-    var tapStep: Int { min(tapPoints.count, 3) }
-    var isDone: Bool { tapPoints.count >= 3 }
+    // 0..4 (4 = completo)
+    var tapStep: Int { min(tapPoints.count, 4) }
+    var isDone: Bool { tapPoints.count >= 4 }
 
-    // Distancia en vivo desde la última esquina tocada al crosshair
+    // Distancia en vivo solo durante el 2° tap de cada par (step 1 y 3)
     var liveDistance: Float? {
-        guard !tapPoints.isEmpty, !isDone, let aim = liveAimPoint else { return nil }
+        guard tapPoints.count % 2 == 1, !isDone, let aim = liveAimPoint else { return nil }
         return simd_distance(tapPoints[tapPoints.count - 1], aim)
     }
 
@@ -342,15 +343,12 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Medición por 3 esquinas en la cara superior + plano del suelo ARKit
+    // MARK: - Medición por 4 taps: 2 para ANCHO + 2 para LARGO · ALTO automático del suelo
     //
-    // Flujo: usuario toca 3 esquinas en L sobre la cara SUPERIOR de la caja.
-    //   P0 → P1 → P2  (forma de L)
-    // Cálculo:
-    //   dim1 = dist(P0, P1)   → una dimensión horizontal
-    //   dim2 = dist(P1, P2)   → dimensión perpendicular
-    //   ALTO = avg(Py) − floorY  (plano del suelo detectado por ARKit)
-    // Resultado: size.x=dim2→C, size.y=ALTO→A, size.z=dim1→L  (compatible con MedicionView)
+    // P0,P1 = lados izquierdo y derecho de la cara frontal → ANCHO = dist(P0,P1)
+    // P2,P3 = borde cercano y lejano de la cara superior  → LARGO = dist(P2,P3)
+    // ALTO  = avg(P2.y, P3.y) − floorY  (plano del suelo detectado por ARKit)
+    // Resultado: size.x=LARGO→C, size.y=ALTO→A, size.z=ANCHO→L  (compatible con MedicionView)
 
     func captureCenter() {
         let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
@@ -368,12 +366,13 @@ final class ARViewModel: ObservableObject {
         guard let sv = sceneView else { return }
         placeMarker(at: pt3D, in: sv)
 
-        if let prev = tapPoints.last {
+        let isSecondInPair = tapPoints.count % 2 == 1
+        if isSecondInPair, let prev = tapPoints.last {
+            // 2° tap del par: dibujamos la línea y mostramos la distancia
             let d = simd_distance(prev, pt3D)
             drawLine(from: prev, to: pt3D, in: sv)
-            debugInfo += "P\(tapPoints.count-1)→P\(tapPoints.count): \(String(format:"%.1f", d*100)) cm\n"
-        } else {
-            debugInfo += "P0: (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z)) m)\n"
+            let dimName = tapPoints.count == 1 ? "ANCHO" : "LARGO"
+            debugInfo += "\(dimName): \(String(format:"%.1f", d*100)) cm\n"
         }
 
         tapPoints.append(pt3D)
@@ -385,20 +384,19 @@ final class ARViewModel: ObservableObject {
             status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
         } else {
             instruction = Self.stepLabels[tapPoints.count]
-            status = "Esquina \(tapPoints.count) ✓ — \(Self.stepLabels[tapPoints.count])"
+            status = Self.stepLabels[tapPoints.count]
         }
     }
 
-    // 3 esquinas en la cara superior → dimensiones de la caja.
-    // ALTO = promedio Y de los puntos − floorY (ARKit). Fallback 15 cm si no hay piso.
+    // ANCHO=dist(P0,P1) · LARGO=dist(P2,P3) · ALTO=avgY(P2,P3)−floorY
     private func detectionFromPoints() -> DetectionInfo {
-        let p0 = tapPoints[0], p1 = tapPoints[1], p2 = tapPoints[2]
-        let dim1 = simd_distance(p0, p1)
-        let dim2 = simd_distance(p1, p2)
-        let avgY = (p0.y + p1.y + p2.y) / 3.0
+        let ancho = simd_distance(tapPoints[0], tapPoints[1])
+        let largo = simd_distance(tapPoints[2], tapPoints[3])
+        let avgY  = (tapPoints[2].y + tapPoints[3].y) / 2.0
         let alto: Float = floorY.map { fy in max(0.03, avgY - fy) } ?? 0.15
+        // size.x=largo→C, size.y=alto→A, size.z=ancho→L
         return DetectionInfo(label: "caja",
-                             size: simd_float3(dim2, alto, dim1),
+                             size: simd_float3(largo, alto, ancho),
                              confidence: 1.0)
     }
 
@@ -558,19 +556,19 @@ final class ARViewModel: ObservableObject {
             last.removeFromParentNode()
             markerNodes.removeLast()
         }
-        // La línea existe a partir del 2° punto (prevCount >= 2)
-        if prevCount >= 2, let lastLine = lineNodes.last {
+        // La línea se dibuja al completar cada par (prevCount par: 2 o 4)
+        if prevCount % 2 == 0, let lastLine = lineNodes.last {
             lastLine.removeFromParentNode()
             lineNodes.removeLast()
         }
 
         if tapPoints.isEmpty {
             instruction = Self.stepLabels[0]
-            status = "Apuntá a la cara superior y tocá una esquina"
+            status = Self.stepLabels[0]
             debugInfo = ""
         } else {
             instruction = Self.stepLabels[tapPoints.count]
-            status = "Deshecho — ahora: \(Self.stepLabels[tapPoints.count])"
+            status = "Deshecho — \(Self.stepLabels[tapPoints.count])"
         }
     }
 
@@ -585,7 +583,7 @@ final class ARViewModel: ObservableObject {
         lineNodes.forEach { $0.removeFromParentNode() }
         lineNodes.removeAll()
         instruction = Self.stepLabels[0]
-        status = "Apuntá a la cara superior y tocá una esquina"
+        status = Self.stepLabels[0]
     }
 
     // MARK: - Frame capture
