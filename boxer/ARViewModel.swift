@@ -24,6 +24,7 @@ final class ARViewModel: ObservableObject {
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
     @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
     @Published var crosshairHit: Bool = false          // surface detected at center crosshair
+    @Published var isSnapping: Bool = false            // crosshair snapped to a feature point
     @Published var liveAimPoint: simd_float3? = nil   // current 3D position under crosshair
     @Published var lastCornerScreen: CGPoint? = nil   // last placed corner projected to 2D screen
 
@@ -442,29 +443,76 @@ final class ARViewModel: ObservableObject {
                            worldTransform: worldTransform, label: "caja")
     }
 
+    // Finds the ARKit feature point closest to the ray through `screenPoint`.
+    // Returns nil if no point is within `snapRadius` meters of the ray.
+    // nonisolated + static → safe to call from SceneKit render thread.
+    nonisolated static func nearestFeaturePoint(
+        frame: ARFrame,
+        screenPoint: CGPoint,
+        viewportSize: CGSize,
+        snapRadius: Float = 0.035
+    ) -> simd_float3? {
+        guard let pts = frame.rawFeaturePoints, !pts.points.isEmpty else { return nil }
+
+        // Ray origin = camera position in world space
+        let camT = frame.camera.transform
+        let origin = simd_float3(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
+
+        // Map portrait screen point → normalized image coords via displayTransform
+        let displayT = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
+        let norm = CGPoint(x: screenPoint.x / viewportSize.width,
+                           y: screenPoint.y / viewportSize.height)
+        let normImg = norm.applying(displayT.inverted())
+
+        // Ray direction in world space using camera intrinsics
+        let intr = frame.camera.intrinsics
+        let res  = frame.camera.imageResolution
+        let imgX = Float(normImg.x) * Float(res.width)
+        let imgY = Float(normImg.y) * Float(res.height)
+        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
+        // In ARKit camera space: X right, Y up, looking in -Z
+        let dirCam  = simd_float4((imgX - cx) / fx, -(imgY - cy) / fy, -1, 0)
+        let dirWorld4 = camT * dirCam
+        let dir = simd_normalize(simd_float3(dirWorld4.x, dirWorld4.y, dirWorld4.z))
+
+        // Find feature point with smallest perpendicular distance to ray
+        var bestPerp = snapRadius
+        var bestPt: simd_float3? = nil
+        for pt in pts.points {
+            let v = pt - origin
+            let proj = simd_dot(v, dir)
+            guard proj > 0.08, proj < 6.0 else { continue }  // must be in front, within 6m
+            let perp = simd_distance(origin + dir * proj, pt)
+            if perp < bestPerp { bestPerp = perp; bestPt = pt }
+        }
+        return bestPt
+    }
+
     // Maps a screen tap to a 3D world-space point using ARKit raycasting + LiDAR depth fallback.
     // Points are in ARKit world space → stable across phone movements between taps.
     private func tapTo3D(point: CGPoint) -> simd_float3? {
         guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
 
-        // Primary: ARKit raycasting — uses LiDAR mesh if sceneReconstruction is enabled.
-        // Works on any detected surface (planes, mesh faces).
-        if let query = sceneView.raycastQuery(from: point,
-                                               allowing: .existingPlaneGeometry,
-                                               alignment: .any),
-           let result = sceneView.session.raycast(query).first {
-            let col = result.worldTransform.columns.3
-            return simd_float3(col.x, col.y, col.z)
-        }
-        if let query = sceneView.raycastQuery(from: point,
-                                               allowing: .estimatedPlane,
-                                               alignment: .any),
-           let result = sceneView.session.raycast(query).first {
-            let col = result.worldTransform.columns.3
-            return simd_float3(col.x, col.y, col.z)
+        // Tier 1: ARKit mesh/plane raycast — most accurate when mesh is built up.
+        for target: ARRaycastTarget in [.existingPlaneGeometry, .estimatedPlane] {
+            if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
+               let r = sceneView.session.raycast(q).first {
+                isSnapping = false
+                let col = r.worldTransform.columns.3
+                return simd_float3(col.x, col.y, col.z)
+            }
         }
 
-        // Fallback: direct LiDAR depth — prefer smoothed (temporal filter) over raw.
+        // Tier 2: Feature point snap — snaps to ARKit-tracked visual features near the ray.
+        // Great for box edges and corners that ARKit hasn't built into planes yet.
+        if let snapped = ARViewModel.nearestFeaturePoint(frame: frame, screenPoint: point,
+                                                          viewportSize: viewportSize) {
+            isSnapping = true
+            return snapped
+        }
+        isSnapping = false
+
+        // Tier 3: Direct LiDAR depth — prefer smoothed (temporal filter) over raw.
         guard let depthBuffer = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap else { return nil }
         let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))

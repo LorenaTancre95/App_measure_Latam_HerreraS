@@ -89,6 +89,7 @@ struct ContentView: View {
                 // Crosshair + live line + distance (Measure-app style)
                 AimingCrosshairView(
                     hit:              viewModel.crosshairHit,
+                    isSnapping:       viewModel.isSnapping,
                     step:             viewModel.cornerStep,
                     liveDistance:     viewModel.liveDistance,
                     lastCornerScreen: viewModel.lastCornerScreen,
@@ -344,6 +345,7 @@ func boxColor(_ index: Int) -> Color {
 /// - Ring turns yellow when a surface is detected
 struct AimingCrosshairView: View {
     let hit: Bool
+    let isSnapping: Bool
     let step: Int
     let liveDistance: Float?
     let lastCornerScreen: CGPoint?
@@ -358,7 +360,8 @@ struct AimingCrosshairView: View {
             let cy = geo.size.height / 2
             ZStack {
                 Canvas { ctx, _ in
-                    let color: Color = hit ? .yellow : .white
+                    // Orange = snapped to feature point (edge/corner), yellow = surface hit, white = no hit
+                    let color: Color = isSnapping ? .orange : (hit ? .yellow : .white)
 
                     // Dashed live line from last placed point to crosshair center
                     if let lcs = lastCornerScreen {
@@ -408,7 +411,7 @@ struct AimingCrosshairView: View {
                 // Step counter below crosshair
                 Text("\(step + 1)/4")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(hit ? .yellow : .white.opacity(0.7))
+                    .foregroundColor(isSnapping ? .orange : (hit ? .yellow : .white.opacity(0.7)))
                     .position(x: cx, y: cy + ringSize/2 + 18)
             }
         }

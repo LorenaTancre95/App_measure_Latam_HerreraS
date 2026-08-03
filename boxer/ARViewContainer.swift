@@ -63,6 +63,7 @@ struct ARViewContainer: UIViewRepresentable {
 
             // Raycast for live aim point
             var hitPoint: simd_float3? = nil
+            var snapping = false
             if let q = sv.raycastQuery(from: center, allowing: .existingPlaneGeometry, alignment: .any),
                let r = sv.session.raycast(q).first {
                 let c = r.worldTransform.columns.3
@@ -71,6 +72,17 @@ struct ARViewContainer: UIViewRepresentable {
                       let r = sv.session.raycast(q).first {
                 let c = r.worldTransform.columns.3
                 hitPoint = simd_float3(c.x, c.y, c.z)
+            }
+
+            // Feature point snap — orange ring when crosshair locks onto a box edge/corner
+            if hitPoint == nil, let frame = sv.session.currentFrame {
+                let vp = sv.bounds.size
+                if let snapped = ARViewModel.nearestFeaturePoint(frame: frame,
+                                                                  screenPoint: center,
+                                                                  viewportSize: vp) {
+                    hitPoint = snapped
+                    snapping = true
+                }
             }
 
             // Project last placed corner to 2D screen coordinates
@@ -86,6 +98,7 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
                 vm.crosshairHit = hit
+                vm.isSnapping = snapping
                 vm.liveAimPoint = hitPoint
                 vm.lastCornerScreen = projectedCorner
                 self.cachedLastCorner = vm.cornerPts.last
