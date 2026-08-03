@@ -141,7 +141,9 @@ final class ARViewModel: ObservableObject {
                 // ── YOLO: una sola vez sobre el frame actual ───────────
                 let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
                 let conf = await MainActor.run { self.confidenceThreshold }
-                let yoloBoxes = try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
+                let yoloBoxes = try await MainActor.run {
+                    try yoloDetector.detect(image: img, imageWidth: 640, imageHeight: 640, confThreshold: conf)
+                }
                 guard !yoloBoxes.isEmpty else {
                     await MainActor.run { self.status = "No cajas detectadas"; self.isProcessing = false }
                     return
@@ -184,9 +186,9 @@ final class ARViewModel: ObservableObject {
                 for i in 1...nShots {
                     await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                     let f = await MainActor.run { self.sceneView?.session.currentFrame }
-                    if let f, f.sceneDepth != nil,
-                       let det = BoxMeasurer2.measure(frame: f, yoloBox: best) {
-                        shots.append(det)
+                    if let f, f.sceneDepth != nil {
+                        let det = await MainActor.run { BoxMeasurer2.measure(frame: f, yoloBox: best) }
+                        if let det { shots.append(det) }
                     }
                     if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
                 }
@@ -306,7 +308,7 @@ final class ARViewModel: ObservableObject {
         Task.detached {
             do {
                 let conf = await MainActor.run { self.confidenceThreshold }
-                let optMask: CVPixelBuffer? = try await MainActor.run {
+                let optMask = try await MainActor.run {
                     try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf)
                 }
                 guard let mask = optMask else {
