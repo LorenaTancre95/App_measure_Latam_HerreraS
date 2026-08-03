@@ -191,11 +191,12 @@ final class ARViewModel: ObservableObject {
                     if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
                 }
 
+                let finalShots = shots
                 await MainActor.run {
-                    if shots.isEmpty {
+                    if finalShots.isEmpty {
                         self.status = "Sin geometría — apuntá más de frente o acercate"
                     } else if let sv = self.sceneView {
-                        self.placeBoxes([self.medianDetection(shots)], in: sv)
+                        self.placeBoxes([self.medianDetection(finalShots)], in: sv)
                     }
                     self.isProcessing = false
                 }
@@ -305,7 +306,10 @@ final class ARViewModel: ObservableObject {
         Task.detached {
             do {
                 let conf = await MainActor.run { self.confidenceThreshold }
-                guard let mask = try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf) else {
+                let optMask: CVPixelBuffer? = try await MainActor.run {
+                    try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf)
+                }
+                guard let mask = optMask else {
                     await MainActor.run { self.status = "No se detectó carga (bajá el umbral de confianza)"; self.isProcessing = false }
                     return
                 }
@@ -494,7 +498,7 @@ final class ARViewModel: ObservableObject {
         guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
 
         // Tier 1: ARKit mesh/plane raycast — most accurate when mesh is built up.
-        for target: ARRaycastTarget in [.existingPlaneGeometry, .estimatedPlane] {
+        for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
             if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
                let r = sceneView.session.raycast(q).first {
                 isSnapping = false
