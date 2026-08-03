@@ -408,11 +408,13 @@ struct AimingCrosshairView: View {
                         .position(x: cx, y: cy - ringSize/2 - 36)
                 }
 
-                // Step counter below crosshair
-                Text("\(step + 1)/4")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundColor(isSnapping ? .orange : (hit ? .yellow : .white.opacity(0.7)))
-                    .position(x: cx, y: cy + ringSize/2 + 18)
+                // Step counter below crosshair (hidden once all 4 are placed)
+                if step < 4 {
+                    Text("\(step + 1)/4")
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundColor(isSnapping ? .orange : (hit ? .yellow : .white.opacity(0.7)))
+                        .position(x: cx, y: cy + ringSize/2 + 18)
+                }
             }
         }
         .ignoresSafeArea()

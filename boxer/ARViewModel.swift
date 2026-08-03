@@ -368,12 +368,22 @@ final class ARViewModel: ObservableObject {
         guard !isProcessing else { return }
         guard let sceneView else { status = "Sin AR view"; return }
 
-        guard let pt3D = tapTo3D(point: point) else {
+        guard var pt3D = tapTo3D(point: point) else {
             status = "Sin superficie — tocá directamente sobre la caja"
             return
         }
 
         let n = cornerPts.count
+
+        // P2 = front-bottom-right: snap Y to the nearest horizontal plane below the top corners.
+        // This corrects for the user tapping slightly above the actual bottom edge of the box.
+        if n == 2, cornerPts.count >= 2 {
+            let topY = max(cornerPts[0].y, cornerPts[1].y)
+            if let surfaceY = nearestHorizontalPlaneY(below: topY) {
+                pt3D = simd_float3(pt3D.x, surfaceY, pt3D.z)
+            }
+        }
+
         cornerPts.append(pt3D)
         placeMarker(at: pt3D, in: sceneView)
         debugInfo += "P\(n): (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
@@ -390,12 +400,23 @@ final class ARViewModel: ObservableObject {
             cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
             status = "Esquina 3 ✓ — Moverse para ver la esquina de atrás"
         case 4:
-            // P3 placed — show marker so user can verify before computing
             cornerInstruction = "✓ Verificá la esquina y tocá MEDIR"
             status = "P3 colocado — ¿está bien? Tocá MEDIR o UNDO"
         default:
             break
         }
+    }
+
+    // Returns the Y of the highest detected horizontal plane that is strictly below `reference`.
+    // Used to snap the bottom corner (P2) to the actual surface the box is resting on.
+    private func nearestHorizontalPlaneY(below reference: Float) -> Float? {
+        guard let frame = sceneView?.session.currentFrame else { return nil }
+        let ys = frame.anchors
+            .compactMap { $0 as? ARPlaneAnchor }
+            .filter { $0.alignment == .horizontal }
+            .map { Float($0.transform.columns.3.y) }
+            .filter { $0 < reference - 0.02 } // must be at least 2 cm below top
+        return ys.max()
     }
 
     // Called by the MEDIR button after the user verifies all 4 markers.
