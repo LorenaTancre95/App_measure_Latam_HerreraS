@@ -421,31 +421,42 @@ final class ARViewModel: ObservableObject {
     private func computeBox() -> Detection3D? {
         guard cornerPts.count == 4 else { return nil }
         let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2], P3 = cornerPts[3]
-        let widthVec  = P1 - P0
-        let heightVec = P2 - P1
-        let width  = simd_length(widthVec)
-        let height = simd_length(heightVec)
-        guard width > 0.01, height > 0.01 else { return nil }
-        let widthAxis  = simd_normalize(widthVec)
-        let heightAxis = simd_normalize(heightVec)
-        let depthAxis  = simd_normalize(simd_cross(widthAxis, heightAxis))
-        let depthProj  = simd_dot(P3 - P0, depthAxis)
-        let depth      = abs(depthProj)
+
+        // Width: project P0→P1 onto the horizontal (XZ) plane.
+        // This removes Y noise from LiDAR at different depths and keeps the box upright.
+        let widthXZ = simd_float3(P1.x - P0.x, 0, P1.z - P0.z)
+        let width = simd_length(widthXZ)
+        guard width > 0.01 else { return nil }
+        let widthAxis = simd_normalize(widthXZ)
+
+        // Depth axis: horizontal, perpendicular to width
+        let depthAxis = simd_normalize(simd_cross(widthAxis, simd_float3(0, -1, 0)))
+
+        // Height: pure world-Y extent (top of P0/P1 down to P2)
+        let topY   = max(P0.y, P1.y)
+        let height = topY - P2.y
+        guard height > 0.01 else { return nil }
+
+        // Depth: project P3 onto horizontal depthAxis
+        let depthProj = simd_dot(P3 - P0, depthAxis)
+        let depth     = abs(depthProj)
         guard depth > 0.01 else { return nil }
-        let frontCenter = P0 + widthVec * 0.5 + heightVec * 0.5
+
+        // Center
+        let topCenter   = simd_float3((P0.x + P1.x) / 2, topY, (P0.z + P1.z) / 2)
+        let frontCenter = topCenter + simd_float3(0, -height / 2, 0)
         let depthSign: Float = depthProj >= 0 ? 1 : -1
-        let center = frontCenter + depthAxis * depthSign * depth * 0.5
-        // Full 3-axis rotation from the actual tapped corners:
-        //   col0 = widthAxis  (local X = box width direction)
-        //   col1 = -heightAxis (local Y = up; heightAxis points DOWN so negate)
-        //   col2 = depthAxis  (local Z = depth direction)
+        let center = frontCenter + depthAxis * depthSign * depth / 2
+
+        // Yaw-only world transform: box is always upright (world-Y aligned)
+        let yaw  = atan2(widthAxis.z, widthAxis.x)
+        let cosY = cos(yaw), sinY = sin(yaw)
         let worldTransform = simd_float4x4(
-            simd_float4(widthAxis.x,    widthAxis.y,    widthAxis.z,   0),
-            simd_float4(-heightAxis.x, -heightAxis.y,  -heightAxis.z,  0),
-            simd_float4(depthAxis.x,    depthAxis.y,    depthAxis.z,   0),
-            simd_float4(center.x,       center.y,       center.z,      1)
+            simd_float4( cosY, 0, sinY, 0),
+            simd_float4(    0, 1,    0, 0),
+            simd_float4(-sinY, 0, cosY, 0),
+            simd_float4(center.x, center.y, center.z, 1)
         )
-        let yaw = atan2(widthAxis.z, widthAxis.x)
         return Detection3D(center: center,
                            size: simd_float3(width, height, depth),
                            yaw: yaw, confidence: 1.0,
