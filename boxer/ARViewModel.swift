@@ -20,27 +20,33 @@ final class ARViewModel: ObservableObject {
     @Published var debugBBoxes: [(rect: CGRect, score: Float)] = []
     @Published var isCalibrated: Bool = false
     @Published var measureMode: MeasureMode = .tap
-    @Published var segmentationOverlay: UIImage? = nil   // shown during TAP mode preview
-    @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
-    @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
-    @Published var crosshairHit: Bool = false          // surface detected at center crosshair
-    @Published var isSnapping: Bool = false            // crosshair snapped to a feature point
-    @Published var liveAimPoint: simd_float3? = nil   // current 3D position under crosshair
-    @Published var lastCornerScreen: CGPoint? = nil   // last placed corner projected to 2D screen
+    @Published var segmentationOverlay: UIImage? = nil
+    @Published var debugInfo: String = ""
+    @Published var instruction: String = "1/3 — ANCHO: toca el 1° punto"
+    @Published var crosshairHit: Bool = false
+    @Published var isSnapping: Bool = false
+    @Published var liveAimPoint: simd_float3? = nil
+    @Published var lastCornerScreen: CGPoint? = nil
 
-    // Real-time distance from last placed corner to current crosshair aim
-    var liveDistance: Float? {
-        guard let last = cornerPts.last, let aim = liveAimPoint else { return nil }
-        return simd_distance(last, aim)
+    // Nombres de las 3 dimensiones en orden de captura
+    static let dimLabels = ["ANCHO", "LARGO", "ALTO"]
+
+    // Mediciones completadas (0=ANCHO, 1=LARGO, 2=ALTO), en metros
+    private(set) var measurements: [Float] = []
+    // Primer punto del par activo (nil si esperando 1° tap)
+    private(set) var firstPoint: simd_float3? = nil
+
+    // 0..5 = progreso de taps (2 por dimensión), 6 = completo
+    var tapStep: Int {
+        if isDone { return 6 }
+        return measurements.count * 2 + (firstPoint == nil ? 0 : 1)
     }
+    var isDone: Bool { measurements.count >= 3 }
 
-    // 0=none, 1=P0, 2=P0+P1, 3=P0..P2, 4=all 4 placed (awaiting confirm)
-    var cornerStep: Int {
-        if cornerInstruction.hasPrefix("2/") { return 1 }
-        if cornerInstruction.hasPrefix("3/") { return 2 }
-        if cornerInstruction.hasPrefix("4/") { return 3 }
-        if cornerInstruction.hasPrefix("✓")  { return 4 }
-        return 0
+    // Distancia en vivo desde el primer punto al crosshair (durante 2° tap)
+    var liveDistance: Float? {
+        guard let p0 = firstPoint, let aim = liveAimPoint else { return nil }
+        return simd_distance(p0, aim)
     }
 
     enum MeasureMode { case box, oversize, tap }
@@ -68,7 +74,6 @@ final class ARViewModel: ObservableObject {
 
     @Published var measureUnit: MeasureUnit = .cm {
         didSet {
-            // Rebuild 3D labels and status when unit changes
             if let sv = sceneView, !lastDetections3D.isEmpty {
                 placeBoxes(lastDetections3D, in: sv)
             }
@@ -82,8 +87,8 @@ final class ARViewModel: ObservableObject {
     private var palletDetector: PalletDetector?
     private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
-    private(set) var cornerPts: [simd_float3] = []
     private var markerNodes: [SCNNode] = []
+    private var lineNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
     func setup(sceneView: ARSCNView) {
@@ -99,10 +104,9 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Loads YOLO for CAJA mode. Frees SAM first to make room.
     nonisolated private func loadYOLO() async {
         await MainActor.run {
-            self.samSegmenter = nil   // free SAM memory before ONNX runtime loads
+            self.samSegmenter = nil
             self.status = "Cargando detector CAJA..."
         }
         guard let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx") else {
@@ -128,7 +132,6 @@ final class ARViewModel: ObservableObject {
             detectPallet(frame: frame, sceneView: sceneView); return
         }
 
-        // Lazy-load YOLO on first CAJA use (frees SAM first)
         guard let yoloDetector else {
             Task.detached { await self.loadYOLO() }
             return
@@ -138,7 +141,6 @@ final class ARViewModel: ObservableObject {
         status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
         Task.detached {
             do {
-                // ── YOLO: una sola vez sobre el frame actual ───────────
                 let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
                 let conf = await MainActor.run { self.confidenceThreshold }
                 let yoloBoxes = try await MainActor.run {
@@ -150,7 +152,6 @@ final class ARViewModel: ObservableObject {
                 }
                 let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
 
-                // ── Overlay 2D ─────────────────────────────────────────
                 let vp = await MainActor.run { self.viewportSize }
                 let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
                 let res = frame.camera.imageResolution
@@ -166,7 +167,6 @@ final class ARViewModel: ObservableObject {
                 }
                 await MainActor.run { self.debugBBoxes = screenBoxes }
 
-                // ── Viewfinder filter ──────────────────────────────────
                 let vfN = await MainActor.run { self.viewfinderNorm }
                 let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
                                  width: vfN.width*vp.width, height: vfN.height*vp.height)
@@ -178,9 +178,6 @@ final class ARViewModel: ObservableObject {
                 }
                 if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
 
-                // ── Multi-shot: BoxMeasurer2 × 5 frames, mediana ───────
-                // YOLO ya localizó la caja; ahora medimos 5 veces con LiDAR
-                // en frames consecutivos para promediar el ruido.
                 let nShots = 5
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
@@ -208,7 +205,6 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Combina N mediciones tomando la mediana de cada dimensión y del ángulo.
     private func medianDetection(_ dets: [Detection3D]) -> Detection3D {
         let n = dets.count
         let xs = dets.map { $0.size.x }.sorted()
@@ -234,7 +230,6 @@ final class ARViewModel: ObservableObject {
                            worldTransform: worldTransform, label: dets.first?.label)
     }
 
-    // Mediana circular: promedia sin/cos, devuelve la muestra más cercana a ese ángulo medio.
     private func circularMedianAngle(_ angles: [Float]) -> Float {
         guard angles.count > 1 else { return angles.first ?? 0 }
         let sinMean = angles.map { sin($0) }.reduce(0,+) / Float(angles.count)
@@ -296,7 +291,7 @@ final class ARViewModel: ObservableObject {
         n.constraints = [SCNBillboardConstraint()]; parent.addChildNode(n)
     }
 
-    // MARK: - Pallet mode (SAM segmentation + LiDAR bbox)
+    // MARK: - Pallet mode
 
     private func detectPallet(frame: ARFrame, sceneView: ARSCNView) {
         guard let detector = palletDetector else {
@@ -316,7 +311,6 @@ final class ARViewModel: ObservableObject {
                     return
                 }
 
-                // Multi-shot: medir 3 veces con LiDAR y tomar mediana
                 let nShots = 3
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
@@ -346,163 +340,98 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Corner tap measurement (4 taps on live view → exact OBB)
+    // MARK: - Medición por 3 pares de puntos (ANCHO, LARGO, ALTO)
     //
-    // Like the iPhone Measure app: tap on the live AR view, ARKit raycasts the surface
-    // and returns a 3D world-space point. Points are stable across phone movements
-    // because they're in ARKit's world coordinate frame.
+    // Flujo: para cada dimensión el usuario toca 2 puntos en la caja.
+    // La distancia 3D entre esos dos puntos ES la medida de esa dimensión.
+    // No hay OBB ni geometría compleja — funciona desde cualquier ángulo.
     //
-    // Tap order:
-    //   P0: front-top-LEFT
-    //   P1: front-top-RIGHT  → width  = |P1−P0|
-    //   P2: front-bottom-RIGHT → height = |P2−P1|
-    //   P3: any point on side or top face → depth = |dot(P3−P0, cross(widthAxis,heightAxis))|
+    // Orden de captura: ANCHO (0) → LARGO (1) → ALTO (2)
+    // Resultado en DetectionInfo.size: x=LARGO, y=ALTO, z=ANCHO
+    // (coincide con el mapeo de MedicionView: C=x, A=y, L=z)
 
-    // Captures the 3D point at the screen center (crosshair aim-and-capture flow).
     func captureCenter() {
         let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
         measureAtTap(at: center)
     }
 
     func measureAtTap(at point: CGPoint) {
-        guard !isProcessing else { return }
-        guard let sceneView else { status = "Sin AR view"; return }
+        guard !isProcessing, !isDone else { return }
 
-        guard var pt3D = tapTo3D(point: point) else {
+        guard let pt3D = tapTo3D(point: point) else {
             status = "Sin superficie — tocá directamente sobre la caja"
             return
         }
 
-        let n = cornerPts.count
+        guard let sv = sceneView else { return }
+        placeMarker(at: pt3D, in: sv)
 
-        // P2 = front-bottom-right: snap Y to the nearest horizontal plane below the top corners.
-        // This corrects for the user tapping slightly above the actual bottom edge of the box.
-        if n == 2, cornerPts.count >= 2 {
-            let topY = max(cornerPts[0].y, cornerPts[1].y)
-            if let surfaceY = nearestHorizontalPlaneY(below: topY) {
-                pt3D = simd_float3(pt3D.x, surfaceY, pt3D.z)
-            }
-        }
+        let dimIdx  = measurements.count
+        let dimName = Self.dimLabels[dimIdx]
 
-        cornerPts.append(pt3D)
-        placeMarker(at: pt3D, in: sceneView)
-        debugInfo += "P\(n): (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
+        if let p0 = firstPoint {
+            // Segundo tap — completa esta dimensión
+            let dist = simd_distance(p0, pt3D)
+            drawLine(from: p0, to: pt3D, in: sv)
+            measurements.append(dist)
+            firstPoint = nil
 
-        switch cornerPts.count {
-        case 1:
-            debugInfo = "P0: (\(String(format:"%.2f",pt3D.x)),\(String(format:"%.2f",pt3D.y)),\(String(format:"%.2f",pt3D.z))m)\n"
-            cornerInstruction = "2/4 — Esquina sup. DERECHA"
-            status = "Esquina 1 ✓"
-        case 2:
-            cornerInstruction = "3/4 — Esquina inf. DERECHA"
-            status = "Esquina 2 ✓"
-        case 3:
-            cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
-            status = "Esquina 3 ✓ — Moverse para ver la esquina de atrás"
-        case 4:
-            cornerInstruction = "✓ Verificá la esquina y tocá MEDIR"
-            status = "P3 colocado — ¿está bien? Tocá MEDIR o UNDO"
-        default:
-            break
-        }
-    }
+            let fmtd = measureUnit.format(dist) + " " + measureUnit.rawValue
+            debugInfo += "\(dimName): \(String(format: "%.1f", dist * 100)) cm\n"
 
-    // Returns the Y of the highest detected horizontal plane that is strictly below `reference`.
-    // Used to snap the bottom corner (P2) to the actual surface the box is resting on.
-    private func nearestHorizontalPlaneY(below reference: Float) -> Float? {
-        guard let frame = sceneView?.session.currentFrame else { return nil }
-        let ys = frame.anchors
-            .compactMap { $0 as? ARPlaneAnchor }
-            .filter { $0.alignment == .horizontal }
-            .map { Float($0.transform.columns.3.y) }
-            .filter { $0 < reference - 0.02 } // must be at least 2 cm below top
-        return ys.max()
-    }
-
-    // Called by the MEDIR button after the user verifies all 4 markers.
-    func confirmBox() {
-        guard cornerPts.count == 4, let sceneView else { return }
-        isProcessing = true
-        if let det = computeBox() {
-            placeBoxes([det], in: sceneView)
-            cornerPts.removeAll()
-            markerNodes.forEach { $0.removeFromParentNode() }
-            markerNodes.removeAll()
-        } else {
-            // Diagnose which dimension failed so user knows what to fix.
-            // Don't clear — keep markers so the user can just UNDO P3 and retry.
-            let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2], P3 = cornerPts[3]
-            let widthXZ = simd_float3(P1.x - P0.x, 0, P1.z - P0.z)
-            let widthAxis = simd_length(widthXZ) > 0.001
-                ? simd_normalize(widthXZ) : simd_float3(1, 0, 0)
-            let depthAxis = simd_normalize(simd_cross(widthAxis, simd_float3(0, -1, 0)))
-            let topY   = max(P0.y, P1.y)
-            let height = abs(topY - P2.y)
-            let depth  = abs(simd_dot(P3 - P0, depthAxis))
-            if simd_length(widthXZ) < 0.003 {
-                status = "P0 y P1 muy juntos — tocá esquinas más separadas"
-            } else if height < 0.003 {
-                status = "Sin altura — tocá la esquina de ABAJO del frente"
+            if isDone {
+                let det = detectionFromMeasurements()
+                detections.append(det)
+                instruction = "✓ Medición completa"
+                status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
             } else {
-                status = "Sin profundidad (\(Int(depth*100))cm) — P3 debe ser la esquina del FONDO, no del frente"
+                let next = Self.dimLabels[measurements.count]
+                instruction = "\(measurements.count + 1)/3 — \(next): toca el 1° punto"
+                status = "\(dimName) \(fmtd) ✓ — ahora medí el \(next)"
             }
-            cornerInstruction = "✓ Verificá la esquina y tocá MEDIR"
+        } else {
+            // Primer tap
+            firstPoint = pt3D
+            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 2° punto"
+            status = "\(dimName): ahora tocá el extremo opuesto"
+            debugInfo += "P\(dimIdx * 2): (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z)) m)\n"
         }
-        isProcessing = false
     }
 
-    // Exact OBB from 4 tapped corners.
-    // widthAxis = normalize(P1−P0), heightAxis = normalize(P2−P1)
-    // depthAxis = normalize(cross(widthAxis, heightAxis))
-    // depth = |dot(P3−P0, depthAxis)|
-    private func computeBox() -> Detection3D? {
-        guard cornerPts.count == 4 else { return nil }
-        let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2], P3 = cornerPts[3]
-
-        // Width: project P0→P1 onto the horizontal (XZ) plane.
-        // This removes Y noise from LiDAR at different depths and keeps the box upright.
-        let widthXZ = simd_float3(P1.x - P0.x, 0, P1.z - P0.z)
-        let width = simd_length(widthXZ)
-        guard width > 0.003 else { return nil }
-        let widthAxis = simd_normalize(widthXZ)
-
-        // Depth axis: horizontal, perpendicular to width
-        let depthAxis = simd_normalize(simd_cross(widthAxis, simd_float3(0, -1, 0)))
-
-        // Height: abs() absorbs tiny LiDAR noise inversions on small boxes
-        let topY   = max(P0.y, P1.y)
-        let height = abs(topY - P2.y)
-        guard height > 0.003 else { return nil }
-
-        // Depth: project P3 onto horizontal depthAxis
-        let depthProj = simd_dot(P3 - P0, depthAxis)
-        let depth     = abs(depthProj)
-        guard depth > 0.003 else { return nil }
-
-        // Center
-        let topCenter   = simd_float3((P0.x + P1.x) / 2, topY, (P0.z + P1.z) / 2)
-        let frontCenter = topCenter + simd_float3(0, -height / 2, 0)
-        let depthSign: Float = depthProj >= 0 ? 1 : -1
-        let center = frontCenter + depthAxis * depthSign * depth / 2
-
-        // Yaw-only world transform: box is always upright (world-Y aligned)
-        let yaw  = atan2(widthAxis.z, widthAxis.x)
-        let cosY = cos(yaw), sinY = sin(yaw)
-        let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(center.x, center.y, center.z, 1)
-        )
-        return Detection3D(center: center,
-                           size: simd_float3(width, height, depth),
-                           yaw: yaw, confidence: 1.0,
-                           worldTransform: worldTransform, label: "caja")
+    // DetectionInfo con size.x=LARGO, size.y=ALTO, size.z=ANCHO
+    // para compatibilidad con MedicionView (C=largo, A=alto, L=ancho)
+    private func detectionFromMeasurements() -> DetectionInfo {
+        let ancho = measurements[0]
+        let largo = measurements[1]
+        let alto  = measurements[2]
+        return DetectionInfo(label: "caja",
+                             size: simd_float3(largo, alto, ancho),
+                             confidence: 1.0)
     }
 
-    // Finds the ARKit feature point closest to the ray through `screenPoint`.
-    // Returns nil if no point is within `snapRadius` meters of the ray.
-    // nonisolated + static → safe to call from SceneKit render thread.
+    // Dibuja una línea amarilla entre los dos puntos de una dimensión medida
+    private func drawLine(from a: simd_float3, to b: simd_float3, in sceneView: ARSCNView) {
+        let dist = simd_distance(a, b)
+        guard dist > 0.001 else { return }
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.systemYellow
+        let cyl = SCNCylinder(radius: 0.003, height: CGFloat(dist))
+        cyl.materials = [mat]
+        let node = SCNNode(geometry: cyl)
+        node.simdPosition = (a + b) / 2
+        let dir = simd_normalize(b - a)
+        let up  = simd_float3(0, 1, 0)
+        let dot = simd_dot(up, dir)
+        if abs(dot) < 0.999 {
+            let axis = simd_normalize(simd_cross(up, dir))
+            node.simdRotation = simd_float4(axis.x, axis.y, axis.z, acos(dot))
+        }
+        sceneView.scene.rootNode.addChildNode(node)
+        lineNodes.append(node)
+    }
+
+    // MARK: - Utilidades LiDAR / AR
+
     nonisolated static func nearestFeaturePoint(
         frame: ARFrame,
         screenPoint: CGPoint,
@@ -510,44 +439,34 @@ final class ARViewModel: ObservableObject {
         snapRadius: Float = 0.035
     ) -> simd_float3? {
         guard let pts = frame.rawFeaturePoints, !pts.points.isEmpty else { return nil }
-
-        // Ray origin = camera position in world space
         let camT = frame.camera.transform
         let origin = simd_float3(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
-
-        // Map portrait screen point → normalized image coords via displayTransform
         let displayT = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
         let norm = CGPoint(x: screenPoint.x / viewportSize.width,
                            y: screenPoint.y / viewportSize.height)
         let normImg = norm.applying(displayT.inverted())
-
-        // Ray direction in world space using camera intrinsics
         let intr = frame.camera.intrinsics
         let res  = frame.camera.imageResolution
         let imgX = Float(normImg.x) * Float(res.width)
         let imgY = Float(normImg.y) * Float(res.height)
         let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
-        // In ARKit camera space: X right, Y up, looking in -Z
-        let dirCam  = simd_float4((imgX - cx) / fx, -(imgY - cy) / fy, -1, 0)
+        let dirCam   = simd_float4((imgX - cx) / fx, -(imgY - cy) / fy, -1, 0)
         let dirWorld4 = camT * dirCam
         let dir = simd_normalize(simd_float3(dirWorld4.x, dirWorld4.y, dirWorld4.z))
-
-        // Find feature point with smallest perpendicular distance to ray
         var bestPerp = snapRadius
         var bestPt: simd_float3? = nil
         for pt in pts.points {
             let v = pt - origin
             let proj = simd_dot(v, dir)
-            guard proj > 0.08, proj < 6.0 else { continue }  // must be in front, within 6m
+            guard proj > 0.08, proj < 6.0 else { continue }
             let perp = simd_distance(origin + dir * proj, pt)
             if perp < bestPerp { bestPerp = perp; bestPt = pt }
         }
         return bestPt
     }
 
-    // LiDAR depth → world-space point. nonisolated+static → safe from render thread.
-    // Uses smoothedSceneDepth (temporal filter) for stability, raw depth as fallback.
-    // Samples a 5×5 neighborhood and picks the closest valid depth to avoid edge bleed.
+    // Profundidad LiDAR → punto 3D en espacio mundo. Primero intenta el píxel central,
+    // luego expande a un entorno 3×3 si el central es inválido.
     nonisolated static func lidarPoint(
         frame: ARFrame,
         screenPoint: CGPoint,
@@ -568,8 +487,6 @@ final class ARViewModel: ObservableObject {
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
 
-        // Use the center pixel directly — critical for corners where the 5×5 minimum
-        // would grab a closer surface (e.g. box top) instead of the intended corner.
         let centerRow = base.advanced(by: tapDY * rb).assumingMemoryBound(to: Float32.self)
         let centerD   = centerRow[tapDX]
         var chosenD   = Float.infinity
@@ -577,7 +494,6 @@ final class ARViewModel: ObservableObject {
         if centerD > 0.05, centerD < 8.0 {
             chosenD = centerD
         } else {
-            // Center invalid — find closest valid pixel in 3×3 neighborhood
             for dy in -1...1 {
                 let py  = max(0, min(dH - 1, tapDY + dy))
                 let row = base.advanced(by: py * rb).assumingMemoryBound(to: Float32.self)
@@ -600,18 +516,11 @@ final class ARViewModel: ObservableObject {
         return simd_float3(w.x, w.y, w.z) / w.w
     }
 
-    // Maps a screen tap to a 3D world-space point.
-    // LiDAR first (actual visible pixel surface), plane raycast as fallback.
     private func tapTo3D(point: CGPoint) -> simd_float3? {
         guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
-
-        // Tier 1: LiDAR smoothedSceneDepth — always hits the real visible surface.
-        // Plane raycast can miss and hit a large background plane (wall/floor behind the object).
         if let lidar = ARViewModel.lidarPoint(frame: frame, screenPoint: point, viewportSize: viewportSize) {
             return lidar
         }
-
-        // Tier 2: Plane raycast — fallback when no LiDAR data available.
         for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
             if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
                let r = sceneView.session.raycast(q).first {
@@ -621,7 +530,6 @@ final class ARViewModel: ObservableObject {
         }
         return nil
     }
-
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
         let sphere = SCNSphere(radius: 0.005)
@@ -641,23 +549,48 @@ final class ARViewModel: ObservableObject {
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
-    func undoLastCorner() {
-        guard !cornerPts.isEmpty else { clearAll(); return }
-        cornerPts.removeLast()
-        if let last = markerNodes.last {
-            last.removeFromParentNode()
-            markerNodes.removeLast()
+
+    func undoLast() {
+        if isDone {
+            // Ya terminó — limpiar todo para rehacer
+            clearAll(); return
         }
-        switch cornerPts.count {
-        case 0: cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
-        case 1: cornerInstruction = "2/4 — Esquina sup. DERECHA"
-        case 2: cornerInstruction = "3/4 — Esquina inf. DERECHA"
-        case 3: cornerInstruction = "4/4 — Tocar la ESQUINA TRASERA superior"
-        default: break
+        if firstPoint != nil {
+            // Deshacer el primer punto del par actual
+            firstPoint = nil
+            if let last = markerNodes.last {
+                last.removeFromParentNode()
+                markerNodes.removeLast()
+            }
+            let dimIdx  = measurements.count
+            let dimName = Self.dimLabels[dimIdx]
+            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 1° punto"
+            status = "Punto deshecho — volvé a tocarlo"
+        } else if !measurements.isEmpty {
+            // Deshacer la última dimensión completada
+            measurements.removeLast()
+            // Quitar 2 marcadores (P0 y P1)
+            for _ in 0..<2 {
+                if let last = markerNodes.last {
+                    last.removeFromParentNode()
+                    markerNodes.removeLast()
+                }
+            }
+            // Quitar la línea de esa dimensión
+            if let lastLine = lineNodes.last {
+                lastLine.removeFromParentNode()
+                lineNodes.removeLast()
+            }
+            let dimIdx  = measurements.count
+            let dimName = Self.dimLabels[dimIdx]
+            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 1° punto"
+            status = "Medición deshecha — volvé a medir el \(dimName)"
+            debugInfo = measurements.enumerated().map { i, m in
+                "\(Self.dimLabels[i]): \(String(format: "%.1f", m * 100)) cm\n"
+            }.joined()
+        } else {
+            clearAll()
         }
-        debugInfo = cornerPts.isEmpty ? "" : cornerPts.enumerated().map { i, p in
-            "P\(i): (\(String(format:"%.2f",p.x)),\(String(format:"%.2f",p.y)),\(String(format:"%.2f",p.z))m)\n"
-        }.joined()
     }
 
     func clearAll() {
@@ -665,10 +598,14 @@ final class ARViewModel: ObservableObject {
         lastDetections3D.removeAll()
         debugBBoxes.removeAll()
         debugInfo = ""
-        cornerPts.removeAll()
+        measurements.removeAll()
+        firstPoint = nil
         markerNodes.forEach { $0.removeFromParentNode() }
         markerNodes.removeAll()
-        cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
+        lineNodes.forEach { $0.removeFromParentNode() }
+        lineNodes.removeAll()
+        instruction = "1/3 — ANCHO: toca el 1° punto"
+        status = "Apuntá a la caja y tocá las esquinas"
     }
 
     // MARK: - Dataset capture
@@ -717,10 +654,8 @@ func pixelBufferToFloatArray(_ pb: CVPixelBuffer, targetSize: Int = 640) -> ([Fl
     return (out, targetSize, targetSize)
 }
 
-/// Renders a Vision segmentation mask as a yellow-tinted UIImage for debug overlay.
 func maskToUIImage(_ mask: CVPixelBuffer) -> UIImage? {
     let ci = CIImage(cvPixelBuffer: mask)
-    // Tint yellow: multiply R and G channels, zero B
     guard let colorized = CIFilter(name: "CIColorMatrix", parameters: [
         kCIInputImageKey: ci,
         "inputRVector": CIVector(x: 1, y: 0, z: 0, w: 0),

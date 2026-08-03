@@ -104,7 +104,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.crosshairHit = hit
                 vm.liveAimPoint = hitPoint
                 vm.lastCornerScreen = projectedCorner
-                self.cachedLastCorner = vm.cornerPts.last
+                self.cachedLastCorner = vm.firstPoint
             }
         }
 

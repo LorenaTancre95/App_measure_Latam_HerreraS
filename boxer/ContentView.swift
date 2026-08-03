@@ -2,8 +2,6 @@
 //  ContentView.swift
 //  boxer
 //
-//  Created by Bharath Kumar Adinarayan on 09.04.26.
-//
 
 import SwiftUI
 import UIKit
@@ -44,7 +42,7 @@ struct ContentView: View {
             .ignoresSafeArea()
             .allowsHitTesting(false)
 
-            // Segmentation mask overlay (TAP mode — shown for 1.5 s before OBB)
+            // Segmentation mask overlay
             if let overlay = viewModel.segmentationOverlay {
                 Image(uiImage: overlay)
                     .resizable()
@@ -64,7 +62,7 @@ struct ContentView: View {
                     }
             }
 
-            // Debug panel (top-left, always visible in TAP mode)
+            // Debug panel (top-left, TAP mode)
             if viewModel.measureMode == .tap, !viewModel.debugInfo.isEmpty {
                 VStack {
                     Text(viewModel.debugInfo)
@@ -81,16 +79,16 @@ struct ContentView: View {
                 .allowsHitTesting(false)
             }
 
-            // TAP mode: aiming crosshair + guide diagram + CAPTURAR button
+            // TAP mode: crosshair + guía de dimensiones + botón CAPTURAR
             if viewModel.measureMode == .tap,
                !viewModel.isProcessing,
                viewModel.detections.isEmpty {
 
-                // Crosshair + live line + distance (Measure-app style)
+                // Crosshair con línea en vivo al primer punto
                 AimingCrosshairView(
                     hit:              viewModel.crosshairHit,
                     isSnapping:       viewModel.isSnapping,
-                    step:             viewModel.cornerStep,
+                    step:             viewModel.tapStep,
                     liveDistance:     viewModel.liveDistance,
                     lastCornerScreen: viewModel.lastCornerScreen,
                     unit:             viewModel.measureUnit
@@ -100,58 +98,36 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     HStack(alignment: .bottom) {
-                        BoxGuideView(
-                            tappedCount: viewModel.cornerStep,
-                            instruction: viewModel.cornerInstruction
+                        // Panel de progreso de dimensiones
+                        DimMeasureView(
+                            measurements: viewModel.measurements,
+                            hasFirstPoint: viewModel.firstPoint != nil,
+                            unit: viewModel.measureUnit
                         )
                         .padding(.leading, 16)
                         Spacer()
                     }
-                    // CAPTURAR / MEDIR button — bottom center, thumb-reachable
-                    if viewModel.cornerStep < 4 {
-                        Button(action: { viewModel.captureCenter() }) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "scope")
-                                    .font(.system(size: 18, weight: .bold))
-                                Text("CAPTURAR")
-                                    .font(.system(size: 16, weight: .heavy))
-                            }
-                            .foregroundColor(.black)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 54)
-                            .background(viewModel.crosshairHit ? Color.yellow : Color.white.opacity(0.85))
-                            .cornerRadius(16)
-                            .padding(.horizontal, 60)
+
+                    // Botón CAPTURAR (visible mientras no están las 3 dimensiones completas)
+                    Button(action: { viewModel.captureCenter() }) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "scope")
+                                .font(.system(size: 18, weight: .bold))
+                            Text(viewModel.firstPoint == nil ? "CAPTURAR 1° PUNTO" : "CAPTURAR 2° PUNTO")
+                                .font(.system(size: 16, weight: .heavy))
                         }
-                        .padding(.bottom, 24)
-                    } else {
-                        HStack(spacing: 12) {
-                            Button(action: { viewModel.undoLastCorner() }) {
-                                Label("UNDO P3", systemImage: "arrow.uturn.backward")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundColor(.white)
-                                    .frame(height: 50)
-                                    .frame(maxWidth: .infinity)
-                                    .background(Color.orange.opacity(0.9))
-                                    .cornerRadius(14)
-                            }
-                            Button(action: { viewModel.confirmBox() }) {
-                                Label("MEDIR", systemImage: "checkmark.circle.fill")
-                                    .font(.system(size: 15, weight: .heavy))
-                                    .foregroundColor(.black)
-                                    .frame(height: 50)
-                                    .frame(maxWidth: .infinity)
-                                    .background(Color.green)
-                                    .cornerRadius(14)
-                            }
-                        }
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 24)
+                        .foregroundColor(.black)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 54)
+                        .background(viewModel.crosshairHit ? Color.yellow : Color.white.opacity(0.85))
+                        .cornerRadius(16)
+                        .padding(.horizontal, 60)
                     }
+                    .padding(.bottom, 24)
                 }
             }
 
-            // Top spacer (removed status bar)
+            // Top spacer
             VStack { Spacer() }
 
             // Modo integrado: USAR / REMEDIAR
@@ -159,7 +135,6 @@ struct ContentView: View {
                 VStack {
                     Spacer()
                     VStack(spacing: 10) {
-                        // Tarjeta "Medición confirmada"
                         HStack(spacing: 8) {
                             Image(systemName: "checkmark.circle.fill").foregroundColor(.green)
                             Text("Medición confirmada")
@@ -218,7 +193,7 @@ struct ContentView: View {
                 }
             }
 
-            // Right-side controls: unit selector + UNDO/BORRAR + Google sign-in
+            // Controles de la derecha: selector de unidad + UNDO/BORRAR + Google
             HStack {
                 Spacer()
                 Text(viewModel.status)
@@ -226,7 +201,7 @@ struct ContentView: View {
                     .foregroundColor(.white.opacity(0.8))
                     .padding(.trailing, 12)
                 VStack(spacing: 8) {
-                    // Unit selector: cm | m | in
+                    // Selector de unidad
                     HStack(spacing: 0) {
                         ForEach(ARViewModel.MeasureUnit.allCases, id: \.self) { unit in
                             unitButton(unit)
@@ -235,11 +210,8 @@ struct ContentView: View {
                     .background(.black.opacity(0.45))
                     .cornerRadius(8)
 
-                    // UNDO / BORRAR (secondary — primary action is CAPTURAR at bottom)
-                    Button(action: {
-                        if viewModel.cornerStep > 0 { viewModel.undoLastCorner() }
-                        else { viewModel.clearAll() }
-                    }) {
+                    // UNDO / BORRAR
+                    Button(action: { viewModel.undoLast() }) {
                         ZStack {
                             Circle().fill(.white).frame(width: 70, height: 70)
                             Circle()
@@ -249,10 +221,10 @@ struct ContentView: View {
                                 ProgressView().tint(.white)
                             } else {
                                 VStack(spacing: 1) {
-                                    Image(systemName: viewModel.cornerStep > 0 ? "arrow.uturn.backward" : "xmark")
+                                    Image(systemName: viewModel.tapStep > 0 ? "arrow.uturn.backward" : "xmark")
                                         .font(.system(size: 18, weight: .bold))
                                         .foregroundColor(.white)
-                                    Text(viewModel.cornerStep > 0 ? "UNDO" : "BORRAR")
+                                    Text(viewModel.tapStep > 0 ? "UNDO" : "BORRAR")
                                         .font(.system(size: 8, weight: .bold))
                                         .foregroundColor(.white)
                                 }
@@ -306,6 +278,79 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Panel de progreso de dimensiones
+
+/// Muestra las 3 dimensiones (ANCHO / LARGO / ALTO) con su estado:
+/// verde + valor cuando está completa, amarillo cuando es la actual, gris cuando está pendiente.
+struct DimMeasureView: View {
+    let measurements: [Float]
+    let hasFirstPoint: Bool
+    let unit: ARViewModel.MeasureUnit
+
+    private let labels = ARViewModel.dimLabels
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(0..<3, id: \.self) { i in
+                let done    = i < measurements.count
+                let current = i == measurements.count
+                HStack(spacing: 10) {
+                    // Indicador de estado
+                    ZStack {
+                        Circle()
+                            .fill(done ? Color.green : (current ? Color.yellow : Color.white.opacity(0.15)))
+                            .frame(width: 26, height: 26)
+                        if done {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 10, weight: .heavy))
+                                .foregroundColor(.black)
+                        } else {
+                            Text("\(i + 1)")
+                                .font(.system(size: 11, weight: .heavy))
+                                .foregroundColor(current ? .black : .white.opacity(0.4))
+                        }
+                    }
+
+                    // Nombre de la dimensión
+                    Text(labels[i])
+                        .font(.system(size: 13, weight: .heavy))
+                        .foregroundColor(done ? .green : (current ? .yellow : .white.opacity(0.35)))
+                        .frame(width: 52, alignment: .leading)
+
+                    // Valor o estado
+                    if done {
+                        Text(unit.format(measurements[i]) + " " + unit.rawValue)
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                    } else if current {
+                        Text(hasFirstPoint ? "→ 2° punto" : "→ 1° punto")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundColor(.yellow)
+                    } else {
+                        Text("—")
+                            .font(.system(size: 13))
+                            .foregroundColor(.white.opacity(0.2))
+                    }
+
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(current ? Color.yellow.opacity(0.08) : Color.clear)
+
+                if i < 2 {
+                    Divider().background(Color.white.opacity(0.1))
+                }
+            }
+        }
+        .background(.black.opacity(0.82))
+        .cornerRadius(14)
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.1), lineWidth: 1))
+    }
+}
+
+// MARK: - Detection Card
+
 struct DetectionCard: View {
     let detection: DetectionInfo
     let color: Color
@@ -330,7 +375,6 @@ struct DetectionCard: View {
     }
 }
 
-// Must match colors in ARViewModel.placeBoxes
 func boxColor(_ index: Int) -> Color {
     let colors: [Color] = [.red, .green, .blue]
     return colors[index % colors.count]
@@ -338,15 +382,11 @@ func boxColor(_ index: Int) -> Color {
 
 // MARK: - Aiming Crosshair
 
-/// Full-screen overlay: Measure-app style live line + distance + crosshair.
-/// - Red dot at the last placed corner (projected to 2D)
-/// - Dashed white line from that dot to the crosshair center
-/// - Distance label above the crosshair, live-updated
-/// - Ring turns yellow when a surface is detected
+/// Crosshair estilo app Measure: línea punteada desde el último punto al crosshair, distancia en vivo.
 struct AimingCrosshairView: View {
     let hit: Bool
     let isSnapping: Bool
-    let step: Int
+    let step: Int          // 0..6 (2 taps por dimensión)
     let liveDistance: Float?
     let lastCornerScreen: CGPoint?
     let unit: ARViewModel.MeasureUnit
@@ -360,29 +400,28 @@ struct AimingCrosshairView: View {
             let cy = geo.size.height / 2
             ZStack {
                 Canvas { ctx, _ in
-                    // Orange = snapped to feature point (edge/corner), yellow = surface hit, white = no hit
                     let color: Color = isSnapping ? .orange : (hit ? .yellow : .white)
 
-                    // Dashed live line from last placed point to crosshair center
+                    // Línea punteada desde el 1° punto al crosshair
                     if let lcs = lastCornerScreen {
                         var lp = Path()
                         lp.move(to: lcs)
                         lp.addLine(to: CGPoint(x: cx, y: cy))
                         ctx.stroke(lp, with: .color(.white.opacity(0.85)),
                                    style: StrokeStyle(lineWidth: 1.8, lineCap: .round, dash: [8, 5]))
-                        // Red filled circle for the already-placed point
+                        // Punto rojo en el 1° punto ya colocado
                         ctx.fill(Path(ellipseIn: CGRect(x: lcs.x-9, y: lcs.y-9, width: 18, height: 18)),
                                  with: .color(.red.opacity(0.95)))
                         ctx.stroke(Path(ellipseIn: CGRect(x: lcs.x-9, y: lcs.y-9, width: 18, height: 18)),
                                    with: .color(.white), style: StrokeStyle(lineWidth: 1.5))
                     }
 
-                    // Crosshair ring
+                    // Ring del crosshair
                     let ringRect = CGRect(x: cx - ringSize/2, y: cy - ringSize/2,
                                           width: ringSize, height: ringSize)
                     ctx.stroke(Path(ellipseIn: ringRect), with: .color(color.opacity(0.9)),
                                style: StrokeStyle(lineWidth: 2))
-                    // Cross lines
+                    // Líneas cruzadas
                     func seg(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
                         var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
                         ctx.stroke(p, with: .color(color.opacity(0.9)),
@@ -392,13 +431,13 @@ struct AimingCrosshairView: View {
                     seg(cx + ringSize/2, cy, cx + ringSize/2 + lineLen, cy)
                     seg(cx, cy - ringSize/2 - lineLen, cx, cy - ringSize/2)
                     seg(cx, cy + ringSize/2, cx, cy + ringSize/2 + lineLen)
-                    // White center dot
+                    // Punto central
                     ctx.fill(Path(ellipseIn: CGRect(x: cx-3, y: cy-3, width: 6, height: 6)),
                              with: .color(color))
                 }
 
-                // Live distance label above the crosshair (like Measure app)
-                if let dist = liveDistance, step > 0 {
+                // Distancia en vivo sobre el crosshair (solo cuando hay 1° punto colocado)
+                if let dist = liveDistance, step % 2 == 1 {
                     Text(unit.format(dist) + " " + unit.rawValue)
                         .font(.system(size: 20, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
@@ -408,132 +447,17 @@ struct AimingCrosshairView: View {
                         .position(x: cx, y: cy - ringSize/2 - 36)
                 }
 
-                // Step counter below crosshair (hidden once all 4 are placed)
-                if step < 4 {
-                    Text("\(step + 1)/4")
+                // Indicador de punto (1° o 2°) bajo el crosshair
+                if step < 6 {
+                    let ptNum = (step % 2) + 1
+                    Text("\(ptNum)/2")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
-                        .foregroundColor(isSnapping ? .orange : (hit ? .yellow : .white.opacity(0.7)))
+                        .foregroundColor(hit ? .yellow : .white.opacity(0.7))
                         .position(x: cx, y: cy + ringSize/2 + 18)
                 }
             }
         }
         .ignoresSafeArea()
-    }
-}
-
-// MARK: - Box Guide
-
-/// Perspective wireframe diagram with 4 numbered tap-point markers.
-/// Tap order: 1=front-top-left, 2=front-top-right, 3=front-bottom-right, 4=back-top-right corner.
-struct BoxGuideView: View {
-    let tappedCount: Int   // 0..3: how many corners have been recorded
-    let instruction: String
-
-    private static let W: CGFloat = 168
-    private static let H: CGFloat = 118
-
-    // Front face vertices
-    private static let fTL = CGPoint(x: 14,  y: 36)
-    private static let fTR = CGPoint(x: 104, y: 36)
-    private static let fBR = CGPoint(x: 104, y: 110)
-    private static let fBL = CGPoint(x: 14,  y: 110)
-    // Perspective back face
-    private static let tTL = CGPoint(x: 64,  y: 16)
-    private static let tTR = CGPoint(x: 154, y: 16)
-    private static let tBR = CGPoint(x: 154, y: 90)
-    private static let tBL = CGPoint(x: 64,  y: 90)
-
-    // 4 tap positions: 3 front corners + back-top-right corner (gives full depth via dot product)
-    private static let tapPositions: [CGPoint] = [
-        fTL,   // 1 — front top left
-        fTR,   // 2 — front top right
-        fBR,   // 3 — front bottom right
-        tTR,   // 4 — back top right corner (depth = |dot(P3−P0, depthAxis)|)
-    ]
-
-    private func markerColor(_ idx: Int) -> Color {
-        if idx < tappedCount { return .green }
-        if idx == tappedCount { return .yellow }
-        return .white.opacity(0.25)
-    }
-
-    var body: some View {
-        VStack(spacing: 6) {
-            ZStack {
-                Canvas { ctx, _ in
-                    func edge(_ a: CGPoint, _ b: CGPoint, dashed: Bool = false) {
-                        var p = Path(); p.move(to: a); p.addLine(to: b)
-                        let style = dashed
-                            ? StrokeStyle(lineWidth: 1.2, dash: [4, 3])
-                            : StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round)
-                        ctx.stroke(p, with: .color(.white.opacity(0.75)), style: style)
-                    }
-                    let fTL = BoxGuideView.fTL, fTR = BoxGuideView.fTR
-                    let fBR = BoxGuideView.fBR, fBL = BoxGuideView.fBL
-                    let tTL = BoxGuideView.tTL, tTR = BoxGuideView.tTR
-                    let tBR = BoxGuideView.tBR, tBL = BoxGuideView.tBL
-
-                    // Visible edges (solid)
-                    edge(fTL, fTR); edge(fTR, fBR); edge(fBR, fBL); edge(fBL, fTL)
-                    edge(fTL, tTL); edge(fTR, tTR); edge(tTL, tTR)
-                    edge(fBR, tBR); edge(tTR, tBR)
-                    // Hidden edges (dashed)
-                    edge(fBL, tBL, dashed: true)
-                    edge(tTL, tBL, dashed: true)
-                    edge(tBL, tBR, dashed: true)
-
-                    // Dashed ring around tTR when waiting for the 4th tap
-                    if tappedCount == 3 {
-                        let target = BoxGuideView.tTR
-                        var ring = Path()
-                        ring.addEllipse(in: CGRect(x: target.x - 16, y: target.y - 16, width: 32, height: 32))
-                        ctx.stroke(ring, with: .color(.yellow.opacity(0.85)),
-                                   style: StrokeStyle(lineWidth: 2, dash: [4, 3]))
-                    }
-                }
-                .frame(width: BoxGuideView.W, height: BoxGuideView.H)
-
-                ForEach(0..<4, id: \.self) { i in
-                    ZStack {
-                        Circle()
-                            .fill(markerColor(i))
-                            .frame(width: 22, height: 22)
-                        if i < tappedCount {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 9, weight: .heavy))
-                                .foregroundColor(.black)
-                        } else {
-                            Text("\(i + 1)")
-                                .font(.system(size: 11, weight: .heavy))
-                                .foregroundColor(i == tappedCount ? .black : .white.opacity(0.7))
-                        }
-                    }
-                    .position(BoxGuideView.tapPositions[i])
-                }
-            }
-            .frame(width: BoxGuideView.W, height: BoxGuideView.H)
-
-            if !shortInstruction.isEmpty {
-                Text(shortInstruction)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(tappedCount == 3 ? .yellow : .white)
-                    .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: BoxGuideView.W)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.black.opacity(0.80))
-        .cornerRadius(14)
-    }
-
-    // Strip "X/4 — " prefix so only the action text is shown below the diagram
-    private var shortInstruction: String {
-        if let r = instruction.range(of: " — ") {
-            return String(instruction[r.upperBound...])
-        }
-        return instruction
     }
 }
 
@@ -547,13 +471,11 @@ struct ViewfinderOverlay: View {
             let corner: CGFloat = 28
             let lw: CGFloat = 3
 
-            // Dim area outside the viewfinder.
             var outer = Path()
             outer.addRect(CGRect(x: 0, y: 0, width: 9999, height: 9999))
             outer.addRoundedRect(in: rect, cornerSize: CGSize(width: 6, height: 6))
             ctx.fill(outer, with: .color(.black.opacity(0.35)))
 
-            // Corner brackets.
             var p = Path()
             let corners: [(CGPoint, CGFloat, CGFloat)] = [
                 (CGPoint(x: rect.minX, y: rect.minY),  1,  1),
@@ -568,7 +490,6 @@ struct ViewfinderOverlay: View {
             }
             ctx.stroke(p, with: .color(.white), style: StrokeStyle(lineWidth: lw, lineCap: .round))
 
-            // Crosshair dot in center.
             let cx = rect.midX, cy = rect.midY
             let dot = Path(ellipseIn: CGRect(x: cx - 3, y: cy - 3, width: 6, height: 6))
             ctx.fill(dot, with: .color(.white.opacity(0.6)))
