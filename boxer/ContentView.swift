@@ -5,6 +5,7 @@
 
 import SwiftUI
 import UIKit
+import simd
 
 struct ContentView: View {
     @StateObject private var viewModel = ARViewModel()
