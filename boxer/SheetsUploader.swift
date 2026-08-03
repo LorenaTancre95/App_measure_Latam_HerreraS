@@ -7,7 +7,7 @@ import Foundation
 actor SheetsUploader {
     static let shared = SheetsUploader()
 
-    private let webAppURL = "https://script.google.com/a/macros/latam.com/s/AKfycbxg4jfqH1uybsHysAXuCONdFbpt-sEBR6oZn-6Pvhu7BRZIWKpMumT461Y4Il-J5sbwrA/exec"
+    private let webAppURL = "https://script.google.com/macros/s/AKfycbxg4jfqH1uybsHysAXuCONdFbpt-sEBR6oZn-6Pvhu7BRZIWKpMumT461Y4Il-J5sbwrA/exec"
 
     private static let dateFmt: DateFormatter = {
         let f = DateFormatter()
