@@ -61,16 +61,32 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
-            // Raycast for live aim point
+            // Live aim point: LiDAR gives the actual visible surface depth.
+            // Plane raycast can overshoot through objects onto the wall/floor behind.
+            // We take whichever is closer to the camera.
             var hitPoint: simd_float3? = nil
-            if let q = sv.raycastQuery(from: center, allowing: .existingPlaneGeometry, alignment: .any),
-               let r = sv.session.raycast(q).first {
-                let c = r.worldTransform.columns.3
-                hitPoint = simd_float3(c.x, c.y, c.z)
-            } else if let q = sv.raycastQuery(from: center, allowing: .estimatedPlane, alignment: .any),
-                      let r = sv.session.raycast(q).first {
-                let c = r.worldTransform.columns.3
-                hitPoint = simd_float3(c.x, c.y, c.z)
+            let frame = sv.session.currentFrame
+            if let frame {
+                hitPoint = ARViewModel.lidarPoint(frame: frame, screenPoint: center, viewportSize: sv.bounds.size)
+            }
+            // Also try plane raycast — use it only if it's closer than LiDAR (or LiDAR failed)
+            for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
+                if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
+                   let r = sv.session.raycast(q).first {
+                    let c = r.worldTransform.columns.3
+                    let rayPt = simd_float3(c.x, c.y, c.z)
+                    if let existing = hitPoint, let f = frame {
+                        let camPos = simd_float3(f.camera.transform.columns.3.x,
+                                                  f.camera.transform.columns.3.y,
+                                                  f.camera.transform.columns.3.z)
+                        if simd_distance(rayPt, camPos) < simd_distance(existing, camPos) {
+                            hitPoint = rayPt
+                        }
+                    } else {
+                        hitPoint = rayPt
+                    }
+                    break
+                }
             }
 
             // Project last placed corner to 2D screen coordinates

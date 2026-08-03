@@ -508,33 +508,24 @@ final class ARViewModel: ObservableObject {
         return bestPt
     }
 
-    // Maps a screen tap to a 3D world-space point using ARKit raycasting + LiDAR depth fallback.
-    // Points are in ARKit world space → stable across phone movements between taps.
-    private func tapTo3D(point: CGPoint) -> simd_float3? {
-        guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
-
-        // Tier 1: ARKit mesh/plane raycast — most accurate when mesh is built up.
-        for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
-            if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
-               let r = sceneView.session.raycast(q).first {
-                isSnapping = false
-                let col = r.worldTransform.columns.3
-                return simd_float3(col.x, col.y, col.z)
-            }
-        }
-
-        // Tier 2: Direct LiDAR depth — prefer smoothed (temporal filter) over raw.
+    // LiDAR depth → world-space point. nonisolated+static → safe from render thread.
+    // Uses smoothedSceneDepth (temporal filter) for stability, raw depth as fallback.
+    // Samples a 5×5 neighborhood and picks the closest valid depth to avoid edge bleed.
+    nonisolated static func lidarPoint(
+        frame: ARFrame,
+        screenPoint: CGPoint,
+        viewportSize: CGSize
+    ) -> simd_float3? {
         guard let depthBuffer = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap else { return nil }
         let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let dW   = CVPixelBufferGetWidth(depthBuffer)
         let dH   = CVPixelBufferGetHeight(depthBuffer)
-        let displayT  = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
-        let invertedT = displayT.inverted()
-        let normTap   = CGPoint(x: point.x / viewportSize.width, y: point.y / viewportSize.height)
-        let normImg   = normTap.applying(invertedT)
-        let tapDX     = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
-        let tapDY     = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
+        let normImg = CGPoint(x: screenPoint.x / viewportSize.width,
+                              y: screenPoint.y / viewportSize.height)
+                      .applying(frame.displayTransform(for: .portrait, viewportSize: viewportSize).inverted())
+        let tapDX = max(0, min(dW - 1, Int(Float(normImg.x) * Float(dW))))
+        let tapDY = max(0, min(dH - 1, Int(Float(normImg.y) * Float(dH))))
         CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
@@ -557,6 +548,28 @@ final class ARViewModel: ObservableObject {
         let cam = simd_float4((ix - cx) / fx * bestD, (iy - cy) / fy * bestD, -bestD, 1)
         let w   = frame.camera.transform * cam
         return simd_float3(w.x, w.y, w.z) / w.w
+    }
+
+    // Maps a screen tap to a 3D world-space point.
+    // LiDAR first (actual visible pixel surface), plane raycast as fallback.
+    private func tapTo3D(point: CGPoint) -> simd_float3? {
+        guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
+
+        // Tier 1: LiDAR smoothedSceneDepth — always hits the real visible surface.
+        // Plane raycast can miss and hit a large background plane (wall/floor behind the object).
+        if let lidar = ARViewModel.lidarPoint(frame: frame, screenPoint: point, viewportSize: viewportSize) {
+            return lidar
+        }
+
+        // Tier 2: Plane raycast — fallback when no LiDAR data available.
+        for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
+            if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
+               let r = sceneView.session.raycast(q).first {
+                let col = r.worldTransform.columns.3
+                return simd_float3(col.x, col.y, col.z)
+            }
+        }
+        return nil
     }
 
 
