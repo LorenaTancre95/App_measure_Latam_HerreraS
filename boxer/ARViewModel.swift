@@ -22,31 +22,33 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil
     @Published var debugInfo: String = ""
-    @Published var instruction: String = "1/3 — ANCHO: toca el 1° punto"
+    @Published var instruction: String = "Tocá la 1° esquina de la cara superior"
     @Published var crosshairHit: Bool = false
     @Published var isSnapping: Bool = false
     @Published var liveAimPoint: simd_float3? = nil
     @Published var lastCornerScreen: CGPoint? = nil
 
     // Nombres de las 3 dimensiones en orden de captura
-    static let dimLabels = ["ANCHO", "LARGO", "ALTO"]
+    // Instrucciones para cada tap en la cara superior (índice = tapPoints.count antes del tap)
+    static let stepLabels = [
+        "1° esquina — cara superior",
+        "2° esquina — misma arista",
+        "3° esquina — perpendicular"
+    ]
 
-    // Mediciones completadas (0=ANCHO, 1=LARGO, 2=ALTO), en metros
-    private(set) var measurements: [Float] = []
-    // Primer punto del par activo (nil si esperando 1° tap)
-    private(set) var firstPoint: simd_float3? = nil
+    // Esquinas tocadas en la cara superior (máx 3)
+    private(set) var tapPoints: [simd_float3] = []
+    // Y del plano del suelo detectado por ARKit (espacio mundial, metros)
+    @Published var floorY: Float? = nil
 
-    // 0..5 = progreso de taps (2 por dimensión), 6 = completo
-    var tapStep: Int {
-        if isDone { return 6 }
-        return measurements.count * 2 + (firstPoint == nil ? 0 : 1)
-    }
-    var isDone: Bool { measurements.count >= 3 }
+    // 0=esperando 1°, 1=esperando 2°, 2=esperando 3°, 3=completo
+    var tapStep: Int { min(tapPoints.count, 3) }
+    var isDone: Bool { tapPoints.count >= 3 }
 
-    // Distancia en vivo desde el primer punto al crosshair (durante 2° tap)
+    // Distancia en vivo desde la última esquina tocada al crosshair
     var liveDistance: Float? {
-        guard let p0 = firstPoint, let aim = liveAimPoint else { return nil }
-        return simd_distance(p0, aim)
+        guard !tapPoints.isEmpty, !isDone, let aim = liveAimPoint else { return nil }
+        return simd_distance(tapPoints[tapPoints.count - 1], aim)
     }
 
     enum MeasureMode { case box, oversize, tap }
@@ -340,15 +342,15 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Medición por 3 pares de puntos (ANCHO, LARGO, ALTO)
+    // MARK: - Medición por 3 esquinas en la cara superior + plano del suelo ARKit
     //
-    // Flujo: para cada dimensión el usuario toca 2 puntos en la caja.
-    // La distancia 3D entre esos dos puntos ES la medida de esa dimensión.
-    // No hay OBB ni geometría compleja — funciona desde cualquier ángulo.
-    //
-    // Orden de captura: ANCHO (0) → LARGO (1) → ALTO (2)
-    // Resultado en DetectionInfo.size: x=LARGO, y=ALTO, z=ANCHO
-    // (coincide con el mapeo de MedicionView: C=x, A=y, L=z)
+    // Flujo: usuario toca 3 esquinas en L sobre la cara SUPERIOR de la caja.
+    //   P0 → P1 → P2  (forma de L)
+    // Cálculo:
+    //   dim1 = dist(P0, P1)   → una dimensión horizontal
+    //   dim2 = dist(P1, P2)   → dimensión perpendicular
+    //   ALTO = avg(Py) − floorY  (plano del suelo detectado por ARKit)
+    // Resultado: size.x=dim2→C, size.y=ALTO→A, size.z=dim1→L  (compatible con MedicionView)
 
     func captureCenter() {
         let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
@@ -366,46 +368,37 @@ final class ARViewModel: ObservableObject {
         guard let sv = sceneView else { return }
         placeMarker(at: pt3D, in: sv)
 
-        let dimIdx  = measurements.count
-        let dimName = Self.dimLabels[dimIdx]
-
-        if let p0 = firstPoint {
-            // Segundo tap — completa esta dimensión
-            let dist = simd_distance(p0, pt3D)
-            drawLine(from: p0, to: pt3D, in: sv)
-            measurements.append(dist)
-            firstPoint = nil
-
-            let fmtd = measureUnit.format(dist) + " " + measureUnit.rawValue
-            debugInfo += "\(dimName): \(String(format: "%.1f", dist * 100)) cm\n"
-
-            if isDone {
-                let det = detectionFromMeasurements()
-                detections.append(det)
-                instruction = "✓ Medición completa"
-                status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
-            } else {
-                let next = Self.dimLabels[measurements.count]
-                instruction = "\(measurements.count + 1)/3 — \(next): toca el 1° punto"
-                status = "\(dimName) \(fmtd) ✓ — ahora medí el \(next)"
-            }
+        if let prev = tapPoints.last {
+            let d = simd_distance(prev, pt3D)
+            drawLine(from: prev, to: pt3D, in: sv)
+            debugInfo += "P\(tapPoints.count-1)→P\(tapPoints.count): \(String(format:"%.1f", d*100)) cm\n"
         } else {
-            // Primer tap
-            firstPoint = pt3D
-            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 2° punto"
-            status = "\(dimName): ahora tocá el extremo opuesto"
-            debugInfo += "P\(dimIdx * 2): (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z)) m)\n"
+            debugInfo += "P0: (\(String(format:"%.2f",pt3D.x)), \(String(format:"%.2f",pt3D.y)), \(String(format:"%.2f",pt3D.z)) m)\n"
+        }
+
+        tapPoints.append(pt3D)
+
+        if isDone {
+            let det = detectionFromPoints()
+            detections.append(det)
+            instruction = "✓ Medición completa"
+            status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
+        } else {
+            instruction = Self.stepLabels[tapPoints.count]
+            status = "Esquina \(tapPoints.count) ✓ — \(Self.stepLabels[tapPoints.count])"
         }
     }
 
-    // DetectionInfo con size.x=LARGO, size.y=ALTO, size.z=ANCHO
-    // para compatibilidad con MedicionView (C=largo, A=alto, L=ancho)
-    private func detectionFromMeasurements() -> DetectionInfo {
-        let ancho = measurements[0]
-        let largo = measurements[1]
-        let alto  = measurements[2]
+    // 3 esquinas en la cara superior → dimensiones de la caja.
+    // ALTO = promedio Y de los puntos − floorY (ARKit). Fallback 15 cm si no hay piso.
+    private func detectionFromPoints() -> DetectionInfo {
+        let p0 = tapPoints[0], p1 = tapPoints[1], p2 = tapPoints[2]
+        let dim1 = simd_distance(p0, p1)
+        let dim2 = simd_distance(p1, p2)
+        let avgY = (p0.y + p1.y + p2.y) / 3.0
+        let alto: Float = floorY.map { fy in max(0.03, avgY - fy) } ?? 0.15
         return DetectionInfo(label: "caja",
-                             size: simd_float3(largo, alto, ancho),
+                             size: simd_float3(dim2, alto, dim1),
                              confidence: 1.0)
     }
 
@@ -542,54 +535,42 @@ final class ARViewModel: ObservableObject {
         markerNodes.append(node)
     }
 
-    func floorDetected() {
+    func floorDetected(at planeY: Float) {
+        // Guardar el plano horizontal más bajo como referencia del suelo
+        if floorY == nil || planeY < (floorY ?? 0) {
+            floorY = planeY
+        }
         guard !isCalibrated else { return }
         isCalibrated = true
-        if !isProcessing { status = "Piso calibrado ✓ — apuntá la caja al visor" }
+        if !isProcessing { status = "Piso detectado ✓ — tocá 3 esquinas de la cara superior" }
     }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
 
     func undoLast() {
-        if isDone {
-            // Ya terminó — limpiar todo para rehacer
-            clearAll(); return
+        if isDone { clearAll(); return }
+        guard !tapPoints.isEmpty else { clearAll(); return }
+
+        let prevCount = tapPoints.count
+        tapPoints.removeLast()
+
+        if let last = markerNodes.last {
+            last.removeFromParentNode()
+            markerNodes.removeLast()
         }
-        if firstPoint != nil {
-            // Deshacer el primer punto del par actual
-            firstPoint = nil
-            if let last = markerNodes.last {
-                last.removeFromParentNode()
-                markerNodes.removeLast()
-            }
-            let dimIdx  = measurements.count
-            let dimName = Self.dimLabels[dimIdx]
-            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 1° punto"
-            status = "Punto deshecho — volvé a tocarlo"
-        } else if !measurements.isEmpty {
-            // Deshacer la última dimensión completada
-            measurements.removeLast()
-            // Quitar 2 marcadores (P0 y P1)
-            for _ in 0..<2 {
-                if let last = markerNodes.last {
-                    last.removeFromParentNode()
-                    markerNodes.removeLast()
-                }
-            }
-            // Quitar la línea de esa dimensión
-            if let lastLine = lineNodes.last {
-                lastLine.removeFromParentNode()
-                lineNodes.removeLast()
-            }
-            let dimIdx  = measurements.count
-            let dimName = Self.dimLabels[dimIdx]
-            instruction = "\(dimIdx + 1)/3 — \(dimName): toca el 1° punto"
-            status = "Medición deshecha — volvé a medir el \(dimName)"
-            debugInfo = measurements.enumerated().map { i, m in
-                "\(Self.dimLabels[i]): \(String(format: "%.1f", m * 100)) cm\n"
-            }.joined()
+        // La línea existe a partir del 2° punto (prevCount >= 2)
+        if prevCount >= 2, let lastLine = lineNodes.last {
+            lastLine.removeFromParentNode()
+            lineNodes.removeLast()
+        }
+
+        if tapPoints.isEmpty {
+            instruction = Self.stepLabels[0]
+            status = "Apuntá a la cara superior y tocá una esquina"
+            debugInfo = ""
         } else {
-            clearAll()
+            instruction = Self.stepLabels[tapPoints.count]
+            status = "Deshecho — ahora: \(Self.stepLabels[tapPoints.count])"
         }
     }
 
@@ -598,14 +579,13 @@ final class ARViewModel: ObservableObject {
         lastDetections3D.removeAll()
         debugBBoxes.removeAll()
         debugInfo = ""
-        measurements.removeAll()
-        firstPoint = nil
+        tapPoints.removeAll()
         markerNodes.forEach { $0.removeFromParentNode() }
         markerNodes.removeAll()
         lineNodes.forEach { $0.removeFromParentNode() }
         lineNodes.removeAll()
-        instruction = "1/3 — ANCHO: toca el 1° punto"
-        status = "Apuntá a la caja y tocá las esquinas"
+        instruction = Self.stepLabels[0]
+        status = "Apuntá a la cara superior y tocá una esquina"
     }
 
     // MARK: - Frame capture

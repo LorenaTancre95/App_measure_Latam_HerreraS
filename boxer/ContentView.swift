@@ -101,8 +101,8 @@ struct ContentView: View {
                     HStack(alignment: .bottom) {
                         // Panel de progreso de dimensiones
                         DimMeasureView(
-                            measurements: viewModel.measurements,
-                            hasFirstPoint: viewModel.firstPoint != nil,
+                            tapPoints: viewModel.tapPoints,
+                            floorY: viewModel.floorY,
                             unit: viewModel.measureUnit
                         )
                         .padding(.leading, 16)
@@ -114,7 +114,7 @@ struct ContentView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "scope")
                                 .font(.system(size: 18, weight: .bold))
-                            Text(viewModel.firstPoint == nil ? "CAPTURAR 1° PUNTO" : "CAPTURAR 2° PUNTO")
+                            Text("CAPTURAR ESQUINA \(viewModel.tapStep + 1)/3")
                                 .font(.system(size: 16, weight: .heavy))
                         }
                         .foregroundColor(.black)
@@ -282,24 +282,22 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Panel de progreso de dimensiones
+// MARK: - Panel de progreso de 3 esquinas
 
-/// Muestra las 3 dimensiones (ANCHO / LARGO / ALTO) con su estado:
-/// verde + valor cuando está completa, amarillo cuando es la actual, gris cuando está pendiente.
+/// 3 esquinas en la cara superior + ALTO automático del plano del suelo ARKit.
 struct DimMeasureView: View {
-    let measurements: [Float]
-    let hasFirstPoint: Bool
+    let tapPoints: [simd_float3]
+    let floorY: Float?
     let unit: ARViewModel.MeasureUnit
 
-    private let labels = ARViewModel.dimLabels
+    private let labels = ["1° esquina", "2° esquina", "3° esquina"]
 
     var body: some View {
         VStack(spacing: 0) {
             ForEach(0..<3, id: \.self) { i in
-                let done    = i < measurements.count
-                let current = i == measurements.count
+                let done    = i < tapPoints.count
+                let current = i == tapPoints.count
                 HStack(spacing: 10) {
-                    // Indicador de estado
                     ZStack {
                         Circle()
                             .fill(done ? Color.green : (current ? Color.yellow : Color.white.opacity(0.15)))
@@ -314,38 +312,57 @@ struct DimMeasureView: View {
                                 .foregroundColor(current ? .black : .white.opacity(0.4))
                         }
                     }
-
-                    // Nombre de la dimensión
                     Text(labels[i])
                         .font(.system(size: 13, weight: .heavy))
                         .foregroundColor(done ? .green : (current ? .yellow : .white.opacity(0.35)))
-                        .frame(width: 52, alignment: .leading)
-
-                    // Valor o estado
-                    if done {
-                        Text(unit.format(measurements[i]) + " " + unit.rawValue)
+                        .frame(width: 76, alignment: .leading)
+                    if done && i >= 1 {
+                        let dist = simd_distance(tapPoints[i - 1], tapPoints[i])
+                        Text(unit.format(dist) + " " + unit.rawValue)
                             .font(.system(size: 14, weight: .bold, design: .monospaced))
                             .foregroundColor(.green)
                     } else if current {
-                        Text(hasFirstPoint ? "→ 2° punto" : "→ 1° punto")
+                        Text("→ tocá")
                             .font(.system(size: 12, weight: .medium))
                             .foregroundColor(.yellow)
                     } else {
-                        Text("—")
-                            .font(.system(size: 13))
-                            .foregroundColor(.white.opacity(0.2))
+                        Text("—").font(.system(size: 13)).foregroundColor(.white.opacity(0.2))
                     }
-
                     Spacer()
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
+                .padding(.horizontal, 12).padding(.vertical, 7)
                 .background(current ? Color.yellow.opacity(0.08) : Color.clear)
-
-                if i < 2 {
-                    Divider().background(Color.white.opacity(0.1))
-                }
+                Divider().background(Color.white.opacity(0.1))
             }
+
+            // ALTO automático del plano del suelo
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(tapPoints.count >= 3 ? Color.cyan : Color.white.opacity(0.1))
+                        .frame(width: 26, height: 26)
+                    Image(systemName: "arrow.up.and.down")
+                        .font(.system(size: 9, weight: .heavy))
+                        .foregroundColor(tapPoints.count >= 3 ? .black : .white.opacity(0.3))
+                }
+                Text("ALTO")
+                    .font(.system(size: 13, weight: .heavy))
+                    .foregroundColor(tapPoints.count >= 3 ? .cyan : .white.opacity(0.3))
+                    .frame(width: 76, alignment: .leading)
+                if tapPoints.count >= 3, let fy = floorY {
+                    let avgY = (tapPoints[0].y + tapPoints[1].y + tapPoints[2].y) / 3.0
+                    let alto = max(0.03, avgY - fy)
+                    Text(unit.format(alto) + " " + unit.rawValue)
+                        .font(.system(size: 14, weight: .bold, design: .monospaced))
+                        .foregroundColor(.cyan)
+                } else if tapPoints.count >= 3 {
+                    Text("apuntá al piso").font(.system(size: 11)).foregroundColor(.yellow)
+                } else {
+                    Text("automático").font(.system(size: 11)).foregroundColor(.white.opacity(0.2))
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 12).padding(.vertical, 7)
         }
         .background(.black.opacity(0.82))
         .cornerRadius(14)
@@ -440,8 +457,8 @@ struct AimingCrosshairView: View {
                              with: .color(color))
                 }
 
-                // Distancia en vivo sobre el crosshair (solo cuando hay 1° punto colocado)
-                if let dist = liveDistance, step % 2 == 1 {
+                // Distancia en vivo desde la última esquina al crosshair
+                if let dist = liveDistance, step > 0 {
                     Text(unit.format(dist) + " " + unit.rawValue)
                         .font(.system(size: 20, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
@@ -451,10 +468,9 @@ struct AimingCrosshairView: View {
                         .position(x: cx, y: cy - ringSize/2 - 36)
                 }
 
-                // Indicador de punto (1° o 2°) bajo el crosshair
-                if step < 6 {
-                    let ptNum = (step % 2) + 1
-                    Text("\(ptNum)/2")
+                // Indicador de esquina bajo el crosshair
+                if step < 3 {
+                    Text("\(step + 1)/3")
                         .font(.system(size: 10, weight: .bold, design: .monospaced))
                         .foregroundColor(hit ? .yellow : .white.opacity(0.7))
                         .position(x: cx, y: cy + ringSize/2 + 18)

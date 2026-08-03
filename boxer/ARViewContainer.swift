@@ -50,7 +50,8 @@ struct ARViewContainer: UIViewRepresentable {
         func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
             guard let plane = anchor as? ARPlaneAnchor,
                   plane.alignment == .horizontal else { return }
-            Task { @MainActor [weak self] in self?.viewModel?.floorDetected() }
+            let planeY = anchor.transform.columns.3.y
+            Task { @MainActor [weak self] in self?.viewModel?.floorDetected(at: planeY) }
         }
 
         // Every 0.1s: raycast from crosshair center → live 3D point + project last corner to 2D.
@@ -104,7 +105,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.crosshairHit = hit
                 vm.liveAimPoint = hitPoint
                 vm.lastCornerScreen = projectedCorner
-                self.cachedLastCorner = vm.firstPoint
+                self.cachedLastCorner = vm.tapPoints.last
             }
         }
 
