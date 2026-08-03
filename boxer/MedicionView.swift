@@ -26,6 +26,7 @@ struct MedicionView: View {
     // Estado del guardado en Sheets
     @State private var isSaving = false
     @State private var saveAlert: SaveAlert? = nil
+    @State private var lastPhoto: Data? = nil
 
     enum CamTrigger { case manual, unitario, lote }
     enum SaveAlert: Identifiable {
@@ -82,12 +83,13 @@ struct MedicionView: View {
         }
         .sheet(isPresented: $showSheet) { tipoSheet }
         .fullScreenCover(isPresented: $showCamera) {
-            ARCameraWrapper { det, unit in
+            ARCameraWrapper { det, unit, photo in
                 // Convertir metros → unidad seleccionada en el AR app
                 measureUnit = unit
                 cVal = unit.format(det.size.x)
                 lVal = unit.format(det.size.z)
                 aVal = unit.format(det.size.y)
+                lastPhoto = photo
                 if camTrigger == .unitario && !volsVal.isEmpty && !pesoUnitVal.isEmpty {
                     agregarItem()
                 }
@@ -303,10 +305,11 @@ struct MedicionView: View {
         let record = MinutaRecord(numero: minuta, fecha: Date(), items: items)
         appState.minutas.append(record)
         let email = appState.userEmail
+        let photo = lastPhoto
         isSaving = true
         Task {
             do {
-                try await SheetsUploader.shared.appendRows(minuta: record, userEmail: email)
+                try await SheetsUploader.shared.appendRows(minuta: record, userEmail: email, photo: photo)
                 await MainActor.run {
                     isSaving = false
                     saveAlert = .success
@@ -407,12 +410,12 @@ struct TipoCapturaSheet: View {
 
 // MARK: - Wrapper de la cámara AR
 struct ARCameraWrapper: View {
-    let onConfirm: (DetectionInfo, ARViewModel.MeasureUnit) -> Void
+    let onConfirm: (DetectionInfo, ARViewModel.MeasureUnit, Data?) -> Void
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        ContentView(onConfirm: { det, unit in
-            onConfirm(det, unit)
+        ContentView(onConfirm: { det, unit, photo in
+            onConfirm(det, unit, photo)
         })
         .ignoresSafeArea()
         .overlay(alignment: .topLeading) {

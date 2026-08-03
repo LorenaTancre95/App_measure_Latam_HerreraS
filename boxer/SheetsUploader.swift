@@ -7,7 +7,7 @@ import Foundation
 actor SheetsUploader {
     static let shared = SheetsUploader()
 
-    private let webAppURL = "https://script.google.com/macros/s/AKfycbwYoOhVCTC7Mjeyzs8FuWeXGKucaQLAwa_h06NrZQYCGWIloIqxVybnfJJgcosIlLZp4A/exec"
+    private let webAppURL = "https://script.google.com/macros/s/AKfycbz5jgT3D41EAwpeyIq3TdP-G1duQic2gGCvE7Qx2OnHQ3WpCtaT0dmfsXhmTc5y__99lA/exec"
 
     private static let dateFmt: DateFormatter = {
         let f = DateFormatter()
@@ -15,9 +15,15 @@ actor SheetsUploader {
         return f
     }()
 
+    private static let fileNameFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmmss"
+        return f
+    }()
+
     // MARK: - Public
 
-    func appendRows(minuta: MinutaRecord, userEmail: String) async throws {
+    func appendRows(minuta: MinutaRecord, userEmail: String, photo: Data? = nil) async throws {
         var rows: [[Any]] = []
         for (idx, item) in minuta.items.enumerated() {
             // PesoVol = peso cubado aéreo: (cm³ / 1_000_000 m³) × 166.67 kg/m³ × bultos
@@ -33,7 +39,7 @@ actor SheetsUploader {
                 String(format: "%.6f", pesoVol),          // PesoVol
                 Self.dateFmt.string(from: minuta.fecha),  // Fecha
                 userEmail,                                 // User
-                ""                                        // FotoURL
+                ""                                        // FotoURL (el script lo reemplaza si hay foto)
             ])
         }
 
@@ -43,7 +49,14 @@ actor SheetsUploader {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONSerialization.data(withJSONObject: ["rows": rows])
+
+        var body: [String: Any] = ["rows": rows]
+        if let photoData = photo {
+            body["photo"] = photoData.base64EncodedString()
+            let stamp = Self.fileNameFmt.string(from: minuta.fecha)
+            body["photoName"] = "CUBAJE_\(minuta.numero)_\(stamp).jpg"
+        }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200...299).contains(http.statusCode) else {

@@ -608,6 +608,17 @@ final class ARViewModel: ObservableObject {
         status = "Apuntá a la caja y tocá las esquinas"
     }
 
+    // MARK: - Frame capture
+
+    /// Captura el frame AR actual como JPEG (orientación portrait). Retorna nil si no hay frame.
+    func captureCurrentFrame() -> Data? {
+        guard let frame = sceneView?.session.currentFrame else { return nil }
+        let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
+        let ctx = CIContext()
+        guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
+        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.75)
+    }
+
     // MARK: - Dataset capture
 
     func captureAndUpload() {
