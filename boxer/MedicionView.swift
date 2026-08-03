@@ -23,7 +23,15 @@ struct MedicionView: View {
     @State private var showCamera = false
     @State private var camTrigger: CamTrigger = .manual
 
+    // Estado del guardado en Sheets
+    @State private var isSaving = false
+    @State private var saveAlert: SaveAlert? = nil
+
     enum CamTrigger { case manual, unitario, lote }
+    enum SaveAlert: Identifiable {
+        case success, failure(String)
+        var id: String { switch self { case .success: return "ok"; case .failure(let m): return m } }
+    }
 
     var body: some View {
         ZStack {
@@ -58,6 +66,18 @@ struct MedicionView: View {
                     Text("Volver")
                 }
                 .foregroundColor(.white).padding(16)
+            }
+        }
+        .alert(item: $saveAlert) { alert in
+            switch alert {
+            case .success:
+                return Alert(title: Text("✓ Guardado"),
+                             message: Text("Medición registrada en el sheet correctamente."),
+                             dismissButton: .default(Text("OK")))
+            case .failure(let msg):
+                return Alert(title: Text("Error al guardar"),
+                             message: Text(msg),
+                             dismissButton: .default(Text("OK")))
             }
         }
         .sheet(isPresented: $showSheet) { tipoSheet }
@@ -203,12 +223,18 @@ struct MedicionView: View {
         VStack(spacing: 10) {
             Button(action: finalizarMinuta) {
                 HStack(spacing: 6) {
-                    Image(systemName: "checkmark.square.fill")
-                    Text("FINALIZAR").font(.system(size: 15, weight: .heavy))
+                    if isSaving {
+                        ProgressView().tint(.white).scaleEffect(0.85)
+                        Text("GUARDANDO...").font(.system(size: 15, weight: .heavy))
+                    } else {
+                        Image(systemName: "checkmark.square.fill")
+                        Text("FINALIZAR").font(.system(size: 15, weight: .heavy))
+                    }
                 }
                 .foregroundColor(.white).frame(maxWidth: .infinity).frame(height: 50)
-                .background(Color.red).cornerRadius(10)
+                .background(isSaving ? Color.gray : Color.red).cornerRadius(10)
             }
+            .disabled(isSaving)
             Button(action: { appState.path = [.minuta] }) {
                 HStack(spacing: 6) {
                     Image(systemName: "arrow.counterclockwise")
@@ -277,15 +303,29 @@ struct MedicionView: View {
         let record = MinutaRecord(numero: minuta, fecha: Date(), items: items)
         appState.minutas.append(record)
         let email = appState.userEmail
+        isSaving = true
         Task {
             do {
                 try await SheetsUploader.shared.appendRows(minuta: record, userEmail: email)
+                await MainActor.run {
+                    isSaving = false
+                    saveAlert = .success
+                    // Navega al home después de cerrar el alert
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                        appState.path.removeAll()
+                    }
+                }
             } catch {
-                // Los datos ya se guardaron localmente — el error de red no bloquea la app
-                print("SheetsUploader: \(error.localizedDescription)")
+                await MainActor.run {
+                    isSaving = false
+                    saveAlert = .failure(error.localizedDescription)
+                    // Navega igual — los datos están guardados localmente
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        appState.path.removeAll()
+                    }
+                }
             }
         }
-        appState.path.removeAll()
     }
 }
 

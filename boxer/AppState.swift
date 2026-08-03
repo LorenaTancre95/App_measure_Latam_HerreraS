@@ -43,7 +43,7 @@ struct MinutaRecord: Identifiable {
 // MARK: - Estado global de la app
 class AppState: ObservableObject {
     @Published var path: [AppRoute] = []
-    @Published var userName: String = "Silvina Herrera"
-    @Published var userEmail: String = "silvinaherrera.acidlabs@latam.com"
+    @Published var userName: String = ""
+    @Published var userEmail: String = ""
     @Published var minutas: [MinutaRecord] = []
 }
