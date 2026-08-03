@@ -404,13 +404,29 @@ final class ARViewModel: ObservableObject {
         isProcessing = true
         if let det = computeBox() {
             placeBoxes([det], in: sceneView)
+            cornerPts.removeAll()
+            markerNodes.forEach { $0.removeFromParentNode() }
+            markerNodes.removeAll()
         } else {
-            status = "Geometría inválida — intentá de nuevo"
-            cornerInstruction = "1/4 — Esquina sup. IZQUIERDA"
+            // Diagnose which dimension failed so user knows what to fix.
+            // Don't clear — keep markers so the user can just UNDO P3 and retry.
+            let P0 = cornerPts[0], P1 = cornerPts[1], P2 = cornerPts[2], P3 = cornerPts[3]
+            let widthXZ = simd_float3(P1.x - P0.x, 0, P1.z - P0.z)
+            let widthAxis = simd_length(widthXZ) > 0.001
+                ? simd_normalize(widthXZ) : simd_float3(1, 0, 0)
+            let depthAxis = simd_normalize(simd_cross(widthAxis, simd_float3(0, -1, 0)))
+            let topY   = max(P0.y, P1.y)
+            let height = abs(topY - P2.y)
+            let depth  = abs(simd_dot(P3 - P0, depthAxis))
+            if simd_length(widthXZ) < 0.003 {
+                status = "P0 y P1 muy juntos — tocá esquinas más separadas"
+            } else if height < 0.003 {
+                status = "Sin altura — tocá la esquina de ABAJO del frente"
+            } else {
+                status = "Sin profundidad (\(Int(depth*100))cm) — P3 debe ser la esquina del FONDO, no del frente"
+            }
+            cornerInstruction = "✓ Verificá la esquina y tocá MEDIR"
         }
-        cornerPts.removeAll()
-        markerNodes.forEach { $0.removeFromParentNode() }
-        markerNodes.removeAll()
         isProcessing = false
     }
 
@@ -426,21 +442,21 @@ final class ARViewModel: ObservableObject {
         // This removes Y noise from LiDAR at different depths and keeps the box upright.
         let widthXZ = simd_float3(P1.x - P0.x, 0, P1.z - P0.z)
         let width = simd_length(widthXZ)
-        guard width > 0.01 else { return nil }
+        guard width > 0.003 else { return nil }
         let widthAxis = simd_normalize(widthXZ)
 
         // Depth axis: horizontal, perpendicular to width
         let depthAxis = simd_normalize(simd_cross(widthAxis, simd_float3(0, -1, 0)))
 
-        // Height: pure world-Y extent (top of P0/P1 down to P2)
+        // Height: abs() absorbs tiny LiDAR noise inversions on small boxes
         let topY   = max(P0.y, P1.y)
-        let height = topY - P2.y
-        guard height > 0.01 else { return nil }
+        let height = abs(topY - P2.y)
+        guard height > 0.003 else { return nil }
 
         // Depth: project P3 onto horizontal depthAxis
         let depthProj = simd_dot(P3 - P0, depthAxis)
         let depth     = abs(depthProj)
-        guard depth > 0.01 else { return nil }
+        guard depth > 0.003 else { return nil }
 
         // Center
         let topCenter   = simd_float3((P0.x + P1.x) / 2, topY, (P0.z + P1.z) / 2)
