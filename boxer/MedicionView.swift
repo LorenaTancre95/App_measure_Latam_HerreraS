@@ -276,6 +276,15 @@ struct MedicionView: View {
     private func finalizarMinuta() {
         let record = MinutaRecord(numero: minuta, fecha: Date(), items: items)
         appState.minutas.append(record)
+        let email = appState.userEmail
+        Task {
+            do {
+                try await SheetsUploader.shared.appendRows(minuta: record, userEmail: email)
+            } catch {
+                // Los datos ya se guardaron localmente — el error de red no bloquea la app
+                print("SheetsUploader: \(error.localizedDescription)")
+            }
+        }
         appState.path.removeAll()
     }
 }
