@@ -24,6 +24,14 @@ final class ARViewModel: ObservableObject {
     @Published var debugInfo: String = ""               // visible debug panel (no Xcode needed)
     @Published var cornerInstruction: String = "1/4 — Esquina sup. IZQUIERDA"
     @Published var crosshairHit: Bool = false          // surface detected at center crosshair
+    @Published var liveAimPoint: simd_float3? = nil   // current 3D position under crosshair
+    @Published var lastCornerScreen: CGPoint? = nil   // last placed corner projected to 2D screen
+
+    // Real-time distance from last placed corner to current crosshair aim
+    var liveDistance: Float? {
+        guard let last = cornerPts.last, let aim = liveAimPoint else { return nil }
+        return simd_distance(last, aim)
+    }
 
     // 0=none, 1=P0, 2=P0+P1, 3=P0..P2, 4=all 4 placed (awaiting confirm)
     var cornerStep: Int {
@@ -73,7 +81,7 @@ final class ARViewModel: ObservableObject {
     private var palletDetector: PalletDetector?
     private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
-    private var cornerPts: [simd_float3] = []
+    private(set) var cornerPts: [simd_float3] = []
     private var markerNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
@@ -456,8 +464,8 @@ final class ARViewModel: ObservableObject {
             return simd_float3(col.x, col.y, col.z)
         }
 
-        // Fallback: read LiDAR depth directly.
-        guard let depthBuffer = frame.sceneDepth?.depthMap else { return nil }
+        // Fallback: direct LiDAR depth — prefer smoothed (temporal filter) over raw.
+        guard let depthBuffer = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap else { return nil }
         let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
         let dW   = CVPixelBufferGetWidth(depthBuffer)

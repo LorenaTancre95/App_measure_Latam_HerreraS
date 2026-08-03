@@ -86,10 +86,15 @@ struct ContentView: View {
                !viewModel.isProcessing,
                viewModel.detections.isEmpty {
 
-                // Crosshair in the absolute center of the screen
-                AimingCrosshairView(hit: viewModel.crosshairHit,
-                                    step: viewModel.cornerStep)
-                    .allowsHitTesting(false)
+                // Crosshair + live line + distance (Measure-app style)
+                AimingCrosshairView(
+                    hit:              viewModel.crosshairHit,
+                    step:             viewModel.cornerStep,
+                    liveDistance:     viewModel.liveDistance,
+                    lastCornerScreen: viewModel.lastCornerScreen,
+                    unit:             viewModel.measureUnit
+                )
+                .allowsHitTesting(false)
 
                 VStack {
                     Spacer()
@@ -332,11 +337,17 @@ func boxColor(_ index: Int) -> Color {
 
 // MARK: - Aiming Crosshair
 
-/// Full-screen overlay with a crosshair at the center for aim-and-capture flow.
-/// Ring turns yellow when the surface under the crosshair is detected.
+/// Full-screen overlay: Measure-app style live line + distance + crosshair.
+/// - Red dot at the last placed corner (projected to 2D)
+/// - Dashed white line from that dot to the crosshair center
+/// - Distance label above the crosshair, live-updated
+/// - Ring turns yellow when a surface is detected
 struct AimingCrosshairView: View {
-    let hit: Bool    // surface detected at center
-    let step: Int    // 0-3: which corner is next
+    let hit: Bool
+    let step: Int
+    let liveDistance: Float?
+    let lastCornerScreen: CGPoint?
+    let unit: ARViewModel.MeasureUnit
 
     private let ringSize: CGFloat = 52
     private let lineLen: CGFloat  = 14
@@ -345,32 +356,61 @@ struct AimingCrosshairView: View {
         GeometryReader { geo in
             let cx = geo.size.width  / 2
             let cy = geo.size.height / 2
-            Canvas { ctx, _ in
-                let color: Color = hit ? .yellow : .white
-                // Outer ring
-                let ringRect = CGRect(x: cx - ringSize/2, y: cy - ringSize/2,
-                                      width: ringSize, height: ringSize)
-                ctx.stroke(Path(ellipseIn: ringRect), with: .color(color.opacity(0.9)),
-                           style: StrokeStyle(lineWidth: 2))
-                // Cross lines
-                func line(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
-                    var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
-                    ctx.stroke(p, with: .color(color.opacity(0.9)),
-                               style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            ZStack {
+                Canvas { ctx, _ in
+                    let color: Color = hit ? .yellow : .white
+
+                    // Dashed live line from last placed point to crosshair center
+                    if let lcs = lastCornerScreen {
+                        var lp = Path()
+                        lp.move(to: lcs)
+                        lp.addLine(to: CGPoint(x: cx, y: cy))
+                        ctx.stroke(lp, with: .color(.white.opacity(0.85)),
+                                   style: StrokeStyle(lineWidth: 1.8, lineCap: .round, dash: [8, 5]))
+                        // Red filled circle for the already-placed point
+                        ctx.fill(Path(ellipseIn: CGRect(x: lcs.x-9, y: lcs.y-9, width: 18, height: 18)),
+                                 with: .color(.red.opacity(0.95)))
+                        ctx.stroke(Path(ellipseIn: CGRect(x: lcs.x-9, y: lcs.y-9, width: 18, height: 18)),
+                                   with: .color(.white), style: StrokeStyle(lineWidth: 1.5))
+                    }
+
+                    // Crosshair ring
+                    let ringRect = CGRect(x: cx - ringSize/2, y: cy - ringSize/2,
+                                          width: ringSize, height: ringSize)
+                    ctx.stroke(Path(ellipseIn: ringRect), with: .color(color.opacity(0.9)),
+                               style: StrokeStyle(lineWidth: 2))
+                    // Cross lines
+                    func seg(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
+                        var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
+                        ctx.stroke(p, with: .color(color.opacity(0.9)),
+                                   style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    }
+                    seg(cx - ringSize/2 - lineLen, cy, cx - ringSize/2, cy)
+                    seg(cx + ringSize/2, cy, cx + ringSize/2 + lineLen, cy)
+                    seg(cx, cy - ringSize/2 - lineLen, cx, cy - ringSize/2)
+                    seg(cx, cy + ringSize/2, cx, cy + ringSize/2 + lineLen)
+                    // White center dot
+                    ctx.fill(Path(ellipseIn: CGRect(x: cx-3, y: cy-3, width: 6, height: 6)),
+                             with: .color(color))
                 }
-                line(cx - ringSize/2 - lineLen, cy, cx - ringSize/2, cy)
-                line(cx + ringSize/2, cy, cx + ringSize/2 + lineLen, cy)
-                line(cx, cy - ringSize/2 - lineLen, cx, cy - ringSize/2)
-                line(cx, cy + ringSize/2, cx, cy + ringSize/2 + lineLen)
-                // Center dot
-                ctx.fill(Path(ellipseIn: CGRect(x: cx-3, y: cy-3, width: 6, height: 6)),
-                         with: .color(color))
+
+                // Live distance label above the crosshair (like Measure app)
+                if let dist = liveDistance, step > 0 {
+                    Text(unit.format(dist) + " " + unit.rawValue)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(.black.opacity(0.65))
+                        .cornerRadius(12)
+                        .position(x: cx, y: cy - ringSize/2 - 36)
+                }
+
+                // Step counter below crosshair
+                Text("\(step + 1)/4")
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundColor(hit ? .yellow : .white.opacity(0.7))
+                    .position(x: cx, y: cy + ringSize/2 + 18)
             }
-            // Step label inside the ring
-            Text("\(step + 1)/4")
-                .font(.system(size: 10, weight: .bold, design: .monospaced))
-                .foregroundColor(hit ? .yellow : .white.opacity(0.7))
-                .position(x: cx, y: cy + ringSize/2 + 18)
         }
         .ignoresSafeArea()
     }
