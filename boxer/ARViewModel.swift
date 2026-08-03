@@ -435,14 +435,17 @@ final class ARViewModel: ObservableObject {
         let frontCenter = P0 + widthVec * 0.5 + heightVec * 0.5
         let depthSign: Float = depthProj >= 0 ? 1 : -1
         let center = frontCenter + depthAxis * depthSign * depth * 0.5
-        let yaw  = atan2(widthAxis.z, widthAxis.x)
-        let cosY = cos(yaw), sinY = sin(yaw)
+        // Full 3-axis rotation from the actual tapped corners:
+        //   col0 = widthAxis  (local X = box width direction)
+        //   col1 = -heightAxis (local Y = up; heightAxis points DOWN so negate)
+        //   col2 = depthAxis  (local Z = depth direction)
         let worldTransform = simd_float4x4(
-            simd_float4( cosY, 0, sinY, 0),
-            simd_float4(    0, 1,    0, 0),
-            simd_float4(-sinY, 0, cosY, 0),
-            simd_float4(center.x, center.y, center.z, 1)
+            simd_float4(widthAxis.x,    widthAxis.y,    widthAxis.z,   0),
+            simd_float4(-heightAxis.x, -heightAxis.y,  -heightAxis.z,  0),
+            simd_float4(depthAxis.x,    depthAxis.y,    depthAxis.z,   0),
+            simd_float4(center.x,       center.y,       center.z,      1)
         )
+        let yaw = atan2(widthAxis.z, widthAxis.x)
         return Detection3D(center: center,
                            size: simd_float3(width, height, depth),
                            yaw: yaw, confidence: 1.0,
@@ -509,16 +512,7 @@ final class ARViewModel: ObservableObject {
             }
         }
 
-        // Tier 2: Feature point snap — snaps to ARKit-tracked visual features near the ray.
-        // Great for box edges and corners that ARKit hasn't built into planes yet.
-        if let snapped = ARViewModel.nearestFeaturePoint(frame: frame, screenPoint: point,
-                                                          viewportSize: viewportSize) {
-            isSnapping = true
-            return snapped
-        }
-        isSnapping = false
-
-        // Tier 3: Direct LiDAR depth — prefer smoothed (temporal filter) over raw.
+        // Tier 2: Direct LiDAR depth — prefer smoothed (temporal filter) over raw.
         guard let depthBuffer = (frame.smoothedSceneDepth ?? frame.sceneDepth)?.depthMap else { return nil }
         let bufW = Float(CVPixelBufferGetWidth(frame.capturedImage))
         let bufH = Float(CVPixelBufferGetHeight(frame.capturedImage))
