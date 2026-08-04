@@ -27,6 +27,7 @@ struct MedicionView: View {
     @State private var isSaving = false
     @State private var saveAlert: SaveAlert? = nil
     @State private var lastPhoto: Data? = nil
+    @State private var isOversize = false
 
     enum CamTrigger { case manual, unitario, lote }
     enum SaveAlert: Identifiable {
@@ -50,6 +51,7 @@ struct MedicionView: View {
                         minutaRow
                         dimensionesRow
                         pesosRow
+                        oversizeRow
                         agregarBtn
                         if !items.isEmpty { tablaItems }
                     }
@@ -145,7 +147,34 @@ struct MedicionView: View {
     }
 
     private var camposListos: Bool {
-        !cVal.isEmpty && !lVal.isEmpty && !aVal.isEmpty && !volsVal.isEmpty && !pesoUnitVal.isEmpty
+        !cVal.isEmpty && !lVal.isEmpty && !aVal.isEmpty && !volsVal.isEmpty
+        // pesoUnitVal es opcional
+    }
+
+    private var yaHayOversize: Bool { items.contains(where: { $0.isOversize }) }
+
+    private var oversizeRow: some View {
+        let blocked = yaHayOversize && !isOversize
+        return Button(action: { if !blocked { isOversize.toggle() } }) {
+            HStack(spacing: 10) {
+                Image(systemName: isOversize ? "exclamationmark.triangle.fill" : "exclamationmark.triangle")
+                    .foregroundColor(isOversize ? .orange : .white.opacity(0.35))
+                Text("SOBREDIMENSIONADO")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(isOversize ? .orange : .white.opacity(0.35))
+                Spacer()
+                if blocked {
+                    Text("ya cargado").font(.system(size: 10)).foregroundColor(.white.opacity(0.3))
+                } else {
+                    Toggle("", isOn: $isOversize).tint(.orange).labelsHidden()
+                }
+            }
+            .padding(.horizontal, 20).padding(.vertical, 8)
+            .background(isOversize ? Color.orange.opacity(0.12) : Color.clear)
+            .cornerRadius(8)
+        }
+        .disabled(blocked)
+        .padding(.horizontal, 20)
     }
 
     private var agregarBtn: some View {
@@ -185,14 +214,24 @@ struct MedicionView: View {
 
             ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
                 HStack {
-                    Text("\(idx+1)").frame(width: 22, alignment: .center)
+                    Group {
+                        if item.isOversize {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundColor(.orange).font(.system(size: 11))
+                        } else {
+                            Text("\(idx+1)").foregroundColor(.white)
+                        }
+                    }.frame(width: 22, alignment: .center)
                     Text("\(item.vols)").frame(maxWidth: .infinity)
-                    Text(String(format: "%.0f", item.pesoUnit)).frame(maxWidth: .infinity)
-                    Text(String(format: "%.0f", item.pesoTotal)).frame(maxWidth: .infinity)
+                    Text(item.pesoUnit > 0 ? String(format: "%.0f", item.pesoUnit) : "—")
+                        .frame(maxWidth: .infinity)
+                    Text(item.pesoUnit > 0 ? String(format: "%.0f", item.pesoTotal) : "—")
+                        .frame(maxWidth: .infinity)
                     Text(item.cla).frame(maxWidth: .infinity)
                 }
                 .font(.system(size: 12)).foregroundColor(.white)
                 .padding(.vertical, 6).padding(.horizontal, 10)
+                .background(item.isOversize ? Color.orange.opacity(0.08) : Color.clear)
                 Divider().background(Color.white.opacity(0.10))
             }
 
@@ -295,10 +334,14 @@ struct MedicionView: View {
 
     private func agregarItem() {
         guard let c = toCm(cVal), let l = toCm(lVal), let a = toCm(aVal),
-              let v = Int(volsVal), let p = Double(pesoUnitVal),
+              let v = Int(volsVal),
               c > 0, l > 0, a > 0, v > 0 else { return }
-        items.append(MedicionItem(c: c, l: l, a: a, vols: v, pesoUnit: p))
+        let p = Double(pesoUnitVal) ?? 0   // peso opcional, 0 si vacío
+        var item = MedicionItem(c: c, l: l, a: a, vols: v, pesoUnit: p)
+        item.isOversize = isOversize
+        items.append(item)
         cVal = ""; lVal = ""; aVal = ""; volsVal = ""; pesoUnitVal = ""
+        isOversize = false
     }
 
     private func finalizarMinuta() {

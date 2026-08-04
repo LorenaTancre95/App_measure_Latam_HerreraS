@@ -18,12 +18,13 @@ enum AppRoute: Hashable {
 // MARK: - Modelo de ítem
 struct MedicionItem: Identifiable {
     let id = UUID()
-    var c: Double   // largo (cm)
-    var l: Double   // ancho (cm)
-    var a: Double   // alto  (cm)
+    var c: Double          // largo  (cm)
+    var l: Double          // ancho  (cm)
+    var a: Double          // alto   (cm)
     var vols: Int
-    var pesoUnit: Double
-    var pesoTotal: Double { Double(vols) * pesoUnit }
+    var pesoUnit: Double   // 0 si no se ingresó (campo opcional)
+    var isOversize: Bool = false
+    var pesoTotal:  Double { Double(vols) * pesoUnit }
     // CBM = cm³ / 1_000_000 → peso cubado aéreo = CBM × 166.67 kg/m³
     var pesoCubado: Double { (c * l * a / 1_000_000.0) * 166.67 * Double(vols) }
     var cla: String { "\(Int(c))×\(Int(l))×\(Int(a))" }

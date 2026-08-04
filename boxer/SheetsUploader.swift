@@ -32,14 +32,15 @@ actor SheetsUploader {
                 minuta.numero,                            // AWB
                 idx + 1,                                  // Medida#
                 item.vols,                                // Bultos
-                item.pesoUnit,                            // Peso (por unidad)
+                item.pesoUnit > 0 ? item.pesoUnit : "",  // Peso (por unidad) — vacío si no se ingresó
                 Int(item.c),                              // Largo (cm)
                 Int(item.l),                              // Ancho (cm)
                 Int(item.a),                              // Alto  (cm)
                 String(format: "%.6f", pesoVol),          // PesoVol
                 Self.dateFmt.string(from: minuta.fecha),  // Fecha
                 userEmail,                                 // User
-                ""                                        // FotoURL (el script lo reemplaza si hay foto)
+                "",                                       // FotoURL (el script lo reemplaza si hay foto)
+                item.isOversize ? "SI" : ""               // SOBREDIM
             ])
         }
 
