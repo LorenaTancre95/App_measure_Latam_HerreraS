@@ -59,6 +59,19 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor in vm.captureTap(at: pt) }
         }
 
+        // Captura el plano del piso cada vez que ARKit detecta o actualiza un plano horizontal
+        func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
+            guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return }
+            let y = plane.transform.columns.3.y
+            Task { @MainActor in self.viewModel?.updateFloorY(y) }
+        }
+
+        func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+            guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return }
+            let y = plane.transform.columns.3.y
+            Task { @MainActor in self.viewModel?.updateFloorY(y) }
+        }
+
         /// Cada 0.1s: acumula el punto LiDAR en el buffer y publica la mediana.
         /// La mediana es estable incluso si el teléfono vibra levemente.
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {

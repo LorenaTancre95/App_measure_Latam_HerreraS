@@ -40,6 +40,12 @@ final class ARViewModel: ObservableObject {
     @Published private(set) var savedAncho: Float? = nil
     @Published private(set) var savedLargo: Float? = nil
     @Published private(set) var savedAlto:  Float? = nil
+    /// Y del plano del piso detectado por ARKit (el plano horizontal más bajo)
+    @Published private(set) var floorY: Float? = nil
+
+    func updateFloorY(_ y: Float) {
+        if floorY == nil || y < floorY! { floorY = y }
+    }
 
     // Entero compatible con MeasureCrosshairView (0-5)
     var tapStep: Int {
@@ -69,14 +75,18 @@ final class ARViewModel: ObservableObject {
         case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
         case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
         case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
-        case (.alto,  .waitingFirst):  return "ALTO  —  tocá la esquina SUPERIOR con el dedo"
+        case (.alto,  .waitingFirst):
+            return floorY != nil
+                ? "ALTO  —  tocá la esquina SUPERIOR de la caja"
+                : "ALTO  —  apuntá al piso para detectarlo..."
         case (.alto,  .waitingSecond): return "ALTO  —  tocá la esquina INFERIOR (piso) con el dedo"
         default: return ""
         }
     }
 
     // Captura el punto 3D donde el usuario toca la pantalla directamente (solo para ALTO).
-    // Usa LiDAR en ese pixel exacto — no mueve el teléfono, la cámara queda fija → Y exacto.
+    // Si el piso ya fue detectado por ARKit → 1 solo tap en la esquina superior y listo.
+    // Si no → 2 taps manuales (superior + inferior) como fallback.
     func captureTap(at screenPoint: CGPoint) {
         guard dimPhase == .alto, tapPhase != .preview, !isProcessing else { return }
         guard let p = tapTo3D(point: screenPoint) else {
@@ -85,11 +95,24 @@ final class ARViewModel: ObservableObject {
         }
         guard let sv = sceneView else { return }
         placeMarker(at: p, in: sv)
+
         switch tapPhase {
         case .waitingFirst:
             firstPoint = p
-            tapPhase   = .waitingSecond
-            status     = currentInstruction
+            if let fy = floorY {
+                // Piso detectado: calcula altura automáticamente con 1 tap
+                let floorPt = simd_float3(p.x, fy, p.z)
+                secondPoint = floorPt
+                placeMarker(at: floorPt, in: sv)
+                drawLine(from: p, to: floorPt, in: sv)
+                tapPhase = .preview
+                let dist = measuredDistance ?? 0
+                status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            } else {
+                // Sin piso detectado: pide el 2° tap manual
+                tapPhase = .waitingSecond
+                status   = currentInstruction
+            }
         case .waitingSecond:
             secondPoint = p
             if let fp = firstPoint { drawLine(from: fp, to: p, in: sv) }

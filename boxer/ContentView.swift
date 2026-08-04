@@ -217,25 +217,35 @@ struct ContentView: View {
 
             } else if viewModel.dimPhase == .alto {
                 // ── ALTO: toque directo del dedo ─────────────────────────────
+                let floorReady = viewModel.floorY != nil
                 Text(viewModel.currentInstruction)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.orange)
+                    .foregroundColor(floorReady ? .orange : .white.opacity(0.5))
                     .multilineTextAlignment(.center)
                     .frame(minHeight: 18)
 
                 HStack(spacing: 10) {
-                    Image(systemName: "hand.tap.fill")
-                        .font(.system(size: 28))
-                        .foregroundColor(.orange)
-                    Text("Tocá la caja\ndirectamente")
-                        .font(.system(size: 14, weight: .bold))
-                        .foregroundColor(.white)
-                        .multilineTextAlignment(.leading)
+                    if floorReady {
+                        Image(systemName: "hand.tap.fill")
+                            .font(.system(size: 26))
+                            .foregroundColor(.orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Tocá la esquina superior")
+                                .font(.system(size: 13, weight: .bold)).foregroundColor(.white)
+                            Text("El piso se detectó automáticamente ✓")
+                                .font(.system(size: 10)).foregroundColor(.orange)
+                        }
+                    } else {
+                        ProgressView().tint(.white).scaleEffect(0.8)
+                        Text("Apuntá al piso para detectarlo...")
+                            .font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.5))
+                    }
                 }
                 .frame(maxWidth: .infinity).frame(height: 54)
-                .background(Color.orange.opacity(0.18))
+                .background(floorReady ? Color.orange.opacity(0.18) : Color.white.opacity(0.06))
                 .cornerRadius(16)
-                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+                .overlay(RoundedRectangle(cornerRadius: 16)
+                    .stroke(floorReady ? Color.orange.opacity(0.5) : Color.white.opacity(0.15), lineWidth: 1))
 
             } else {
                 // ── ANCHO / LARGO: crosshair + CAPTURAR ─────────────────────
