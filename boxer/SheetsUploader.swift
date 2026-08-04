@@ -47,7 +47,7 @@ actor SheetsUploader {
         guard let url = URL(string: webAppURL) else {
             throw SheetsError.invalidURL
         }
-        var req = URLRequest(url: url)
+        var req = URLRequest(url: url, timeoutInterval: 120)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
