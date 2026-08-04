@@ -10,7 +10,6 @@ import simd
 struct ContentView: View {
     @StateObject private var viewModel = ARViewModel()
     @StateObject private var signInMgr = GoogleSignInManager.shared
-    /// Callback en modo integrado (MedicionView): devuelve medición + foto.
     var onConfirm: ((DetectionInfo, ARViewModel.MeasureUnit, Data?) -> Void)?
 
     var body: some View {
@@ -20,62 +19,43 @@ struct ContentView: View {
             // YOLO debug bboxes
             ZStack(alignment: .topLeading) {
                 ForEach(Array(viewModel.debugBBoxes.enumerated()), id: \.offset) { _, item in
-                    Rectangle()
-                        .stroke(Color.yellow, lineWidth: 2)
+                    Rectangle().stroke(Color.yellow, lineWidth: 2)
                         .frame(width: item.rect.width, height: item.rect.height)
                         .offset(x: item.rect.origin.x, y: item.rect.origin.y)
                 }
             }
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
+            .ignoresSafeArea().allowsHitTesting(false)
 
-            // Viewfinder overlay
+            // Viewfinder
             GeometryReader { geo in
                 let vf = viewModel.viewfinderNorm
-                let rect = CGRect(
-                    x: vf.minX * geo.size.width,
-                    y: vf.minY * geo.size.height,
-                    width: vf.width * geo.size.width,
-                    height: vf.height * geo.size.height
-                )
-                ViewfinderOverlay(rect: rect)
+                ViewfinderOverlay(rect: CGRect(x: vf.minX*geo.size.width, y: vf.minY*geo.size.height,
+                                               width: vf.width*geo.size.width, height: vf.height*geo.size.height))
             }
-            .ignoresSafeArea()
-            .allowsHitTesting(false)
+            .ignoresSafeArea().allowsHitTesting(false)
 
-            // Segmentation mask overlay
-            if let overlay = viewModel.segmentationOverlay {
-                Image(uiImage: overlay)
-                    .resizable().scaledToFill().ignoresSafeArea()
-                    .allowsHitTesting(false).transition(.opacity)
-            }
-
-            // ── TAP MODE ──────────────────────────────────────────────────────
+            // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Overlay del rectángulo detectado en vivo
-                if viewModel.rectState == .detecting,
-                   let corners = viewModel.liveRectScreen {
-                    RectOverlayView(corners: corners)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
+                // Crosshair con preview del último punto y distancia en vivo
+                MeasureCrosshairView(
+                    hit:           viewModel.crosshairHit,
+                    step:          viewModel.tapStep,
+                    liveDistance:  viewModel.liveDistance,
+                    lastTapScreen: viewModel.lastTapScreen,
+                    unit:          viewModel.measureUnit,
+                    activeDim:     viewModel.activeDim
+                )
+                .ignoresSafeArea().allowsHitTesting(false)
 
-                // Crosshair (solo en paso LARGO para guiar el tap)
-                if viewModel.rectState == .largoTap {
-                    SimpleCrosshairView(hit: viewModel.crosshairHit)
-                        .ignoresSafeArea()
-                        .allowsHitTesting(false)
-                }
-
-                // Panel inferior según estado
+                // Panel inferior
                 VStack {
                     Spacer()
-                    tapModePanel
+                    tapPanel
                 }
             }
 
-            // ── RESULTADO: modo integrado (USAR / REMEDIAR) ───────────────────
+            // ── RESULTADO integrado (USAR / REMEDIAR) ─────────────────────
             if let confirm = onConfirm, !viewModel.detections.isEmpty {
                 VStack {
                     Spacer()
@@ -115,7 +95,7 @@ struct ContentView: View {
                 }
             }
 
-            // ── RESULTADO: modo standalone ────────────────────────────────────
+            // ── RESULTADO standalone ───────────────────────────────────────
             if onConfirm == nil, !viewModel.detections.isEmpty {
                 VStack {
                     Spacer()
@@ -129,35 +109,28 @@ struct ContentView: View {
                                     Image(systemName: "trash").font(.system(size: 12))
                                     Text("Limpiar").font(.system(size: 13, weight: .medium))
                                 }
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .foregroundColor(.white).padding(.horizontal, 10).padding(.vertical, 6)
                                 .background(.red.opacity(0.7)).cornerRadius(6)
                             }
                         }
-                        .padding(.leading, 16)
-                        Spacer()
-                    }
-                    .padding(.bottom, 80)
+                        .padding(.leading, 16); Spacer()
+                    }.padding(.bottom, 80)
                 }
             }
 
-            // ── CONTROLES DERECHA: unidad + UNDO + Google ─────────────────────
+            // ── CONTROLES DERECHA ──────────────────────────────────────────
             HStack {
                 Spacer()
-                Text(viewModel.status)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundColor(.white.opacity(0.75))
-                    .padding(.trailing, 8)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.trailing)
                 VStack(spacing: 8) {
+                    // Selector unidad
                     HStack(spacing: 0) {
                         ForEach(ARViewModel.MeasureUnit.allCases, id: \.self) { unit in
-                            unitButton(unit)
+                            unitBtn(unit)
                         }
                     }
                     .background(.black.opacity(0.45)).cornerRadius(8)
 
+                    // UNDO / BORRAR
                     Button(action: { viewModel.undoLast() }) {
                         ZStack {
                             Circle().fill(.white).frame(width: 70, height: 70)
@@ -168,15 +141,14 @@ struct ContentView: View {
                                 ProgressView().tint(.white)
                             } else {
                                 VStack(spacing: 1) {
-                                    Image(systemName: viewModel.rectState == .detecting ? "xmark" : "arrow.uturn.backward")
+                                    Image(systemName: viewModel.tapStep > 0 ? "arrow.uturn.backward" : "xmark")
                                         .font(.system(size: 18, weight: .bold)).foregroundColor(.white)
-                                    Text(viewModel.rectState == .detecting ? "BORRAR" : "UNDO")
+                                    Text(viewModel.tapStep > 0 ? "UNDO" : "BORRAR")
                                         .font(.system(size: 8, weight: .bold)).foregroundColor(.white)
                                 }
                             }
                         }
-                    }
-                    .disabled(viewModel.isProcessing)
+                    }.disabled(viewModel.isProcessing)
 
                     if !signInMgr.isSignedIn || !signInMgr.hasDriveScope {
                         Button(action: {
@@ -192,8 +164,7 @@ struct ContentView: View {
                                 Text(signInMgr.isSignedIn ? "Drive" : "Google")
                                     .font(.system(size: 10, weight: .semibold))
                             }
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 8).padding(.vertical, 5)
+                            .foregroundColor(.white).padding(.horizontal, 8).padding(.vertical, 5)
                             .background(signInMgr.isSignedIn ? .orange.opacity(0.8) : .black.opacity(0.55))
                             .cornerRadius(8)
                             .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.3), lineWidth: 1))
@@ -205,191 +176,156 @@ struct ContentView: View {
         }
     }
 
-    // MARK: - Panel TAP mode
+    // MARK: - Panel TAP
 
-    @ViewBuilder
-    private var tapModePanel: some View {
-        switch viewModel.rectState {
-        case .detecting:
-            detectingPanel
-        case .largoTap:
-            largoPanel
-        case .done:
-            EmptyView()
-        }
-    }
-
-    /// Panel "DETECTING": instrucción + botón CONFIRMAR (verde cuando hay rectángulo)
-    private var detectingPanel: some View {
-        VStack(spacing: 12) {
-            // Mini panel de estado
-            HStack(spacing: 10) {
-                Image(systemName: viewModel.liveRectScreen != nil ? "rectangle.inset.filled" : "viewfinder")
-                    .font(.system(size: 20))
-                    .foregroundColor(viewModel.liveRectScreen != nil ? .yellow : .white.opacity(0.5))
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(viewModel.liveRectScreen != nil ? "Cara detectada" : "Buscando cara frontal...")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundColor(viewModel.liveRectScreen != nil ? .yellow : .white.opacity(0.7))
-                    Text("Apuntá de frente a la caja")
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.45))
+    /// Panel inferior: instrucción del paso actual + botón CAPTURAR grande.
+    private var tapPanel: some View {
+        VStack(spacing: 10) {
+            // Barra de progreso: 6 dots
+            HStack(spacing: 6) {
+                ForEach(0..<6, id: \.self) { i in
+                    let done  = i < viewModel.tapStep
+                    let active = i == viewModel.tapStep
+                    Circle()
+                        .fill(done ? dimColor(i) : (active ? dimColor(i).opacity(0.5) : Color.white.opacity(0.2)))
+                        .frame(width: active ? 10 : 7, height: active ? 10 : 7)
+                        .overlay(Circle().stroke(active ? dimColor(i) : Color.clear, lineWidth: 1.5))
                 }
-                Spacer()
             }
-            .padding(.horizontal, 16).padding(.vertical, 10)
-            .background(.black.opacity(0.7)).cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12)
-                .stroke(viewModel.liveRectScreen != nil ? Color.yellow.opacity(0.6) : Color.white.opacity(0.1), lineWidth: 1.5))
 
-            // CONFIRMAR
-            Button(action: { viewModel.confirmFaceRect() }) {
-                HStack(spacing: 8) {
-                    Image(systemName: "checkmark.rectangle.fill")
-                        .font(.system(size: 18, weight: .bold))
-                    Text("CONFIRMAR CARA")
-                        .font(.system(size: 16, weight: .heavy))
-                }
-                .foregroundColor(viewModel.liveRectScreen != nil ? .black : .white.opacity(0.4))
-                .frame(maxWidth: .infinity).frame(height: 54)
-                .background(viewModel.liveRectScreen != nil ? Color.yellow : Color.white.opacity(0.12))
-                .cornerRadius(16)
+            // Instrucción actual
+            if viewModel.tapStep < 6 {
+                Text(ARViewModel.stepLabels[viewModel.tapStep])
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(dimColor(viewModel.tapStep))
+                    .multilineTextAlignment(.center)
             }
-            .disabled(viewModel.liveRectScreen == nil)
-        }
-        .padding(.horizontal, 20).padding(.bottom, 24)
-    }
 
-    /// Panel "LARGO TAP": muestra ANCHO+ALTO confirmados + instrucción para tap del LARGO
-    private var largoPanel: some View {
-        VStack(spacing: 12) {
-            // Dimensiones confirmadas
-            HStack(spacing: 0) {
-                confirmedDim(label: "ANCHO",
-                             value: viewModel.confirmedAncho.map { viewModel.measureUnit.format($0) + " " + viewModel.measureUnit.rawValue },
-                             color: .yellow)
-                Divider().background(.white.opacity(0.15)).frame(height: 36)
-                confirmedDim(label: "ALTO",
-                             value: viewModel.confirmedAlto.map { viewModel.measureUnit.format($0) + " " + viewModel.measureUnit.rawValue },
-                             color: .orange)
-                Divider().background(.white.opacity(0.15)).frame(height: 36)
-                confirmedDim(label: "LARGO",
-                             value: nil,
-                             color: .cyan,
-                             pending: true)
-            }
-            .padding(.vertical, 10)
-            .background(.black.opacity(0.75)).cornerRadius(12)
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.1), lineWidth: 1))
-
-            // Instrucción + botón captura crosshair
-            Button(action: {
-                let center = CGPoint(x: viewModel.viewportSize.width / 2,
-                                     y: viewModel.viewportSize.height / 2)
-                viewModel.measureLargoAt(point: center)
-            }) {
+            // Botón CAPTURAR
+            Button(action: { viewModel.captureCenter() }) {
                 HStack(spacing: 8) {
                     Image(systemName: "scope").font(.system(size: 18, weight: .bold))
-                    Text("LARGO — tocá borde lejano")
-                        .font(.system(size: 15, weight: .heavy))
+                    Text("CAPTURAR").font(.system(size: 16, weight: .heavy))
                 }
-                .foregroundColor(.black)
+                .foregroundColor(viewModel.crosshairHit ? .black : .white.opacity(0.5))
                 .frame(maxWidth: .infinity).frame(height: 54)
-                .background(viewModel.crosshairHit ? Color.cyan : Color.white.opacity(0.85))
+                .background(viewModel.crosshairHit ? dimColor(viewModel.tapStep) : Color.white.opacity(0.12))
                 .cornerRadius(16)
             }
+            .disabled(!viewModel.crosshairHit)
         }
-        .padding(.horizontal, 20).padding(.bottom, 24)
+        .padding(.horizontal, 20).padding(.vertical, 14)
+        .background(.black.opacity(0.55))
+        .cornerRadius(20)
+        .padding(.horizontal, 12).padding(.bottom, 16)
     }
 
-    private func confirmedDim(label: String, value: String?, color: Color, pending: Bool = false) -> some View {
-        VStack(spacing: 3) {
-            Text(label).font(.system(size: 9, weight: .bold)).foregroundColor(color.opacity(0.7))
-            if let v = value {
-                Text(v).font(.system(size: 14, weight: .heavy, design: .monospaced)).foregroundColor(color)
-            } else if pending {
-                Text("—").font(.system(size: 16)).foregroundColor(color.opacity(0.3))
-                    .overlay(alignment: .center) {
-                        ProgressView().scaleEffect(0.6).tint(color.opacity(0.5))
-                    }
-            }
+    /// Color por dimensión: amarillo=ANCHO · cyan=LARGO · naranja=ALTO
+    private func dimColor(_ step: Int) -> Color {
+        switch step {
+        case 0, 1: return .yellow
+        case 2, 3: return .cyan
+        default:   return .orange
         }
-        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
-    private func unitButton(_ unit: ARViewModel.MeasureUnit) -> some View {
+    private func unitBtn(_ unit: ARViewModel.MeasureUnit) -> some View {
         let active = viewModel.measureUnit == unit
         Button(action: { viewModel.measureUnit = unit }) {
             Text(unit.rawValue)
                 .font(.system(size: 11, weight: .bold))
                 .foregroundColor(active ? .black : .white.opacity(0.6))
                 .padding(.horizontal, 10).padding(.vertical, 5)
-                .background(active ? Color.yellow : Color.clear)
-                .cornerRadius(7)
+                .background(active ? Color.yellow : Color.clear).cornerRadius(7)
         }
     }
 }
 
-// MARK: - Rectangle overlay (cara detectada)
+// MARK: - Crosshair con preview
 
-/// Dibuja el cuadrilátero del rectángulo detectado sobre la pantalla.
-struct RectOverlayView: View {
-    let corners: [CGPoint]  // [TL, TR, BL, BR]
-
-    var body: some View {
-        Canvas { ctx, _ in
-            guard corners.count == 4 else { return }
-            let tl = corners[0], tr = corners[1], bl = corners[2], br = corners[3]
-
-            var fill = Path()
-            fill.move(to: tl); fill.addLine(to: tr); fill.addLine(to: br); fill.addLine(to: bl)
-            fill.closeSubpath()
-            ctx.fill(fill, with: .color(.yellow.opacity(0.12)))
-            ctx.stroke(fill, with: .color(.yellow.opacity(0.9)),
-                       style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round, dash: [10, 5]))
-
-            // Esquinas marcadas
-            for pt in [tl, tr, bl, br] {
-                let r: CGFloat = 7
-                ctx.fill(Path(ellipseIn: CGRect(x: pt.x-r, y: pt.y-r, width: r*2, height: r*2)),
-                         with: .color(.yellow))
-                ctx.stroke(Path(ellipseIn: CGRect(x: pt.x-r, y: pt.y-r, width: r*2, height: r*2)),
-                           with: .color(.black.opacity(0.5)), style: StrokeStyle(lineWidth: 1))
-            }
-        }
-    }
-}
-
-// MARK: - Simple Crosshair para LARGO tap
-
-struct SimpleCrosshairView: View {
+/// Crosshair estilo Measure: muestra dónde va a caer el tap, línea al punto anterior, distancia viva.
+struct MeasureCrosshairView: View {
     let hit: Bool
-    private let ringSize: CGFloat = 52
-    private let lineLen: CGFloat  = 14
+    let step: Int
+    let liveDistance: Float?
+    let lastTapScreen: CGPoint?
+    let unit: ARViewModel.MeasureUnit
+    let activeDim: String
+
+    private let ringSize: CGFloat = 48
+    private let lineLen:  CGFloat = 12
 
     var body: some View {
         GeometryReader { geo in
-            let cx = geo.size.width / 2, cy = geo.size.height / 2
-            Canvas { ctx, _ in
-                let color: Color = hit ? .cyan : .white
-                let ringRect = CGRect(x: cx-ringSize/2, y: cy-ringSize/2, width: ringSize, height: ringSize)
-                ctx.stroke(Path(ellipseIn: ringRect), with: .color(color.opacity(0.9)),
-                           style: StrokeStyle(lineWidth: 2))
-                func seg(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
-                    var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
-                    ctx.stroke(p, with: .color(color.opacity(0.9)),
-                               style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            let cx = geo.size.width / 2
+            let cy = geo.size.height / 2
+            ZStack {
+                Canvas { ctx, _ in
+                    let color: Color = hit ? dimColor : .white.opacity(0.5)
+
+                    // Línea punteada desde el último tap al crosshair
+                    if let lts = lastTapScreen, step % 2 == 1 {
+                        var lp = Path(); lp.move(to: lts); lp.addLine(to: CGPoint(x: cx, y: cy))
+                        ctx.stroke(lp, with: .color(dimColor.opacity(0.85)),
+                                   style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [8, 5]))
+                        // Punto del tap anterior
+                        let r: CGFloat = 8
+                        ctx.fill(Path(ellipseIn: CGRect(x: lts.x-r, y: lts.y-r, width: r*2, height: r*2)),
+                                 with: .color(dimColor))
+                        ctx.stroke(Path(ellipseIn: CGRect(x: lts.x-r, y: lts.y-r, width: r*2, height: r*2)),
+                                   with: .color(.white.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5))
+                    }
+
+                    // Ring del crosshair
+                    let rr = CGRect(x: cx-ringSize/2, y: cy-ringSize/2, width: ringSize, height: ringSize)
+                    ctx.stroke(Path(ellipseIn: rr), with: .color(color.opacity(0.9)),
+                               style: StrokeStyle(lineWidth: hit ? 2.5 : 1.5))
+
+                    // Cruz
+                    func seg(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
+                        var p = Path(); p.move(to: CGPoint(x: ax, y: ay)); p.addLine(to: CGPoint(x: bx, y: by))
+                        ctx.stroke(p, with: .color(color.opacity(0.9)), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                    }
+                    seg(cx-ringSize/2-lineLen, cy, cx-ringSize/2, cy)
+                    seg(cx+ringSize/2, cy, cx+ringSize/2+lineLen, cy)
+                    seg(cx, cy-ringSize/2-lineLen, cx, cy-ringSize/2)
+                    seg(cx, cy+ringSize/2, cx, cy+ringSize/2+lineLen)
+
+                    // Punto central (relleno cuando hay hit)
+                    let dotR: CGFloat = hit ? 5 : 3
+                    ctx.fill(Path(ellipseIn: CGRect(x: cx-dotR, y: cy-dotR, width: dotR*2, height: dotR*2)),
+                             with: .color(color))
                 }
-                seg(cx-ringSize/2-lineLen, cy, cx-ringSize/2, cy)
-                seg(cx+ringSize/2, cy, cx+ringSize/2+lineLen, cy)
-                seg(cx, cy-ringSize/2-lineLen, cx, cy-ringSize/2)
-                seg(cx, cy+ringSize/2, cx, cy+ringSize/2+lineLen)
-                ctx.fill(Path(ellipseIn: CGRect(x: cx-3, y: cy-3, width: 6, height: 6)),
-                         with: .color(color))
+
+                // Distancia en vivo (2° tap del par)
+                if let dist = liveDistance {
+                    Text(unit.format(dist) + " " + unit.rawValue)
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14).padding(.vertical, 7)
+                        .background(.black.opacity(0.65)).cornerRadius(12)
+                        .position(x: cx, y: cy - ringSize/2 - 36)
+                }
+
+                // Indicador "tap X/2" bajo el crosshair
+                if step < 6 {
+                    Text("\(step % 2 + 1) / 2")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(hit ? dimColor : .white.opacity(0.5))
+                        .position(x: cx, y: cy + ringSize/2 + 18)
+                }
             }
         }
         .ignoresSafeArea()
+    }
+
+    private var dimColor: Color {
+        switch step {
+        case 0, 1: return .yellow
+        case 2, 3: return .cyan
+        default:   return .orange
+        }
     }
 }
 
@@ -399,12 +335,10 @@ struct DetectionCard: View {
     let detection: DetectionInfo
     let color: Color
     let unit: ARViewModel.MeasureUnit
-
     var body: some View {
         HStack(spacing: 8) {
             Circle().fill(color).frame(width: 10, height: 10)
-            Text(detection.label)
-                .font(.system(size: 13, weight: .bold)).foregroundColor(.white)
+            Text(detection.label).font(.system(size: 13, weight: .bold)).foregroundColor(.white)
             Text(unit.formatBox(detection.size.x, detection.size.y, detection.size.z))
                 .font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.8))
         }
@@ -413,16 +347,12 @@ struct DetectionCard: View {
     }
 }
 
-func boxColor(_ index: Int) -> Color {
-    let colors: [Color] = [.red, .green, .blue]
-    return colors[index % colors.count]
-}
+func boxColor(_ index: Int) -> Color { [Color.red, .green, .blue][index % 3] }
 
 // MARK: - Viewfinder
 
 struct ViewfinderOverlay: View {
     let rect: CGRect
-
     var body: some View {
         Canvas { ctx, _ in
             let corner: CGFloat = 28, lw: CGFloat = 3
@@ -431,16 +361,13 @@ struct ViewfinderOverlay: View {
             outer.addRoundedRect(in: rect, cornerSize: CGSize(width: 6, height: 6))
             ctx.fill(outer, with: .color(.black.opacity(0.35)))
             var p = Path()
-            let corners: [(CGPoint, CGFloat, CGFloat)] = [
-                (CGPoint(x: rect.minX, y: rect.minY),  1,  1),
-                (CGPoint(x: rect.maxX, y: rect.minY), -1,  1),
-                (CGPoint(x: rect.maxX, y: rect.maxY), -1, -1),
-                (CGPoint(x: rect.minX, y: rect.maxY),  1, -1),
-            ]
-            for (origin, dx, dy) in corners {
-                p.move(to: CGPoint(x: origin.x + dx * corner, y: origin.y))
+            for (origin, dx, dy) in [(CGPoint(x:rect.minX,y:rect.minY),CGFloat(1),CGFloat(1)),
+                                      (CGPoint(x:rect.maxX,y:rect.minY),-1,CGFloat(1)),
+                                      (CGPoint(x:rect.maxX,y:rect.maxY),-1,CGFloat(-1)),
+                                      (CGPoint(x:rect.minX,y:rect.maxY),CGFloat(1),-1)] {
+                p.move(to: CGPoint(x: origin.x + dx*corner, y: origin.y))
                 p.addLine(to: origin)
-                p.addLine(to: CGPoint(x: origin.x, y: origin.y + dy * corner))
+                p.addLine(to: CGPoint(x: origin.x, y: origin.y + dy*corner))
             }
             ctx.stroke(p, with: .color(.white), style: StrokeStyle(lineWidth: lw, lineCap: .round))
         }
