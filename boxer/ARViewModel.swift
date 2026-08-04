@@ -22,35 +22,25 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil
     @Published var debugInfo: String = ""
-    @Published var instruction: String = "Tocá la 1° esquina de la cara superior"
+    @Published var instruction: String = ""
     @Published var crosshairHit: Bool = false
-    @Published var isSnapping: Bool = false
     @Published var liveAimPoint: simd_float3? = nil
-    @Published var lastCornerScreen: CGPoint? = nil
 
-    // Nombres de las 3 dimensiones en orden de captura
-    // Instrucciones para cada uno de los 4 taps (2 para ANCHO + 2 para LARGO)
-    static let stepLabels = [
-        "ANCHO — tocá el lado IZQUIERDO",
-        "ANCHO — tocá el lado DERECHO",
-        "LARGO — tocá el borde CERCANO (arriba)",
-        "LARGO — tocá el borde LEJANO (arriba)"
-    ]
+    // MARK: - TAP mode: rectangle detection + 1 tap para LARGO
 
-    // Puntos capturados: P0,P1 = ANCHO · P2,P3 = LARGO (máx 4)
-    private(set) var tapPoints: [simd_float3] = []
-    // Y del plano del suelo detectado por ARKit (espacio mundial, metros)
-    @Published var floorY: Float? = nil
+    enum RectMeasureState { case detecting, largoTap, done }
 
-    // 0..4 (4 = completo)
-    var tapStep: Int { min(tapPoints.count, 4) }
-    var isDone: Bool { tapPoints.count >= 4 }
+    /// Estado actual del flujo de medición
+    @Published var rectState: RectMeasureState = .detecting
+    /// Esquinas [TL, TR, BL, BR] del rectángulo detectado en coordenadas de pantalla (para overlay)
+    @Published var liveRectScreen: [CGPoint]? = nil
+    /// Dimensiones confirmadas tras CONFIRMAR
+    @Published var confirmedAncho: Float? = nil
+    @Published var confirmedAlto: Float? = nil
+    @Published var confirmedLargo: Float? = nil
 
-    // Distancia en vivo solo durante el 2° tap de cada par (step 1 y 3)
-    var liveDistance: Float? {
-        guard tapPoints.count % 2 == 1, !isDone, let aim = liveAimPoint else { return nil }
-        return simd_distance(tapPoints[tapPoints.count - 1], aim)
-    }
+    private var liveRectCorners3D: [simd_float3]? = nil
+    private var confirmedCorners3D: [simd_float3]? = nil
 
     enum MeasureMode { case box, oversize, tap }
 
@@ -91,7 +81,6 @@ final class ARViewModel: ObservableObject {
     private var samSegmenter: SAMSegmenter?
     private var boxNodes: [SCNNode] = []
     private var markerNodes: [SCNNode] = []
-    private var lineNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
     func setup(sceneView: ARSCNView) {
@@ -103,25 +92,19 @@ final class ARViewModel: ObservableObject {
         let pallet = try? PalletDetector()
         await MainActor.run {
             self.palletDetector = pallet
-            self.status = "Apuntá a la caja y tocá las esquinas"
+            self.status = "Apuntá la cara frontal de la caja"
         }
     }
 
     nonisolated private func loadYOLO() async {
-        await MainActor.run {
-            self.samSegmenter = nil
-            self.status = "Cargando detector CAJA..."
-        }
+        await MainActor.run { self.status = "Cargando detector CAJA..." }
         guard let yoloPath = Bundle.main.path(forResource: "best", ofType: "onnx") else {
             await MainActor.run { self.status = "best.onnx no encontrado" }
             return
         }
         do {
             let yolo = try YOLODetector(modelPath: yoloPath)
-            await MainActor.run {
-                self.yoloDetector = yolo
-                self.status = "Apuntá la caja al visor"
-            }
+            await MainActor.run { self.yoloDetector = yolo; self.status = "Apuntá la caja al visor" }
         } catch {
             await MainActor.run { self.status = "YOLO falló: \(error.localizedDescription)" }
         }
@@ -130,18 +113,11 @@ final class ARViewModel: ObservableObject {
     func detectNow() {
         guard let sceneView, let frame = sceneView.session.currentFrame else { status = "Not ready"; return }
         guard frame.sceneDepth != nil else { status = "No LiDAR depth"; return }
+        if measureMode == .oversize { detectPallet(frame: frame, sceneView: sceneView); return }
+        guard let yoloDetector else { Task.detached { await self.loadYOLO() }; return }
 
-        if measureMode == .oversize {
-            detectPallet(frame: frame, sceneView: sceneView); return
-        }
-
-        guard let yoloDetector else {
-            Task.detached { await self.loadYOLO() }
-            return
-        }
-        let hasFloor = frame.anchors.contains { ($0 as? ARPlaneAnchor)?.alignment == .horizontal }
         isProcessing = true
-        status = hasFloor ? "Detectando (piso ✓)..." : "Detectando (sin piso aún)..."
+        status = "Detectando..."
         Task.detached {
             do {
                 let (img, _, _) = pixelBufferToFloatArray(frame.capturedImage, targetSize: 640)
@@ -154,7 +130,6 @@ final class ARViewModel: ObservableObject {
                     return
                 }
                 let topBoxes = Array(yoloBoxes.sorted { $0.score > $1.score }.prefix(5))
-
                 let vp = await MainActor.run { self.viewportSize }
                 let displayT = frame.displayTransform(for: .portrait, viewportSize: vp)
                 let res = frame.camera.imageResolution
@@ -169,7 +144,6 @@ final class ARViewModel: ObservableObject {
                                   width: abs(br.x-tl.x), height: abs(br.y-tl.y)), box.score)
                 }
                 await MainActor.run { self.debugBBoxes = screenBoxes }
-
                 let vfN = await MainActor.run { self.viewfinderNorm }
                 let vfR = CGRect(x: vfN.minX*vp.width, y: vfN.minY*vp.height,
                                  width: vfN.width*vp.width, height: vfN.height*vp.height)
@@ -179,8 +153,6 @@ final class ARViewModel: ObservableObject {
                 guard let best = vfPassed.first ?? topBoxes.first else {
                     await MainActor.run { self.isProcessing = false }; return
                 }
-                if vfPassed.isEmpty { await MainActor.run { self.status = "Apuntá la caja al viewfinder" } }
-
                 let nShots = 5
                 var shots: [Detection3D] = []
                 for i in 1...nShots {
@@ -192,7 +164,6 @@ final class ARViewModel: ObservableObject {
                     }
                     if i < nShots { try? await Task.sleep(nanoseconds: 250_000_000) }
                 }
-
                 let finalShots = shots
                 await MainActor.run {
                     if finalShots.isEmpty {
@@ -214,12 +185,10 @@ final class ARViewModel: ObservableObject {
         let ys = dets.map { $0.size.y }.sorted()
         let zs = dets.map { $0.size.z }.sorted()
         let medSize = simd_float3(xs[n/2], ys[n/2], zs[n/2])
-
         let cx = dets.map { $0.center.x }.sorted()[n/2]
         let cy = dets.map { $0.center.y }.sorted()[n/2]
         let cz = dets.map { $0.center.z }.sorted()[n/2]
         let center = simd_float3(cx, cy, cz)
-
         let medYaw = circularMedianAngle(dets.map { $0.yaw })
         let cosY = cos(medYaw), sinY = sin(medYaw)
         let worldTransform = simd_float4x4(
@@ -298,11 +267,9 @@ final class ARViewModel: ObservableObject {
 
     private func detectPallet(frame: ARFrame, sceneView: ARSCNView) {
         guard let detector = palletDetector else {
-            status = "PalletDetector no disponible — revisá pallet_seg.mlpackage"; return
+            status = "PalletDetector no disponible"; return
         }
-        isProcessing = true
-        status = "Detectando carga..."
-
+        isProcessing = true; status = "Detectando carga..."
         Task.detached {
             do {
                 let conf = await MainActor.run { self.confidenceThreshold }
@@ -310,12 +277,10 @@ final class ARViewModel: ObservableObject {
                     try detector.detect(pixelBuffer: frame.capturedImage, confThreshold: conf)
                 }
                 guard let mask = optMask else {
-                    await MainActor.run { self.status = "No se detectó carga (bajá el umbral de confianza)"; self.isProcessing = false }
+                    await MainActor.run { self.status = "No se detectó carga"; self.isProcessing = false }
                     return
                 }
-
-                let nShots = 3
-                var shots: [Detection3D] = []
+                let nShots = 3; var shots: [Detection3D] = []
                 for i in 1...nShots {
                     await MainActor.run { self.status = "Midiendo \(i)/\(nShots)..." }
                     let f = await MainActor.run { self.sceneView?.session.currentFrame }
@@ -325,139 +290,84 @@ final class ARViewModel: ObservableObject {
                     }
                     if i < nShots { try? await Task.sleep(nanoseconds: 300_000_000) }
                 }
-
                 await MainActor.run {
-                    if shots.isEmpty {
-                        self.status = "Sin geometría — apuntá más cerca o acercate"
-                    } else {
-                        self.placeBoxes([self.medianDetection(shots)], in: sceneView)
-                    }
+                    if shots.isEmpty { self.status = "Sin geometría — acercate más" }
+                    else { self.placeBoxes([self.medianDetection(shots)], in: sceneView) }
                     self.isProcessing = false
                 }
             } catch {
-                await MainActor.run {
-                    self.status = "Error SAM: \(error.localizedDescription)"
-                    self.isProcessing = false
-                }
+                await MainActor.run { self.status = "Error: \(error.localizedDescription)"; self.isProcessing = false }
             }
         }
     }
 
-    // MARK: - Medición por 4 taps: 2 para ANCHO + 2 para LARGO · ALTO automático del suelo
+    // MARK: - Rectangle measurement (TAP mode)
     //
-    // P0,P1 = lados izquierdo y derecho de la cara frontal → ANCHO = dist(P0,P1)
-    // P2,P3 = borde cercano y lejano de la cara superior  → LARGO = dist(P2,P3)
-    // ALTO  = avg(P2.y, P3.y) − floorY  (plano del suelo detectado por ARKit)
-    // Resultado: size.x=LARGO→C, size.y=ALTO→A, size.z=ANCHO→L  (compatible con MedicionView)
+    // Flujo:
+    // 1. ARViewContainer corre VNDetectRectanglesRequest cada 0.3s → llama updateLiveRect()
+    // 2. Usuario presiona CONFIRMAR → confirmFaceRect() → ANCHO+ALTO desde las 4 esquinas LiDAR
+    // 3. Usuario toca 1 punto en el borde lejano del techo → measureLargoAt() → LARGO
+    //
+    // ANCHO = promedio de dist(TL,TR) y dist(BL,BR)
+    // ALTO  = promedio de dist(TL,BL) y dist(TR,BR)
+    // LARGO = proyección del punto lejano sobre la normal del plano frontal
 
-    func captureCenter() {
-        let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
-        measureAtTap(at: center)
+    /// Llamado por el coordinator con el rectángulo detectado en cada frame.
+    /// corners3D: [TL, TR, BL, BR] en espacio mundial · cornersScreen: mismas en píxeles pantalla.
+    func updateLiveRect(corners3D: [simd_float3], cornersScreen: [CGPoint]) {
+        guard rectState == .detecting else { return }
+        liveRectCorners3D = corners3D
+        liveRectScreen = cornersScreen
     }
 
-    func measureAtTap(at point: CGPoint) {
-        guard !isProcessing, !isDone else { return }
+    func clearLiveRect() {
+        guard rectState == .detecting else { return }
+        liveRectCorners3D = nil
+        liveRectScreen = nil
+    }
 
+    /// Bloquea el rectángulo actual y calcula ANCHO + ALTO desde las esquinas 3D.
+    func confirmFaceRect() {
+        guard let corners = liveRectCorners3D, corners.count == 4 else { return }
+        confirmedCorners3D = corners
+        let tl = corners[0], tr = corners[1], bl = corners[2], br = corners[3]
+        confirmedAncho = (simd_distance(tl, tr) + simd_distance(bl, br)) / 2
+        confirmedAlto  = (simd_distance(tl, bl) + simd_distance(tr, br)) / 2
+        confirmedLargo = nil
+        liveRectScreen = nil
+        rectState = .largoTap
+        status = "Tocá el borde lejano del techo"
+    }
+
+    /// 1 tap en el borde lejano del techo → LARGO por proyección sobre la normal del plano frontal.
+    func measureLargoAt(point: CGPoint) {
+        guard rectState == .largoTap,
+              let corners = confirmedCorners3D, corners.count == 4 else { return }
         guard let pt3D = tapTo3D(point: point) else {
-            status = "Sin superficie — tocá directamente sobre la caja"
+            status = "Sin superficie — apuntá directamente sobre la caja"
             return
         }
+        if let sv = sceneView { placeMarker(at: pt3D, in: sv) }
 
-        guard let sv = sceneView else { return }
-        placeMarker(at: pt3D, in: sv)
+        let tl = corners[0], tr = corners[1], bl = corners[2]
+        let topCenter = (tl + tr) / 2
+        // Normal del plano frontal (producto cruz de los dos bordes)
+        let normal = simd_normalize(simd_cross(tr - tl, bl - tl))
+        let largo = max(0.03, abs(simd_dot(pt3D - topCenter, normal)))
+        confirmedLargo = largo
 
-        let isSecondInPair = tapPoints.count % 2 == 1
-        if isSecondInPair, let prev = tapPoints.last {
-            // 2° tap del par: dibujamos la línea y mostramos la distancia
-            let d = simd_distance(prev, pt3D)
-            drawLine(from: prev, to: pt3D, in: sv)
-            let dimName = tapPoints.count == 1 ? "ANCHO" : "LARGO"
-            debugInfo += "\(dimName): \(String(format:"%.1f", d*100)) cm\n"
-        }
-
-        tapPoints.append(pt3D)
-
-        if isDone {
-            let det = detectionFromPoints()
-            detections.append(det)
-            instruction = "✓ Medición completa"
-            status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
-        } else {
-            instruction = Self.stepLabels[tapPoints.count]
-            status = Self.stepLabels[tapPoints.count]
-        }
+        let ancho = confirmedAncho ?? 0.3
+        let alto  = confirmedAlto  ?? 0.2
+        let det = DetectionInfo(label: "caja",
+                                size: simd_float3(largo, alto, ancho),
+                                confidence: 1.0)
+        detections.append(det)
+        status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
+        rectState = .done
     }
 
-    // ANCHO=dist(P0,P1) · LARGO=dist(P2,P3) · ALTO=avgY(P2,P3)−floorY
-    private func detectionFromPoints() -> DetectionInfo {
-        let ancho = simd_distance(tapPoints[0], tapPoints[1])
-        let largo = simd_distance(tapPoints[2], tapPoints[3])
-        let avgY  = (tapPoints[2].y + tapPoints[3].y) / 2.0
-        let alto: Float = floorY.map { fy in max(0.03, avgY - fy) } ?? 0.15
-        // size.x=largo→C, size.y=alto→A, size.z=ancho→L
-        return DetectionInfo(label: "caja",
-                             size: simd_float3(largo, alto, ancho),
-                             confidence: 1.0)
-    }
+    // MARK: - Utilities LiDAR / AR
 
-    // Dibuja una línea amarilla entre los dos puntos de una dimensión medida
-    private func drawLine(from a: simd_float3, to b: simd_float3, in sceneView: ARSCNView) {
-        let dist = simd_distance(a, b)
-        guard dist > 0.001 else { return }
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemYellow
-        let cyl = SCNCylinder(radius: 0.003, height: CGFloat(dist))
-        cyl.materials = [mat]
-        let node = SCNNode(geometry: cyl)
-        node.simdPosition = (a + b) / 2
-        let dir = simd_normalize(b - a)
-        let up  = simd_float3(0, 1, 0)
-        let dot = simd_dot(up, dir)
-        if abs(dot) < 0.999 {
-            let axis = simd_normalize(simd_cross(up, dir))
-            node.simdRotation = simd_float4(axis.x, axis.y, axis.z, acos(dot))
-        }
-        sceneView.scene.rootNode.addChildNode(node)
-        lineNodes.append(node)
-    }
-
-    // MARK: - Utilidades LiDAR / AR
-
-    nonisolated static func nearestFeaturePoint(
-        frame: ARFrame,
-        screenPoint: CGPoint,
-        viewportSize: CGSize,
-        snapRadius: Float = 0.035
-    ) -> simd_float3? {
-        guard let pts = frame.rawFeaturePoints, !pts.points.isEmpty else { return nil }
-        let camT = frame.camera.transform
-        let origin = simd_float3(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
-        let displayT = frame.displayTransform(for: .portrait, viewportSize: viewportSize)
-        let norm = CGPoint(x: screenPoint.x / viewportSize.width,
-                           y: screenPoint.y / viewportSize.height)
-        let normImg = norm.applying(displayT.inverted())
-        let intr = frame.camera.intrinsics
-        let res  = frame.camera.imageResolution
-        let imgX = Float(normImg.x) * Float(res.width)
-        let imgY = Float(normImg.y) * Float(res.height)
-        let fx = intr[0][0], fy = intr[1][1], cx = intr[2][0], cy = intr[2][1]
-        let dirCam   = simd_float4((imgX - cx) / fx, -(imgY - cy) / fy, -1, 0)
-        let dirWorld4 = camT * dirCam
-        let dir = simd_normalize(simd_float3(dirWorld4.x, dirWorld4.y, dirWorld4.z))
-        var bestPerp = snapRadius
-        var bestPt: simd_float3? = nil
-        for pt in pts.points {
-            let v = pt - origin
-            let proj = simd_dot(v, dir)
-            guard proj > 0.08, proj < 6.0 else { continue }
-            let perp = simd_distance(origin + dir * proj, pt)
-            if perp < bestPerp { bestPerp = perp; bestPt = pt }
-        }
-        return bestPt
-    }
-
-    // Profundidad LiDAR → punto 3D en espacio mundo. Primero intenta el píxel central,
-    // luego expande a un entorno 3×3 si el central es inválido.
     nonisolated static func lidarPoint(
         frame: ARFrame,
         screenPoint: CGPoint,
@@ -477,7 +387,6 @@ final class ARViewModel: ObservableObject {
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         let rb   = CVPixelBufferGetBytesPerRow(depthBuffer)
         guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-
         let centerRow = base.advanced(by: tapDY * rb).assumingMemoryBound(to: Float32.self)
         let centerD   = centerRow[tapDX]
         var chosenD   = Float.infinity
@@ -491,9 +400,7 @@ final class ARViewModel: ObservableObject {
                 for dx in -1...1 {
                     let px = max(0, min(dW - 1, tapDX + dx))
                     let val = row[px]
-                    if val > 0.05, val < 8.0, val < chosenD {
-                        chosenD = val; chosenDX = px; chosenDY = py
-                    }
+                    if val > 0.05, val < 8.0, val < chosenD { chosenD = val; chosenDX = px; chosenDY = py }
                 }
             }
         }
@@ -523,52 +430,36 @@ final class ARViewModel: ObservableObject {
     }
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
-        let sphere = SCNSphere(radius: 0.005)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemGreen
+        let sphere = SCNSphere(radius: 0.006)
+        let mat = SCNMaterial(); mat.diffuse.contents = UIColor.systemCyan
         sphere.materials = [mat]
-        let node = SCNNode(geometry: sphere)
-        node.simdPosition = position
-        sceneView.scene.rootNode.addChildNode(node)
-        markerNodes.append(node)
+        let node = SCNNode(geometry: sphere); node.simdPosition = position
+        sceneView.scene.rootNode.addChildNode(node); markerNodes.append(node)
     }
 
-    func floorDetected(at planeY: Float) {
-        // Guardar el plano horizontal más bajo como referencia del suelo
-        if floorY == nil || planeY < (floorY ?? 0) {
-            floorY = planeY
-        }
-        guard !isCalibrated else { return }
-        isCalibrated = true
-        if !isProcessing { status = "Piso detectado ✓ — tocá 3 esquinas de la cara superior" }
+    func clearBoxes() {
+        boxNodes.forEach { $0.removeFromParentNode() }
+        boxNodes.removeAll()
+        detections.removeAll()
     }
-
-    func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
 
     func undoLast() {
-        if isDone { clearAll(); return }
-        guard !tapPoints.isEmpty else { clearAll(); return }
-
-        let prevCount = tapPoints.count
-        tapPoints.removeLast()
-
-        if let last = markerNodes.last {
-            last.removeFromParentNode()
-            markerNodes.removeLast()
-        }
-        // La línea se dibuja al completar cada par (prevCount par: 2 o 4)
-        if prevCount % 2 == 0, let lastLine = lineNodes.last {
-            lastLine.removeFromParentNode()
-            lineNodes.removeLast()
-        }
-
-        if tapPoints.isEmpty {
-            instruction = Self.stepLabels[0]
-            status = Self.stepLabels[0]
-            debugInfo = ""
-        } else {
-            instruction = Self.stepLabels[tapPoints.count]
-            status = "Deshecho — \(Self.stepLabels[tapPoints.count])"
+        switch rectState {
+        case .done:
+            clearBoxes()
+            markerNodes.forEach { $0.removeFromParentNode() }
+            markerNodes.removeAll()
+            confirmedLargo = nil
+            rectState = .largoTap
+            status = "Tocá el borde lejano del techo"
+        case .largoTap:
+            confirmedCorners3D = nil
+            confirmedAncho = nil
+            confirmedAlto = nil
+            rectState = .detecting
+            status = "Apuntá la cara frontal de la caja"
+        case .detecting:
+            clearAll()
         }
     }
 
@@ -577,18 +468,20 @@ final class ARViewModel: ObservableObject {
         lastDetections3D.removeAll()
         debugBBoxes.removeAll()
         debugInfo = ""
-        tapPoints.removeAll()
         markerNodes.forEach { $0.removeFromParentNode() }
         markerNodes.removeAll()
-        lineNodes.forEach { $0.removeFromParentNode() }
-        lineNodes.removeAll()
-        instruction = Self.stepLabels[0]
-        status = Self.stepLabels[0]
+        liveRectCorners3D = nil
+        liveRectScreen = nil
+        confirmedCorners3D = nil
+        confirmedAncho = nil
+        confirmedAlto = nil
+        confirmedLargo = nil
+        rectState = .detecting
+        status = "Apuntá la cara frontal de la caja"
     }
 
     // MARK: - Frame capture
 
-    /// Captura el frame AR actual como JPEG (orientación portrait). Retorna nil si no hay frame.
     func captureCurrentFrame() -> Data? {
         guard let frame = sceneView?.session.currentFrame else { return nil }
         let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
@@ -603,9 +496,7 @@ final class ARViewModel: ObservableObject {
         guard let frame = sceneView?.session.currentFrame else { status = "Sin frame AR"; return }
         guard !isProcessing else { return }
         let mode = measureMode == .box ? "CAJA" : "OVERSIZE"
-        isProcessing = true
-        status = "Subiendo foto..."
-
+        isProcessing = true; status = "Subiendo foto..."
         Task.detached {
             do {
                 let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
@@ -616,7 +507,7 @@ final class ARViewModel: ObservableObject {
                 try await DriveUploader.shared.upload(imageData: jpeg, mode: mode)
                 await MainActor.run { self.status = "Foto subida a Drive ✓"; self.isProcessing = false }
             } catch {
-                await MainActor.run { self.status = "Error subida: \(error.localizedDescription)"; self.isProcessing = false }
+                await MainActor.run { self.status = "Error: \(error.localizedDescription)"; self.isProcessing = false }
             }
         }
     }
