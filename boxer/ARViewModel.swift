@@ -51,6 +51,8 @@ final class ARViewModel: ObservableObject {
     var liveDistance: Float? {
         let s = tapPoints.count
         guard s % 2 == 1, !isDone, let aim = liveAimPoint else { return nil }
+        // ALTO (tap 5→6): solo eje Y — la distancia 3D infla si los puntos no están en la misma vertical
+        if s == 5 { return abs(tapPoints[4].y - aim.y) }
         return simd_distance(tapPoints[s - 1], aim)
     }
 
@@ -241,12 +243,13 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // ANCHO=dist(0,1) · LARGO=dist(2,3) · ALTO=dist(4,5)
+    // ANCHO=dist(0,1) · LARGO=dist(2,3) · ALTO=|Y4−Y5|
+    // ALTO usa solo eje Y: la distancia 3D infla si los taps no quedan en la misma vertical.
     // size: x=LARGO→C · y=ALTO→A · z=ANCHO→L  (compatible con MedicionView)
     private func buildDetection() -> DetectionInfo {
         let ancho = simd_distance(tapPoints[0], tapPoints[1])
         let largo = simd_distance(tapPoints[2], tapPoints[3])
-        let alto  = simd_distance(tapPoints[4], tapPoints[5])
+        let alto  = abs(tapPoints[4].y - tapPoints[5].y)
         return DetectionInfo(label: "caja", size: simd_float3(largo, alto, ancho), confidence: 1.0)
     }
 
