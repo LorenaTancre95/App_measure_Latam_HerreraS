@@ -37,19 +37,21 @@ struct ContentView: View {
             // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Crosshair con preview del último punto y distancia en vivo
-                MeasureCrosshairView(
-                    hit:           viewModel.crosshairHit,
-                    isStable:      viewModel.isAimStable,
-                    step:          viewModel.tapStep,
-                    liveDistance:  viewModel.liveDistance,
-                    lastTapScreen: viewModel.lastTapScreen,
-                    unit:          viewModel.measureUnit,
-                    activeDim:     viewModel.activeDim
-                )
-                .ignoresSafeArea().allowsHitTesting(false)
+                // Crosshair: solo cuando no estamos en preview
+                if viewModel.tapPhase != .preview {
+                    MeasureCrosshairView(
+                        hit:           viewModel.crosshairHit,
+                        isStable:      viewModel.isAimStable,
+                        step:          viewModel.tapStep,
+                        liveDistance:  viewModel.liveDistance,
+                        lastTapScreen: viewModel.lastTapScreen,
+                        unit:          viewModel.measureUnit,
+                        activeDim:     viewModel.activeDim
+                    )
+                    .ignoresSafeArea().allowsHitTesting(false)
+                }
 
-                // Panel inferior
+                // Panel inferior: siempre visible (muestra GUARDAR/BORRAR en preview)
                 VStack {
                     Spacer()
                     tapPanel
@@ -179,43 +181,62 @@ struct ContentView: View {
 
     // MARK: - Panel TAP
 
-    /// Panel inferior: instrucción del paso actual + botón CAPTURAR grande.
     private var tapPanel: some View {
-        VStack(spacing: 10) {
-            // Barra de progreso: 6 dots
-            HStack(spacing: 6) {
-                ForEach(0..<6, id: \.self) { i in
-                    let done  = i < viewModel.tapStep
-                    let active = i == viewModel.tapStep
-                    Circle()
-                        .fill(done ? dimColor(i) : (active ? dimColor(i).opacity(0.5) : Color.white.opacity(0.2)))
-                        .frame(width: active ? 10 : 7, height: active ? 10 : 7)
-                        .overlay(Circle().stroke(active ? dimColor(i) : Color.clear, lineWidth: 1.5))
-                }
+        VStack(spacing: 12) {
+
+            // ── 3 chips de progreso ──────────────────────────────────────────
+            HStack(spacing: 8) {
+                dimChip("ANCHO", val: viewModel.savedAncho, phase: .ancho)
+                dimChip("LARGO", val: viewModel.savedLargo, phase: .largo)
+                dimChip("ALTO",  val: viewModel.savedAlto,  phase: .alto)
             }
 
-            // Instrucción actual
-            if viewModel.tapStep < 6 {
-                Text(ARViewModel.stepLabels[viewModel.tapStep])
+            if viewModel.tapPhase == .preview {
+                // ── Preview: distancia grande + GUARDAR / BORRAR ─────────────
+                if let dist = viewModel.measuredDistance {
+                    Text(viewModel.measureUnit.format(dist) + " " + viewModel.measureUnit.rawValue)
+                        .font(.system(size: 42, weight: .heavy, design: .rounded))
+                        .foregroundColor(dimColor(viewModel.dimPhase))
+                        .padding(.vertical, 2)
+                }
+                HStack(spacing: 10) {
+                    Button(action: { viewModel.borrarMedicion() }) {
+                        Text("BORRAR")
+                            .font(.system(size: 15, weight: .bold)).foregroundColor(.white)
+                            .frame(maxWidth: .infinity).frame(height: 50)
+                            .background(Color.white.opacity(0.12)).cornerRadius(12)
+                            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.25), lineWidth: 1))
+                    }
+                    Button(action: { viewModel.guardarMedicion() }) {
+                        Text("GUARDAR")
+                            .font(.system(size: 15, weight: .heavy)).foregroundColor(.black)
+                            .frame(maxWidth: .infinity).frame(height: 50)
+                            .background(dimColor(viewModel.dimPhase)).cornerRadius(12)
+                    }
+                }
+
+            } else {
+                // ── Captura: instrucción + CAPTURAR ─────────────────────────
+                Text(viewModel.currentInstruction)
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(dimColor(viewModel.tapStep))
+                    .foregroundColor(dimColor(viewModel.dimPhase))
                     .multilineTextAlignment(.center)
-            }
+                    .frame(minHeight: 18)
 
-            // Botón CAPTURAR — verde brillante cuando el punto está estabilizado
-            Button(action: { viewModel.captureCenter() }) {
-                HStack(spacing: 8) {
-                    Image(systemName: viewModel.isAimStable ? "checkmark.circle.fill" : "scope")
-                        .font(.system(size: 18, weight: .bold))
-                    Text(viewModel.isAimStable ? "CAPTURAR" : "Estabilizando...")
-                        .font(.system(size: 16, weight: .heavy))
+                Button(action: { viewModel.captureCenter() }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: viewModel.isAimStable ? "checkmark.circle.fill" : "scope")
+                            .font(.system(size: 18, weight: .bold))
+                        Text(viewModel.isAimStable ? "CAPTURAR" : "Estabilizando...")
+                            .font(.system(size: 16, weight: .heavy))
+                    }
+                    .foregroundColor(viewModel.isAimStable ? .black : .white.opacity(0.45))
+                    .frame(maxWidth: .infinity).frame(height: 54)
+                    .background(viewModel.isAimStable ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
+                    .cornerRadius(16)
                 }
-                .foregroundColor(viewModel.isAimStable ? .black : .white.opacity(0.45))
-                .frame(maxWidth: .infinity).frame(height: 54)
-                .background(viewModel.isAimStable ? dimColor(viewModel.tapStep) : Color.white.opacity(0.10))
-                .cornerRadius(16)
+                .disabled(!viewModel.isAimStable)
             }
-            .disabled(!viewModel.isAimStable)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
         .background(.black.opacity(0.55))
@@ -223,7 +244,45 @@ struct ContentView: View {
         .padding(.horizontal, 12).padding(.bottom, 16)
     }
 
-    /// Color por dimensión: amarillo=ANCHO · cyan=LARGO · naranja=ALTO
+    // Chip de progreso para cada dimensión
+    @ViewBuilder
+    private func dimChip(_ name: String, val: Float?, phase: ARViewModel.DimPhase) -> some View {
+        let isActive = viewModel.dimPhase == phase
+        let color    = dimColor(phase)
+        Group {
+            if let v = val {
+                HStack(spacing: 3) {
+                    Image(systemName: "checkmark").font(.system(size: 9, weight: .bold))
+                    Text(viewModel.measureUnit.format(v) + viewModel.measureUnit.rawValue)
+                        .font(.system(size: 11, weight: .bold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .background(color.opacity(0.28)).cornerRadius(8)
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.85), lineWidth: 1))
+            } else {
+                Text(name)
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundColor(isActive ? color : color.opacity(0.35))
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(isActive ? Color.white.opacity(0.12) : Color.white.opacity(0.04))
+                    .cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(isActive ? 0.6 : 0.2), lineWidth: 1))
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private func dimColor(_ phase: ARViewModel.DimPhase) -> Color {
+        switch phase {
+        case .ancho: return .yellow
+        case .largo: return .cyan
+        case .alto:  return .orange
+        case .done:  return .green
+        }
+    }
+
+    // Overload para MeasureCrosshairView que sigue usando Int
     private func dimColor(_ step: Int) -> Color {
         switch step {
         case 0, 1: return .yellow

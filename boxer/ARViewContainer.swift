@@ -109,7 +109,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.liveAimPoint  = stablePoint          // mediana, no el raw
                 vm.isAimStable   = isStable
                 vm.lastTapScreen = lastTapScreenPt
-                self.cachedLastTap = vm.tapPoints.last
+                self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }
     }

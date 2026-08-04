@@ -27,42 +27,66 @@ final class ARViewModel: ObservableObject {
     /// Posición en pantalla del último tap colocado (para dibujar la línea de preview)
     @Published var lastTapScreen: CGPoint? = nil
 
-    // MARK: - TAP mode: 6 taps en 3 pares (ANCHO · LARGO · ALTO)
-    //
-    // tapPoints[0,1] → ANCHO   tapPoints[2,3] → LARGO   tapPoints[4,5] → ALTO
-    // Cada par: tap en crosshair center (liveAimPoint) → estable, no depende del dedo
+    // MARK: - TAP mode: ANCHO · LARGO · ALTO de a uno
+    // Cada dimensión: capturá 2 puntos → preview distancia → GUARDAR/BORRAR → siguiente
 
-    private(set) var tapPoints: [simd_float3] = []
+    enum DimPhase: Int { case ancho = 0, largo = 1, alto = 2, done = 3 }
+    enum TapPhase { case waitingFirst, waitingSecond, preview }
 
-    var tapStep: Int { min(tapPoints.count, 6) }
-    var isDone:  Bool { tapPoints.count >= 6 }
+    @Published var dimPhase: DimPhase = .ancho
+    @Published var tapPhase: TapPhase = .waitingFirst
+    @Published private(set) var firstPoint:  simd_float3? = nil
+    private              var secondPoint: simd_float3? = nil
+    @Published private(set) var savedAncho: Float? = nil
+    @Published private(set) var savedLargo: Float? = nil
+    @Published private(set) var savedAlto:  Float? = nil
 
-    // Etiquetas para cada uno de los 6 taps
-    static let stepLabels = [
-        "ANCHO  —  tocá el lado IZQUIERDO",
-        "ANCHO  —  tocá el lado DERECHO",
-        "LARGO  —  tocá el borde CERCANO",
-        "LARGO  —  tocá el borde LEJANO",
-        "ALTO   —  tocá la parte de ARRIBA",
-        "ALTO   —  tocá el PISO (abajo)"
-    ]
-
-    // Distancia en vivo solo durante el 2° tap de cada par
-    var liveDistance: Float? {
-        let s = tapPoints.count
-        guard s % 2 == 1, !isDone, let aim = liveAimPoint else { return nil }
-        // ALTO (tap 5→6): solo eje Y — la distancia 3D infla si los puntos no están en la misma vertical
-        if s == 5 { return abs(tapPoints[4].y - aim.y) }
-        return simd_distance(tapPoints[s - 1], aim)
+    // Entero compatible con MeasureCrosshairView (0-5)
+    var tapStep: Int {
+        switch (dimPhase, tapPhase) {
+        case (.ancho, .waitingFirst):  return 0
+        case (.ancho, _):              return 1
+        case (.largo, .waitingFirst):  return 2
+        case (.largo, _):              return 3
+        case (.alto, .waitingFirst):   return 4
+        default:                       return 5
+        }
     }
 
-    // Dimensión activa según el paso
     var activeDim: String {
-        switch tapPoints.count {
-        case 0, 1: return "ANCHO"
-        case 2, 3: return "LARGO"
-        default:   return "ALTO"
+        switch dimPhase {
+        case .ancho: return "ANCHO"
+        case .largo: return "LARGO"
+        case .alto:  return "ALTO"
+        case .done:  return ""
         }
+    }
+
+    // Instrucción para el tap actual
+    var currentInstruction: String {
+        switch (dimPhase, tapPhase) {
+        case (.ancho, .waitingFirst):  return "ANCHO  —  tocá el lado IZQUIERDO"
+        case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
+        case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
+        case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
+        case (.alto,  .waitingFirst):  return "ALTO   —  tocá la parte de ARRIBA"
+        case (.alto,  .waitingSecond): return "ALTO   —  tocá el PISO (abajo)"
+        default: return ""
+        }
+    }
+
+    // Distancia en vivo (solo durante el 2° tap de cada dimensión)
+    var liveDistance: Float? {
+        guard tapPhase == .waitingSecond, let fp = firstPoint, let aim = liveAimPoint else { return nil }
+        if dimPhase == .alto { return abs(fp.y - aim.y) }
+        return simd_distance(fp, aim)
+    }
+
+    // Distancia final capturada (disponible en estado .preview)
+    var measuredDistance: Float? {
+        guard tapPhase == .preview, let fp = firstPoint, let sp = secondPoint else { return nil }
+        if dimPhase == .alto { return abs(fp.y - sp.y) }
+        return simd_distance(fp, sp)
     }
 
     enum MeasureMode { case box, oversize, tap }
@@ -115,7 +139,7 @@ final class ARViewModel: ObservableObject {
         let pallet = try? PalletDetector()
         await MainActor.run {
             self.palletDetector = pallet
-            self.status = Self.stepLabels[0]
+            self.status = self.currentInstruction
         }
     }
 
@@ -196,12 +220,9 @@ final class ARViewModel: ObservableObject {
 
     // MARK: - Measurement (TAP mode)
 
-    /// Captura el punto 3D del crosshair center usando liveAimPoint (ya calculado, estable).
-    /// Si liveAimPoint no está disponible, intenta raycast → LiDAR como último recurso.
     func captureCenter() {
-        guard !isProcessing, !isDone else { return }
+        guard !isProcessing, tapPhase != .preview, dimPhase != .done else { return }
 
-        // Usamos liveAimPoint: ya es la mediana de los últimos N frames (estable)
         let pt3D: simd_float3
         if let aim = liveAimPoint {
             pt3D = aim
@@ -214,43 +235,65 @@ final class ARViewModel: ObservableObject {
             pt3D = p
         }
 
-        registerPoint(pt3D)
-    }
-
-    private func registerPoint(_ pt3D: simd_float3) {
         guard let sv = sceneView else { return }
         placeMarker(at: pt3D, in: sv)
 
-        let isSecond = tapPoints.count % 2 == 1
-        if isSecond, let prev = tapPoints.last {
-            drawLine(from: prev, to: pt3D, in: sv)
-            let d = simd_distance(prev, pt3D)
-            let dimIdx = tapPoints.count / 2  // 0=ANCHO, 1=LARGO, 2=ALTO
-            let dimNames = ["ANCHO", "LARGO", "ALTO"]
-            status = "\(dimNames[dimIdx]): \(measureUnit.format(d)) \(measureUnit.rawValue)"
-        }
-
-        tapPoints.append(pt3D)
-
-        if isDone {
-            let det = buildDetection()
-            detections.append(det)
-            status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
-            lastTapScreen = nil
-        } else {
-            // La instrucción para el siguiente tap
-            status = Self.stepLabels[tapPoints.count]
+        switch tapPhase {
+        case .waitingFirst:
+            firstPoint = pt3D
+            tapPhase   = .waitingSecond
+            status     = currentInstruction
+        case .waitingSecond:
+            secondPoint = pt3D
+            if let fp = firstPoint { drawLine(from: fp, to: pt3D, in: sv) }
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "\(activeDim): \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+        case .preview:
+            break
         }
     }
 
-    // ANCHO=dist(0,1) · LARGO=dist(2,3) · ALTO=|Y4−Y5|
-    // ALTO usa solo eje Y: la distancia 3D infla si los taps no quedan en la misma vertical.
-    // size: x=LARGO→C · y=ALTO→A · z=ANCHO→L  (compatible con MedicionView)
-    private func buildDetection() -> DetectionInfo {
-        let ancho = simd_distance(tapPoints[0], tapPoints[1])
-        let largo = simd_distance(tapPoints[2], tapPoints[3])
-        let alto  = abs(tapPoints[4].y - tapPoints[5].y)
-        return DetectionInfo(label: "caja", size: simd_float3(largo, alto, ancho), confidence: 1.0)
+    // Guarda la dimensión actual y avanza a la siguiente
+    func guardarMedicion() {
+        guard let dist = measuredDistance else { return }
+        switch dimPhase {
+        case .ancho: savedAncho = dist
+        case .largo: savedLargo = dist
+        case .alto:  savedAlto  = dist
+        case .done:  return
+        }
+        clearCurrentMarkers()
+        switch dimPhase {
+        case .ancho: dimPhase = .largo
+        case .largo: dimPhase = .alto
+        case .alto:
+            dimPhase = .done
+            let sa = savedAncho ?? 0, sl = savedLargo ?? 0
+            let det = DetectionInfo(label: "caja",
+                                    size: simd_float3(sl, dist, sa),
+                                    confidence: 1.0)
+            detections.append(det)
+            status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
+            lastTapScreen = nil
+            return
+        case .done: return
+        }
+        tapPhase = .waitingFirst
+        status   = currentInstruction
+    }
+
+    // Descarta los 2 puntos del segmento actual y empieza de nuevo esa dimensión
+    func borrarMedicion() {
+        clearCurrentMarkers()
+        tapPhase = .waitingFirst
+        status   = currentInstruction
+    }
+
+    private func clearCurrentMarkers() {
+        markerNodes.forEach { $0.removeFromParentNode() }; markerNodes.removeAll()
+        lineNodes.forEach   { $0.removeFromParentNode() }; lineNodes.removeAll()
+        firstPoint = nil; secondPoint = nil
     }
 
     // MARK: - Utilidades LiDAR / AR
@@ -433,29 +476,17 @@ final class ARViewModel: ObservableObject {
 
     // MARK: - Undo / Clear
 
-    func undoLast() {
-        guard !tapPoints.isEmpty else { clearAll(); return }
-        let prevCount = tapPoints.count
-        tapPoints.removeLast()
-        if let last = markerNodes.last { last.removeFromParentNode(); markerNodes.removeLast() }
-        // La línea se dibuja al terminar cada par (prevCount par: 2,4,6)
-        if prevCount % 2 == 0, let lastLine = lineNodes.last { lastLine.removeFromParentNode(); lineNodes.removeLast() }
-        if tapPoints.isEmpty {
-            status = Self.stepLabels[0]
-        } else {
-            status = "Deshecho — \(Self.stepLabels[tapPoints.count])"
-        }
-    }
+    func undoLast() { borrarMedicion() }
 
     func clearBoxes() { boxNodes.forEach { $0.removeFromParentNode() }; boxNodes.removeAll(); detections.removeAll() }
 
     func clearAll() {
         clearBoxes(); lastDetections3D.removeAll(); debugBBoxes.removeAll()
-        tapPoints.removeAll()
-        markerNodes.forEach { $0.removeFromParentNode() }; markerNodes.removeAll()
-        lineNodes.forEach { $0.removeFromParentNode() }; lineNodes.removeAll()
+        clearCurrentMarkers()
+        savedAncho = nil; savedLargo = nil; savedAlto = nil
+        dimPhase = .ancho; tapPhase = .waitingFirst
         lastTapScreen = nil
-        status = Self.stepLabels[0]
+        status = currentInstruction
     }
 
     // MARK: - Frame capture
