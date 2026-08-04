@@ -252,10 +252,13 @@ final class ARViewModel: ObservableObject {
 
     // MARK: - Utilidades LiDAR / AR
 
-    /// Raycast contra mesh primero (estable), LiDAR como backup.
+    /// LiDAR primero: lee el depth real del pixel (no atraviesa la caja hacia la cama/suelo).
+    /// Raycast solo si LiDAR no tiene datos en esa zona.
     private func tapTo3D(point: CGPoint) -> simd_float3? {
-        guard let sceneView else { return nil }
-        // 1. Raycast contra planos/mesh detectados por ARKit (resultado estable)
+        guard let sceneView, let frame = sceneView.session.currentFrame else { return nil }
+        if let lidar = ARViewModel.lidarPoint(frame: frame, screenPoint: point, viewportSize: viewportSize) {
+            return lidar
+        }
         for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
             if let q = sceneView.raycastQuery(from: point, allowing: target, alignment: .any),
                let r = sceneView.session.raycast(q).first {
@@ -263,9 +266,7 @@ final class ARViewModel: ObservableObject {
                 return simd_float3(col.x, col.y, col.z)
             }
         }
-        // 2. LiDAR raw como último recurso
-        guard let frame = sceneView.session.currentFrame else { return nil }
-        return ARViewModel.lidarPoint(frame: frame, screenPoint: point, viewportSize: viewportSize)
+        return nil
     }
 
     nonisolated static func lidarPoint(

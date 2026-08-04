@@ -50,20 +50,21 @@ struct ARViewContainer: UIViewRepresentable {
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
             let frame  = sv.session.currentFrame
 
-            // Intenta raycast contra mesh (más estable en bordes de caja)
+            // LiDAR primero: lee la profundidad real del pixel (no puede cruzar la caja y llegar a la cama).
+            // Raycast solo si LiDAR no devuelve nada (superficie sin depth data).
             var hitPoint: simd_float3? = nil
-            for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
-                if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
-                   let r = sv.session.raycast(q).first {
-                    let c = r.worldTransform.columns.3
-                    hitPoint = simd_float3(c.x, c.y, c.z)
-                    break
-                }
-            }
-
-            // Si no hay raycast, usa LiDAR
-            if hitPoint == nil, let f = frame {
+            if let f = frame {
                 hitPoint = ARViewModel.lidarPoint(frame: f, screenPoint: center, viewportSize: sv.bounds.size)
+            }
+            if hitPoint == nil {
+                for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
+                    if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
+                       let r = sv.session.raycast(q).first {
+                        let c = r.worldTransform.columns.3
+                        hitPoint = simd_float3(c.x, c.y, c.z)
+                        break
+                    }
+                }
             }
 
             // Proyectar el último tap colocado a coordenadas de pantalla
