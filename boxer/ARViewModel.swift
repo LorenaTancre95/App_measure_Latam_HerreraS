@@ -22,7 +22,8 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil
     @Published var crosshairHit: Bool = false
-    @Published var liveAimPoint: simd_float3? = nil
+    @Published var liveAimPoint: simd_float3? = nil    // punto estabilizado por mediana
+    @Published var isAimStable:  Bool = false           // true cuando el punto lleva N frames quieto
     /// Posición en pantalla del último tap colocado (para dibujar la línea de preview)
     @Published var lastTapScreen: CGPoint? = nil
 
@@ -198,12 +199,11 @@ final class ARViewModel: ObservableObject {
     func captureCenter() {
         guard !isProcessing, !isDone else { return }
 
-        // Usamos liveAimPoint directamente: ya fue calculado con raycast+LiDAR combinados
+        // Usamos liveAimPoint: ya es la mediana de los últimos N frames (estable)
         let pt3D: simd_float3
         if let aim = liveAimPoint {
             pt3D = aim
         } else {
-            // Fallback: raycast desde el centro
             let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
             guard let p = tapTo3D(point: center) else {
                 status = "Sin superficie — apuntá directo a la caja"

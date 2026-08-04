@@ -40,6 +40,7 @@ struct ContentView: View {
                 // Crosshair con preview del último punto y distancia en vivo
                 MeasureCrosshairView(
                     hit:           viewModel.crosshairHit,
+                    isStable:      viewModel.isAimStable,
                     step:          viewModel.tapStep,
                     liveDistance:  viewModel.liveDistance,
                     lastTapScreen: viewModel.lastTapScreen,
@@ -201,18 +202,20 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
             }
 
-            // Botón CAPTURAR
+            // Botón CAPTURAR — verde brillante cuando el punto está estabilizado
             Button(action: { viewModel.captureCenter() }) {
                 HStack(spacing: 8) {
-                    Image(systemName: "scope").font(.system(size: 18, weight: .bold))
-                    Text("CAPTURAR").font(.system(size: 16, weight: .heavy))
+                    Image(systemName: viewModel.isAimStable ? "checkmark.circle.fill" : "scope")
+                        .font(.system(size: 18, weight: .bold))
+                    Text(viewModel.isAimStable ? "CAPTURAR" : "Estabilizando...")
+                        .font(.system(size: 16, weight: .heavy))
                 }
-                .foregroundColor(viewModel.crosshairHit ? .black : .white.opacity(0.5))
+                .foregroundColor(viewModel.isAimStable ? .black : .white.opacity(0.45))
                 .frame(maxWidth: .infinity).frame(height: 54)
-                .background(viewModel.crosshairHit ? dimColor(viewModel.tapStep) : Color.white.opacity(0.12))
+                .background(viewModel.isAimStable ? dimColor(viewModel.tapStep) : Color.white.opacity(0.10))
                 .cornerRadius(16)
             }
-            .disabled(!viewModel.crosshairHit)
+            .disabled(!viewModel.isAimStable)
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
         .background(.black.opacity(0.55))
@@ -247,6 +250,7 @@ struct ContentView: View {
 /// Crosshair estilo Measure: muestra dónde va a caer el tap, línea al punto anterior, distancia viva.
 struct MeasureCrosshairView: View {
     let hit: Bool
+    let isStable: Bool
     let step: Int
     let liveDistance: Float?
     let lastTapScreen: CGPoint?
@@ -277,10 +281,17 @@ struct MeasureCrosshairView: View {
                                    with: .color(.white.opacity(0.9)), style: StrokeStyle(lineWidth: 1.5))
                     }
 
-                    // Ring del crosshair
+                    // Ring externo: más grueso y brillante cuando está estabilizado
                     let rr = CGRect(x: cx-ringSize/2, y: cy-ringSize/2, width: ringSize, height: ringSize)
-                    ctx.stroke(Path(ellipseIn: rr), with: .color(color.opacity(0.9)),
-                               style: StrokeStyle(lineWidth: hit ? 2.5 : 1.5))
+                    ctx.stroke(Path(ellipseIn: rr), with: .color(color.opacity(isStable ? 1.0 : 0.6)),
+                               style: StrokeStyle(lineWidth: isStable ? 3 : 1.5))
+                    // Ring interior cuando estable (doble anillo = "bloqueado")
+                    if isStable {
+                        let inner: CGFloat = ringSize * 0.6
+                        let ri = CGRect(x: cx-inner/2, y: cy-inner/2, width: inner, height: inner)
+                        ctx.stroke(Path(ellipseIn: ri), with: .color(color.opacity(0.5)),
+                                   style: StrokeStyle(lineWidth: 1))
+                    }
 
                     // Cruz
                     func seg(_ ax: CGFloat, _ ay: CGFloat, _ bx: CGFloat, _ by: CGFloat) {
@@ -292,8 +303,8 @@ struct MeasureCrosshairView: View {
                     seg(cx, cy-ringSize/2-lineLen, cx, cy-ringSize/2)
                     seg(cx, cy+ringSize/2, cx, cy+ringSize/2+lineLen)
 
-                    // Punto central (relleno cuando hay hit)
-                    let dotR: CGFloat = hit ? 5 : 3
+                    // Punto central: relleno sólido cuando estable
+                    let dotR: CGFloat = isStable ? 6 : 3
                     ctx.fill(Path(ellipseIn: CGRect(x: cx-dotR, y: cy-dotR, width: dotR*2, height: dotR*2)),
                              with: .color(color))
                 }

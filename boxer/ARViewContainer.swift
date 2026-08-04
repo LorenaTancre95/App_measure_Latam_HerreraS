@@ -36,12 +36,17 @@ struct ARViewContainer: UIViewRepresentable {
         weak var viewModel: ARViewModel?
         weak var sceneView: ARSCNView?
         private var lastHitCheck: TimeInterval = 0
-        /// Último tap 3D cacheado para proyectar a pantalla en el render thread
         var cachedLastTap: simd_float3? = nil
+
+        // Buffer de los últimos puntos LiDAR para calcular la mediana → punto estable
+        private var aimBuffer: [simd_float3] = []
+        private let bufferSize = 8          // ~0.8s de historia a 10Hz
+        private let stableThreshold: Float = 0.015  // 1.5 cm de varianza máxima
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
-        /// Cada 0.1s: actualiza liveAimPoint (raycast+LiDAR combinados) y lastTapScreen.
+        /// Cada 0.1s: acumula el punto LiDAR en el buffer y publica la mediana.
+        /// La mediana es estable incluso si el teléfono vibra levemente.
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard time - lastHitCheck > 0.1 else { return }
             lastHitCheck = time
@@ -50,24 +55,46 @@ struct ARViewContainer: UIViewRepresentable {
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
             let frame  = sv.session.currentFrame
 
-            // LiDAR primero: lee la profundidad real del pixel (no puede cruzar la caja y llegar a la cama).
-            // Raycast solo si LiDAR no devuelve nada (superficie sin depth data).
-            var hitPoint: simd_float3? = nil
+            // LiDAR primero (no atraviesa la caja hacia el fondo), raycast como fallback
+            var rawHit: simd_float3? = nil
             if let f = frame {
-                hitPoint = ARViewModel.lidarPoint(frame: f, screenPoint: center, viewportSize: sv.bounds.size)
+                rawHit = ARViewModel.lidarPoint(frame: f, screenPoint: center, viewportSize: sv.bounds.size)
             }
-            if hitPoint == nil {
+            if rawHit == nil {
                 for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
                     if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
                        let r = sv.session.raycast(q).first {
                         let c = r.worldTransform.columns.3
-                        hitPoint = simd_float3(c.x, c.y, c.z)
+                        rawHit = simd_float3(c.x, c.y, c.z)
                         break
                     }
                 }
             }
 
-            // Proyectar el último tap colocado a coordenadas de pantalla
+            // Actualizar el buffer con el nuevo punto (o vaciar si no hay hit)
+            if let pt = rawHit {
+                aimBuffer.append(pt)
+                if aimBuffer.count > bufferSize { aimBuffer.removeFirst() }
+            } else {
+                aimBuffer.removeAll()
+            }
+
+            // Mediana 3D: más robusta que el promedio frente a lecturas outlier
+            var stablePoint: simd_float3? = nil
+            var isStable = false
+            if aimBuffer.count >= 3 {
+                let xs = aimBuffer.map(\.x).sorted()
+                let ys = aimBuffer.map(\.y).sorted()
+                let zs = aimBuffer.map(\.z).sorted()
+                let mid = aimBuffer.count / 2
+                let med = simd_float3(xs[mid], ys[mid], zs[mid])
+                stablePoint = med
+                // Estable si todos los puntos del buffer están dentro del threshold
+                let maxDist = aimBuffer.map { simd_distance($0, med) }.max() ?? 0
+                isStable = aimBuffer.count >= bufferSize && maxDist < stableThreshold
+            }
+
+            // Proyectar último tap a pantalla (para la línea de preview)
             var lastTapScreenPt: CGPoint? = nil
             if let lt = cachedLastTap {
                 let proj = renderer.projectPoint(SCNVector3(lt.x, lt.y, lt.z))
@@ -76,13 +103,12 @@ struct ARViewContainer: UIViewRepresentable {
                 }
             }
 
-            let hit = hitPoint != nil
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
-                vm.crosshairHit  = hit
-                vm.liveAimPoint  = hitPoint
+                vm.crosshairHit  = stablePoint != nil
+                vm.liveAimPoint  = stablePoint          // mediana, no el raw
+                vm.isAimStable   = isStable
                 vm.lastTapScreen = lastTapScreenPt
-                // Cachear el último tap para el siguiente frame
                 self.cachedLastTap = vm.tapPoints.last
             }
         }
