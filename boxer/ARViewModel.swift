@@ -69,9 +69,34 @@ final class ARViewModel: ObservableObject {
         case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
         case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
         case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
-        case (.alto,  .waitingFirst):  return "ALTO   —  tocá la parte de ARRIBA"
-        case (.alto,  .waitingSecond): return "ALTO   —  tocá el PISO (abajo)"
+        case (.alto,  .waitingFirst):  return "ALTO  —  tocá la esquina SUPERIOR con el dedo"
+        case (.alto,  .waitingSecond): return "ALTO  —  tocá la esquina INFERIOR (piso) con el dedo"
         default: return ""
+        }
+    }
+
+    // Captura el punto 3D donde el usuario toca la pantalla directamente (solo para ALTO).
+    // Usa LiDAR en ese pixel exacto — no mueve el teléfono, la cámara queda fija → Y exacto.
+    func captureTap(at screenPoint: CGPoint) {
+        guard dimPhase == .alto, tapPhase != .preview, !isProcessing else { return }
+        guard let p = tapTo3D(point: screenPoint) else {
+            status = "Sin superficie en ese punto — intentá de nuevo"
+            return
+        }
+        guard let sv = sceneView else { return }
+        placeMarker(at: p, in: sv)
+        switch tapPhase {
+        case .waitingFirst:
+            firstPoint = p
+            tapPhase   = .waitingSecond
+            status     = currentInstruction
+        case .waitingSecond:
+            secondPoint = p
+            if let fp = firstPoint { drawLine(from: fp, to: p, in: sv) }
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+        case .preview: break
         }
     }
 

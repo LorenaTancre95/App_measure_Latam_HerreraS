@@ -23,6 +23,13 @@ struct ARViewContainer: UIViewRepresentable {
         sceneView.session.run(config)
         viewModel.setup(sceneView: sceneView)
         context.coordinator.sceneView = sceneView
+
+        // Tap directo para medición ALTO (sin mover el teléfono → Y preciso)
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleScreenTap(_:)))
+        tap.cancelsTouchesInView = false
+        sceneView.addGestureRecognizer(tap)
+
         return sceneView
     }
 
@@ -44,6 +51,13 @@ struct ARViewContainer: UIViewRepresentable {
         private let stableThreshold: Float = 0.015  // 1.5 cm de varianza máxima
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
+
+        @objc func handleScreenTap(_ gesture: UITapGestureRecognizer) {
+            guard let vm = viewModel, let sv = sceneView,
+                  vm.dimPhase == .alto, vm.tapPhase != .preview else { return }
+            let pt = gesture.location(in: sv)
+            Task { @MainActor in vm.captureTap(at: pt) }
+        }
 
         /// Cada 0.1s: acumula el punto LiDAR en el buffer y publica la mediana.
         /// La mediana es estable incluso si el teléfono vibra levemente.

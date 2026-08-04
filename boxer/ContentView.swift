@@ -37,8 +37,8 @@ struct ContentView: View {
             // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Crosshair: solo cuando no estamos en preview
-                if viewModel.tapPhase != .preview {
+                // Crosshair: solo para ANCHO y LARGO (ALTO usa toque directo del dedo)
+                if viewModel.tapPhase != .preview, viewModel.dimPhase != .alto {
                     MeasureCrosshairView(
                         hit:           viewModel.crosshairHit,
                         isStable:      viewModel.isAimStable,
@@ -215,8 +215,30 @@ struct ContentView: View {
                     }
                 }
 
+            } else if viewModel.dimPhase == .alto {
+                // ── ALTO: toque directo del dedo ─────────────────────────────
+                Text(viewModel.currentInstruction)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.orange)
+                    .multilineTextAlignment(.center)
+                    .frame(minHeight: 18)
+
+                HStack(spacing: 10) {
+                    Image(systemName: "hand.tap.fill")
+                        .font(.system(size: 28))
+                        .foregroundColor(.orange)
+                    Text("Tocá la caja\ndirectamente")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(.white)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity).frame(height: 54)
+                .background(Color.orange.opacity(0.18))
+                .cornerRadius(16)
+                .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.orange.opacity(0.5), lineWidth: 1))
+
             } else {
-                // ── Captura: instrucción + CAPTURAR ─────────────────────────
+                // ── ANCHO / LARGO: crosshair + CAPTURAR ─────────────────────
                 Text(viewModel.currentInstruction)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(dimColor(viewModel.dimPhase))
