@@ -22,12 +22,6 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Boxer3D needs camera access for AR 3D object detection.</string>
 
-	<key>NSMicrophoneUsageDescription</key>
-	<string>Se usa el micrófono para dictar el número de guía por voz.</string>
-
-	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Se usa el reconocimiento de voz para completar el número de guía automáticamente.</string>
-
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>
