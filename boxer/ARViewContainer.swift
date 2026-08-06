@@ -60,6 +60,17 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor in vm.captureTap(at: pt) }
         }
 
+        // Materializa los ARAnchor de tipo "marker" como esferas amarillas.
+        // ARKit reposiciona el nodo automáticamente cuando refina el mapa del mundo.
+        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+            guard anchor.name == "marker" else { return nil }
+            let sphere = SCNSphere(radius: 0.006)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = UIColor.systemYellow
+            sphere.materials = [mat]
+            return SCNNode(geometry: sphere)
+        }
+
         // Captura el plano del piso cada vez que ARKit detecta o actualiza un plano horizontal
         func renderer(_ renderer: SCNSceneRenderer, didAdd node: SCNNode, for anchor: ARAnchor) {
             guard let plane = anchor as? ARPlaneAnchor, plane.alignment == .horizontal else { return }
