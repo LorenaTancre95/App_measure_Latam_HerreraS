@@ -24,6 +24,7 @@ final class ARViewModel: ObservableObject {
     @Published var crosshairHit: Bool = false
     @Published var liveAimPoint: simd_float3? = nil    // punto estabilizado por mediana
     @Published var isAimStable:  Bool = false           // true cuando el punto lleva N frames quieto
+    @Published var isAimingAtFloor: Bool = false        // true cuando el crosshair apunta al suelo
     /// Posición en pantalla del último tap colocado (para dibujar la línea de preview)
     @Published var lastTapScreen: CGPoint? = nil
 
@@ -281,6 +282,13 @@ final class ARViewModel: ObservableObject {
                 return
             }
             pt3D = p
+        }
+
+        // Para ANCHO y LARGO: rechazar si el punto está en el plano del suelo.
+        // Evita que el crosshair capture el piso visible más allá de la cara lejana.
+        if dimPhase != .alto, let fy = floorY, abs(pt3D.y - fy) < 0.07 {
+            status = "Apuntás al suelo — subí la mira hacia la cara de la caja"
+            return
         }
 
         guard let sv = sceneView else { return }

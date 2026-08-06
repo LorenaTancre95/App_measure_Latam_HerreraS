@@ -147,9 +147,15 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
                 vm.crosshairHit  = stablePoint != nil
-                vm.liveAimPoint  = stablePoint          // mediana, no el raw
+                vm.liveAimPoint  = stablePoint
                 vm.isAimStable   = isStable
                 vm.lastTapScreen = lastTapScreenPt
+                // Detectar si el crosshair apunta al suelo (solo relevante para ANCHO/LARGO)
+                if vm.dimPhase != .alto, let pt = stablePoint, let fy = vm.floorY {
+                    vm.isAimingAtFloor = abs(pt.y - fy) < 0.07
+                } else {
+                    vm.isAimingAtFloor = false
+                }
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }
