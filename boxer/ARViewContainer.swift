@@ -150,12 +150,6 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.liveAimPoint  = stablePoint
                 vm.isAimStable   = isStable
                 vm.lastTapScreen = lastTapScreenPt
-                // Detectar si el crosshair apunta al suelo (solo relevante para ANCHO/LARGO)
-                if vm.dimPhase != .alto, let pt = stablePoint, let fy = vm.floorY {
-                    vm.isAimingAtFloor = abs(pt.y - fy) < 0.07
-                } else {
-                    vm.isAimingAtFloor = false
-                }
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }

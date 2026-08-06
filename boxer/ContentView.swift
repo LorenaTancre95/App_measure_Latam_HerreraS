@@ -255,30 +255,19 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .frame(minHeight: 18)
 
-                if viewModel.isAimingAtFloor {
-                    Label("Apuntás al suelo — subí la mira", systemImage: "arrow.up.circle")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.orange)
-                        .padding(.vertical, 4)
-                }
-
                 Button(action: { viewModel.captureCenter() }) {
                     HStack(spacing: 8) {
-                        Image(systemName: viewModel.isAimingAtFloor ? "exclamationmark.triangle.fill"
-                                       : viewModel.isAimStable      ? "checkmark.circle.fill" : "scope")
+                        Image(systemName: viewModel.isAimStable ? "checkmark.circle.fill" : "scope")
                             .font(.system(size: 18, weight: .bold))
-                        Text(viewModel.isAimingAtFloor ? "SUELO DETECTADO"
-                           : viewModel.isAimStable     ? "CAPTURAR" : "Estabilizando...")
+                        Text(viewModel.isAimStable ? "CAPTURAR" : "Estabilizando...")
                             .font(.system(size: 16, weight: .heavy))
                     }
-                    .foregroundColor(viewModel.isAimingAtFloor ? .orange
-                                   : viewModel.isAimStable     ? .black : .white.opacity(0.45))
+                    .foregroundColor(viewModel.isAimStable ? .black : .white.opacity(0.45))
                     .frame(maxWidth: .infinity).frame(height: 54)
-                    .background(viewModel.isAimingAtFloor ? Color.orange.opacity(0.20)
-                               : viewModel.isAimStable    ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
+                    .background(viewModel.isAimStable ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
                     .cornerRadius(16)
                 }
-                .disabled(!viewModel.isAimStable || viewModel.isAimingAtFloor)
+                .disabled(!viewModel.isAimStable)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
