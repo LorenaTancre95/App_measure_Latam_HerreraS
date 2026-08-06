@@ -87,7 +87,8 @@ final class ARViewModel: ObservableObject {
 
     // Captura el punto 3D donde el usuario toca la pantalla directamente (solo para ALTO).
     // Si el piso ya fue detectado por ARKit → 1 solo tap en la esquina superior y listo.
-    // Si no → 2 taps manuales (superior + inferior) como fallback.
+    // 1 solo tap en la cara superior → el piso se detecta automáticamente.
+    // Si ARPlaneAnchor aún no lo tiene, fuerza un raycast horizontal al momento del tap.
     func captureTap(at screenPoint: CGPoint) {
         guard dimPhase == .alto, tapPhase != .preview, !isProcessing else { return }
         guard let p = tapTo3D(point: screenPoint) else {
@@ -95,33 +96,41 @@ final class ARViewModel: ObservableObject {
             return
         }
         guard let sv = sceneView else { return }
-        placeMarker(at: p, in: sv)
 
-        switch tapPhase {
-        case .waitingFirst:
-            firstPoint = p
-            if let fy = floorY {
-                // Piso detectado: calcula altura automáticamente con 1 tap
-                let floorPt = simd_float3(p.x, fy, p.z)
-                secondPoint = floorPt
-                placeMarker(at: floorPt, in: sv)
-                drawLine(from: p, to: floorPt, in: sv)
-                tapPhase = .preview
-                let dist = measuredDistance ?? 0
-                status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-            } else {
-                // Sin piso detectado: pide el 2° tap manual
-                tapPhase = .waitingSecond
-                status   = currentInstruction
+        // Resolver floorY ahora si todavía no fue detectado por ARPlaneAnchor
+        var resolvedFloorY = floorY
+        if resolvedFloorY == nil {
+            // Raycast horizontal desde el centro de la pantalla buscando el suelo
+            let center = CGPoint(x: viewportSize.width / 2, y: viewportSize.height / 2)
+            for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
+                if let q = sv.raycastQuery(from: center, allowing: target, alignment: .horizontal),
+                   let r = sv.session.raycast(q).first {
+                    resolvedFloorY = r.worldTransform.columns.3.y
+                    floorY = resolvedFloorY
+                    break
+                }
             }
-        case .waitingSecond:
-            secondPoint = p
-            if let fp = firstPoint { drawLine(from: fp, to: p, in: sv) }
-            tapPhase = .preview
-            let dist = measuredDistance ?? 0
-            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-        case .preview: break
         }
+
+        // Siempre 1 tap: poner marker solo en la cara superior
+        placeMarker(at: p, in: sv)
+        firstPoint = p
+
+        guard let fy = resolvedFloorY else {
+            status = "Apuntá al suelo primero para detectar el piso"
+            tapPhase = .waitingFirst   // resetea para que puedan reintentar
+            firstPoint = nil
+            clearCurrentMarkers()
+            return
+        }
+
+        let floorPt = simd_float3(p.x, fy, p.z)
+        secondPoint = floorPt
+        // No se coloca marker en el piso — es automático, no un tap del usuario
+        drawLine(from: p, to: floorPt, in: sv)
+        tapPhase = .preview
+        let dist = measuredDistance ?? 0
+        status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
     }
 
     // Distancia en vivo (solo durante el 2° tap de cada dimensión)
