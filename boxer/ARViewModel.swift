@@ -68,30 +68,65 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Instrucción para el crosshair
+    // Instrucción para el tap actual
     var currentInstruction: String {
         switch (dimPhase, tapPhase) {
-        case (.ancho, .waitingFirst):  return "ANCHO  —  apuntá al lado IZQUIERDO"
-        case (.ancho, .waitingSecond): return "ANCHO  —  apuntá al lado DERECHO"
-        case (.largo, .waitingFirst):  return "LARGO  —  apuntá al borde CERCANO"
-        case (.largo, .waitingSecond): return "LARGO  —  apuntá al borde LEJANO"
+        case (.ancho, .waitingFirst):  return "ANCHO  —  tocá el lado IZQUIERDO"
+        case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
+        case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
+        case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
         case (.alto,  .waitingFirst):
             return floorY != nil
-                ? "ALTO  —  apuntá al borde SUPERIOR de la caja"
+                ? "ALTO  —  tocá la esquina SUPERIOR de la caja"
                 : "ALTO  —  apuntá al piso para detectarlo..."
+        case (.alto,  .waitingSecond): return "ALTO  —  tocá la esquina INFERIOR (piso) con el dedo"
         default: return ""
         }
     }
 
-    // ALTO ahora usa crosshair + CAPTURAR igual que ANCHO/LARGO.
-    // El crosshair apunta al borde superior; el piso se usa como base (floorY).
-    // Distancia en vivo: diferencia Y entre crosshair y piso → el usuario ve el alto en tiempo real.
-    var liveDistance: Float? {
-        if dimPhase == .alto, tapPhase == .waitingFirst,
-           let aim = liveAimPoint, let fy = floorY {
-            return abs(aim.y - fy)
+    // Captura el punto 3D donde el usuario toca la pantalla directamente (solo para ALTO).
+    // Si el piso ya fue detectado por ARKit → 1 solo tap en la esquina superior y listo.
+    // Si no → 2 taps manuales (superior + inferior) como fallback.
+    func captureTap(at screenPoint: CGPoint) {
+        guard dimPhase == .alto, tapPhase != .preview, !isProcessing else { return }
+        guard let p = tapTo3D(point: screenPoint) else {
+            status = "Sin superficie en ese punto — intentá de nuevo"
+            return
         }
+        guard let sv = sceneView else { return }
+        placeMarker(at: p, in: sv)
+
+        switch tapPhase {
+        case .waitingFirst:
+            firstPoint = p
+            if let fy = floorY {
+                // Piso detectado: calcula altura automáticamente con 1 tap
+                let floorPt = simd_float3(p.x, fy, p.z)
+                secondPoint = floorPt
+                placeMarker(at: floorPt, in: sv)
+                drawLine(from: p, to: floorPt, in: sv)
+                tapPhase = .preview
+                let dist = measuredDistance ?? 0
+                status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            } else {
+                // Sin piso detectado: pide el 2° tap manual
+                tapPhase = .waitingSecond
+                status   = currentInstruction
+            }
+        case .waitingSecond:
+            secondPoint = p
+            if let fp = firstPoint { drawLine(from: fp, to: p, in: sv) }
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+        case .preview: break
+        }
+    }
+
+    // Distancia en vivo (solo durante el 2° tap de cada dimensión)
+    var liveDistance: Float? {
         guard tapPhase == .waitingSecond, let fp = firstPoint, let aim = liveAimPoint else { return nil }
+        if dimPhase == .alto { return abs(fp.y - aim.y) }
         return simd_distance(fp, aim)
     }
 
@@ -139,7 +174,7 @@ final class ARViewModel: ObservableObject {
     private var yoloDetector: YOLODetector?
     private var palletDetector: PalletDetector?
     private var boxNodes: [SCNNode] = []
-    private var markerNodes: [SCNNode] = []
+    private var markerAnchors: [ARAnchor] = []
     private var lineNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
@@ -249,22 +284,6 @@ final class ARViewModel: ObservableObject {
         }
 
         guard let sv = sceneView else { return }
-
-        // ALTO: 1 solo punto (crosshair en el borde superior) + floorY como base
-        if dimPhase == .alto {
-            guard let fy = floorY else {
-                status = "Apuntá al suelo primero para detectar el piso"
-                return
-            }
-            firstPoint  = pt3D
-            secondPoint = simd_float3(pt3D.x, fy, pt3D.z)
-            placeMarker(at: pt3D, in: sv)
-            tapPhase = .preview
-            let dist = measuredDistance ?? 0
-            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-            return
-        }
-
         placeMarker(at: pt3D, in: sv)
 
         switch tapPhase {
@@ -320,8 +339,11 @@ final class ARViewModel: ObservableObject {
     }
 
     private func clearCurrentMarkers() {
-        markerNodes.forEach { $0.removeFromParentNode() }; markerNodes.removeAll()
-        lineNodes.forEach   { $0.removeFromParentNode() }; lineNodes.removeAll()
+        if let sv = sceneView {
+            markerAnchors.forEach { sv.session.remove(anchor: $0) }
+        }
+        markerAnchors.removeAll()
+        lineNodes.forEach { $0.removeFromParentNode() }; lineNodes.removeAll()
         firstPoint = nil; secondPoint = nil
     }
 
@@ -386,12 +408,11 @@ final class ARViewModel: ObservableObject {
     }
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
-        let sphere = SCNSphere(radius: 0.006)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemYellow
-        sphere.materials = [mat]
-        let node = SCNNode(geometry: sphere); node.simdPosition = position
-        sceneView.scene.rootNode.addChildNode(node); markerNodes.append(node)
+        var t = matrix_identity_float4x4
+        t.columns.3 = simd_float4(position.x, position.y, position.z, 1)
+        let anchor = ARAnchor(name: "marker", transform: t)
+        sceneView.session.add(anchor: anchor)
+        markerAnchors.append(anchor)
     }
 
     private func drawLine(from a: simd_float3, to b: simd_float3, in sceneView: ARSCNView) {
@@ -525,7 +546,7 @@ final class ARViewModel: ObservableObject {
         let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
         let ctx = CIContext()
         guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
-        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.75)
+        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.45)
     }
 
     func captureAndUpload() {

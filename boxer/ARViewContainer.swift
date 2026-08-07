@@ -147,7 +147,7 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
                 vm.crosshairHit  = stablePoint != nil
-                vm.liveAimPoint  = stablePoint
+                vm.liveAimPoint  = stablePoint          // mediana, no el raw
                 vm.isAimStable   = isStable
                 vm.lastTapScreen = lastTapScreenPt
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
