@@ -47,9 +47,8 @@ struct ARViewContainer: UIViewRepresentable {
 
         // Buffer de los últimos puntos LiDAR para calcular la mediana → punto estable
         private var aimBuffer: [simd_float3] = []
-        private let bufferSize = 6           // máximo historial (descarta el más viejo)
-        private let stableFrames = 3         // solo miro los últimos 3 frames → 0.3s
-        private let stableThreshold: Float = 0.020  // 2 cm — suficiente para carga
+        private let bufferSize = 8          // ~0.8s de historia a 10Hz
+        private let stableThreshold: Float = 0.015  // 1.5 cm de varianza máxima
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
@@ -58,17 +57,6 @@ struct ARViewContainer: UIViewRepresentable {
                   vm.dimPhase == .alto, vm.tapPhase != .preview else { return }
             let pt = gesture.location(in: sv)
             Task { @MainActor in vm.captureTap(at: pt) }
-        }
-
-        // Materializa los ARAnchor de tipo "marker" como esferas amarillas.
-        // ARKit reposiciona el nodo automáticamente cuando refina el mapa del mundo.
-        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-            guard anchor.name == "marker" else { return nil }
-            let sphere = SCNSphere(radius: 0.006)
-            let mat = SCNMaterial()
-            mat.diffuse.contents = UIColor.systemYellow
-            sphere.materials = [mat]
-            return SCNNode(geometry: sphere)
         }
 
         // Captura el plano del piso cada vez que ARKit detecta o actualiza un plano horizontal
@@ -128,11 +116,9 @@ struct ARViewContainer: UIViewRepresentable {
                 let mid = aimBuffer.count / 2
                 let med = simd_float3(xs[mid], ys[mid], zs[mid])
                 stablePoint = med
-                // Estable si los últimos `stableFrames` puntos están dentro del threshold.
-                // Solo miro el sufijo reciente → responde en ~0.3s sin esperar historial completo.
-                let recent = aimBuffer.suffix(stableFrames)
-                let maxDist = recent.map { simd_distance($0, med) }.max() ?? 0
-                isStable = recent.count >= stableFrames && maxDist < stableThreshold
+                // Estable si todos los puntos del buffer están dentro del threshold
+                let maxDist = aimBuffer.map { simd_distance($0, med) }.max() ?? 0
+                isStable = aimBuffer.count >= bufferSize && maxDist < stableThreshold
             }
 
             // Proyectar último tap a pantalla (para la línea de preview)

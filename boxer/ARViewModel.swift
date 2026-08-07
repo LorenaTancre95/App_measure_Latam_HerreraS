@@ -174,7 +174,7 @@ final class ARViewModel: ObservableObject {
     private var yoloDetector: YOLODetector?
     private var palletDetector: PalletDetector?
     private var boxNodes: [SCNNode] = []
-    private var markerAnchors: [ARAnchor] = []
+    private var markerNodes: [SCNNode] = []
     private var lineNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
@@ -339,11 +339,8 @@ final class ARViewModel: ObservableObject {
     }
 
     private func clearCurrentMarkers() {
-        if let sv = sceneView {
-            markerAnchors.forEach { sv.session.remove(anchor: $0) }
-        }
-        markerAnchors.removeAll()
-        lineNodes.forEach { $0.removeFromParentNode() }; lineNodes.removeAll()
+        markerNodes.forEach { $0.removeFromParentNode() }; markerNodes.removeAll()
+        lineNodes.forEach   { $0.removeFromParentNode() }; lineNodes.removeAll()
         firstPoint = nil; secondPoint = nil
     }
 
@@ -408,11 +405,12 @@ final class ARViewModel: ObservableObject {
     }
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
-        var t = matrix_identity_float4x4
-        t.columns.3 = simd_float4(position.x, position.y, position.z, 1)
-        let anchor = ARAnchor(name: "marker", transform: t)
-        sceneView.session.add(anchor: anchor)
-        markerAnchors.append(anchor)
+        let sphere = SCNSphere(radius: 0.006)
+        let mat = SCNMaterial()
+        mat.diffuse.contents = UIColor.systemYellow
+        sphere.materials = [mat]
+        let node = SCNNode(geometry: sphere); node.simdPosition = position
+        sceneView.scene.rootNode.addChildNode(node); markerNodes.append(node)
     }
 
     private func drawLine(from a: simd_float3, to b: simd_float3, in sceneView: ARSCNView) {
@@ -546,7 +544,7 @@ final class ARViewModel: ObservableObject {
         let ci = CIImage(cvPixelBuffer: frame.capturedImage).oriented(.right)
         let ctx = CIContext()
         guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
-        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.45)
+        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.75)
     }
 
     func captureAndUpload() {
