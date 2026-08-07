@@ -68,61 +68,30 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Instrucción para el tap actual
+    // Instrucción para el crosshair
     var currentInstruction: String {
         switch (dimPhase, tapPhase) {
-        case (.ancho, .waitingFirst):  return "ANCHO  —  tocá el lado IZQUIERDO"
-        case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
-        case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
-        case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
+        case (.ancho, .waitingFirst):  return "ANCHO  —  apuntá al lado IZQUIERDO"
+        case (.ancho, .waitingSecond): return "ANCHO  —  apuntá al lado DERECHO"
+        case (.largo, .waitingFirst):  return "LARGO  —  apuntá al borde CERCANO"
+        case (.largo, .waitingSecond): return "LARGO  —  apuntá al borde LEJANO"
         case (.alto,  .waitingFirst):
             return floorY != nil
-                ? "ALTO  —  tocá la esquina SUPERIOR de la caja"
+                ? "ALTO  —  apuntá al borde SUPERIOR de la caja"
                 : "ALTO  —  apuntá al piso para detectarlo..."
-        case (.alto,  .waitingSecond): return "ALTO  —  tocá la esquina INFERIOR (piso) con el dedo"
         default: return ""
         }
     }
 
-    // Captura el punto 3D donde el usuario toca la pantalla directamente (solo para ALTO).
-    // Si el piso ya fue detectado por ARKit → 1 solo tap en la esquina superior y listo.
-    // Si no → 2 taps manuales (superior + inferior) como fallback.
-    func captureTap(at screenPoint: CGPoint) {
-        guard dimPhase == .alto, tapPhase != .preview, !isProcessing else { return }
-        guard let p = tapTo3D(point: screenPoint) else {
-            status = "Sin superficie en ese punto — intentá de nuevo"
-            return
-        }
-        guard let sv = sceneView else { return }
-        placeMarker(at: p, in: sv)
-
-        switch tapPhase {
-        case .waitingFirst:
-            firstPoint = p
-            if let fy = floorY {
-                let floorPt = simd_float3(p.x, fy, p.z)
-                secondPoint = floorPt
-                // Sin línea: la línea 3D se veía diagonal por el ángulo de cámara y confundía
-                tapPhase = .preview
-                let dist = measuredDistance ?? 0
-                status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-            } else {
-                tapPhase = .waitingSecond
-                status   = currentInstruction
-            }
-        case .waitingSecond:
-            secondPoint = p
-            tapPhase = .preview
-            let dist = measuredDistance ?? 0
-            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-        case .preview: break
-        }
-    }
-
-    // Distancia en vivo (solo durante el 2° tap de cada dimensión)
+    // ALTO ahora usa crosshair + CAPTURAR igual que ANCHO/LARGO.
+    // El crosshair apunta al borde superior; el piso se usa como base (floorY).
+    // Distancia en vivo: diferencia Y entre crosshair y piso → el usuario ve el alto en tiempo real.
     var liveDistance: Float? {
+        if dimPhase == .alto, tapPhase == .waitingFirst,
+           let aim = liveAimPoint, let fy = floorY {
+            return abs(aim.y - fy)
+        }
         guard tapPhase == .waitingSecond, let fp = firstPoint, let aim = liveAimPoint else { return nil }
-        if dimPhase == .alto { return abs(fp.y - aim.y) }
         return simd_distance(fp, aim)
     }
 
@@ -280,6 +249,22 @@ final class ARViewModel: ObservableObject {
         }
 
         guard let sv = sceneView else { return }
+
+        // ALTO: 1 solo punto (crosshair en el borde superior) + floorY como base
+        if dimPhase == .alto {
+            guard let fy = floorY else {
+                status = "Apuntá al suelo primero para detectar el piso"
+                return
+            }
+            firstPoint  = pt3D
+            secondPoint = simd_float3(pt3D.x, fy, pt3D.z)
+            placeMarker(at: pt3D, in: sv)
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            return
+        }
+
         placeMarker(at: pt3D, in: sv)
 
         switch tapPhase {

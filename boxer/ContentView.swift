@@ -37,8 +37,8 @@ struct ContentView: View {
             // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Crosshair: solo para ANCHO y LARGO (ALTO usa toque directo del dedo)
-                if viewModel.tapPhase != .preview, viewModel.dimPhase != .alto {
+                // Crosshair: para ANCHO, LARGO y ALTO (todas las dimensiones)
+                if viewModel.tapPhase != .preview {
                     MeasureCrosshairView(
                         hit:           viewModel.crosshairHit,
                         isStable:      viewModel.isAimStable,
@@ -215,40 +215,8 @@ struct ContentView: View {
                     }
                 }
 
-            } else if viewModel.dimPhase == .alto {
-                // ── ALTO: toque directo del dedo ─────────────────────────────
-                let floorReady = viewModel.floorY != nil
-                Text(viewModel.currentInstruction)
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(floorReady ? .orange : .white.opacity(0.5))
-                    .multilineTextAlignment(.center)
-                    .frame(minHeight: 18)
-
-                HStack(spacing: 10) {
-                    if floorReady {
-                        Image(systemName: "hand.tap.fill")
-                            .font(.system(size: 26))
-                            .foregroundColor(.orange)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Tocá la esquina superior")
-                                .font(.system(size: 13, weight: .bold)).foregroundColor(.white)
-                            Text("El piso se detectó automáticamente ✓")
-                                .font(.system(size: 10)).foregroundColor(.orange)
-                        }
-                    } else {
-                        ProgressView().tint(.white).scaleEffect(0.8)
-                        Text("Apuntá al piso para detectarlo...")
-                            .font(.system(size: 13, weight: .medium)).foregroundColor(.white.opacity(0.5))
-                    }
-                }
-                .frame(maxWidth: .infinity).frame(height: 54)
-                .background(floorReady ? Color.orange.opacity(0.18) : Color.white.opacity(0.06))
-                .cornerRadius(16)
-                .overlay(RoundedRectangle(cornerRadius: 16)
-                    .stroke(floorReady ? Color.orange.opacity(0.5) : Color.white.opacity(0.15), lineWidth: 1))
-
             } else {
-                // ── ANCHO / LARGO: crosshair + CAPTURAR ─────────────────────
+                // ── ANCHO / LARGO / ALTO: crosshair + CAPTURAR ──────────────
                 Text(viewModel.currentInstruction)
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundColor(dimColor(viewModel.dimPhase))
