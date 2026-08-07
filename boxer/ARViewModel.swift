@@ -100,22 +100,18 @@ final class ARViewModel: ObservableObject {
         case .waitingFirst:
             firstPoint = p
             if let fy = floorY {
-                // Piso detectado: calcula altura automáticamente con 1 tap
                 let floorPt = simd_float3(p.x, fy, p.z)
                 secondPoint = floorPt
-                placeMarker(at: floorPt, in: sv)
-                drawLine(from: p, to: floorPt, in: sv)
+                // Sin línea: la línea 3D se veía diagonal por el ángulo de cámara y confundía
                 tapPhase = .preview
                 let dist = measuredDistance ?? 0
                 status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
             } else {
-                // Sin piso detectado: pide el 2° tap manual
                 tapPhase = .waitingSecond
                 status   = currentInstruction
             }
         case .waitingSecond:
             secondPoint = p
-            if let fp = firstPoint { drawLine(from: fp, to: p, in: sv) }
             tapPhase = .preview
             let dist = measuredDistance ?? 0
             status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
