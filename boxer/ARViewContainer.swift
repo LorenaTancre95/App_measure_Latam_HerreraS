@@ -45,10 +45,13 @@ struct ARViewContainer: UIViewRepresentable {
         private var lastHitCheck: TimeInterval = 0
         var cachedLastTap: simd_float3? = nil
 
+        // Detección de aristas del mesh LiDAR reconstruido
+        private let meshSnapper = MeshEdgeSnapper(minAngleDeg: 25)
+
         // Buffer de los últimos puntos LiDAR para calcular la mediana → punto estable
         private var aimBuffer: [simd_float3] = []
-        private let bufferSize = 8          // ~0.8s de historia a 10Hz
-        private let stableThreshold: Float = 0.015  // 1.5 cm de varianza máxima
+        private let bufferSize = 8
+        private let stableThreshold: Float = 0.015
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
@@ -92,13 +95,18 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
+            // Snap a arista del mesh 3D reconstruido (como Measure)
+            let snapPt    = meshSnapper.nearest(frame: frame, near: center,
+                                                viewportSize: sv.bounds.size, time: time)
+            let measurePt = snapPt ?? center
+
             // LiDAR primero (no atraviesa la caja hacia el fondo), raycast como fallback
             var rawHit: simd_float3? = ARViewModel.lidarPoint(frame: frame,
-                                                               screenPoint: center,
+                                                               screenPoint: measurePt,
                                                                viewportSize: sv.bounds.size)
             if rawHit == nil {
                 for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
-                    if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
+                    if let q = sv.raycastQuery(from: measurePt, allowing: target, alignment: .any),
                        let r = sv.session.raycast(q).first {
                         let c = r.worldTransform.columns.3
                         rawHit = simd_float3(c.x, c.y, c.z)
@@ -145,7 +153,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.liveAimPoint    = stablePoint
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
-                vm.crosshairSnapPt = nil                // sin snap — crosshair fijo en centro
+                vm.crosshairSnapPt = snapPt             // arista del mesh, nil = centro
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }
