@@ -224,23 +224,19 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .frame(minHeight: 18)
 
-                let canCapture = viewModel.crosshairHit &&
-                    (viewModel.dimPhase != .alto || viewModel.floorY != nil)
                 Button(action: { viewModel.captureCenter() }) {
                     HStack(spacing: 8) {
-                        Image(systemName: canCapture ? "scope" : "arrow.down.to.line")
+                        Image(systemName: viewModel.crosshairHit ? "scope" : "scope")
                             .font(.system(size: 18, weight: .bold))
-                        Text(canCapture
-                             ? "CAPTURAR"
-                             : (viewModel.dimPhase == .alto ? "Detectando piso..." : "Sin superficie"))
+                        Text("CAPTURAR")
                             .font(.system(size: 16, weight: .heavy))
                     }
-                    .foregroundColor(canCapture ? .black : .white.opacity(0.45))
+                    .foregroundColor(viewModel.crosshairHit ? .black : .white.opacity(0.45))
                     .frame(maxWidth: .infinity).frame(height: 54)
-                    .background(canCapture ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
+                    .background(viewModel.crosshairHit ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
                     .cornerRadius(16)
                 }
-                .disabled(!canCapture)
+                .disabled(!viewModel.crosshairHit)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 14)

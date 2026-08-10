@@ -76,10 +76,8 @@ final class ARViewModel: ObservableObject {
         case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
         case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
         case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
-        case (.alto,  .waitingFirst):
-            return floorY != nil
-                ? "ALTO  —  apuntá a la cara SUPERIOR de la caja"
-                : "ALTO  —  apuntá al piso para detectarlo..."
+        case (.alto,  .waitingFirst):  return "ALTO  —  apuntá a la cara SUPERIOR de la caja"
+        case (.alto,  .waitingSecond): return "ALTO  —  apuntá ahora a la BASE de la caja"
         default: return ""
         }
     }
@@ -273,22 +271,35 @@ final class ARViewModel: ObservableObject {
 
         guard let sv = sceneView else { return }
 
-        // ALTO: 1 punto con crosshair → distancia vertical al piso detectado por ARKit
+        // ALTO: crosshair → distancia vertical al piso
+        // Si ARKit detectó el piso: 1 CAPTURAR en la cara superior → listo
+        // Si no: 1er CAPTURAR = parte superior, 2do = parte inferior (manual)
         if dimPhase == .alto {
             guard let aim = liveAimPoint else {
                 status = "Sin superficie — apuntá directo a la caja"
                 return
             }
-            guard let fy = floorY else {
-                status = "Apuntá al piso primero para detectarlo"
-                return
-            }
             placeMarker(at: aim, in: sv)
-            firstPoint  = aim
-            secondPoint = simd_float3(aim.x, fy, aim.z)
-            tapPhase = .preview
-            let dist = measuredDistance ?? 0
-            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            switch tapPhase {
+            case .waitingFirst:
+                firstPoint = aim
+                if let fy = floorY {
+                    secondPoint = simd_float3(aim.x, fy, aim.z)
+                    tapPhase = .preview
+                    let dist = measuredDistance ?? 0
+                    status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+                } else {
+                    tapPhase = .waitingSecond
+                    status = "ALTO — apuntá ahora a la BASE de la caja"
+                }
+            case .waitingSecond:
+                secondPoint = aim
+                if let fp = firstPoint { drawLine(from: fp, to: aim, in: sv) }
+                tapPhase = .preview
+                let dist = measuredDistance ?? 0
+                status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            case .preview: break
+            }
             return
         }
 
