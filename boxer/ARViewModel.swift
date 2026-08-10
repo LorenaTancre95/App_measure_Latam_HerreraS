@@ -334,7 +334,7 @@ final class ARViewModel: ObservableObject {
         }
     }
 
-    // Guarda la dimensión actual y avanza a la siguiente
+    // Guarda la dimensión actual y avanza a la primera aún no guardada
     func guardarMedicion() {
         guard let dist = measuredDistance else { return }
         switch dimPhase {
@@ -344,23 +344,41 @@ final class ARViewModel: ObservableObject {
         case .done:  return
         }
         clearCurrentMarkers()
-        switch dimPhase {
-        case .ancho: dimPhase = .largo
-        case .largo: dimPhase = .alto
-        case .alto:
+        // Avanza a la primera dimensión que todavía no tiene valor
+        if savedAncho == nil      { dimPhase = .ancho }
+        else if savedLargo == nil { dimPhase = .largo }
+        else if savedAlto  == nil { dimPhase = .alto  }
+        else {
             dimPhase = .done
-            let sa = savedAncho ?? 0, sl = savedLargo ?? 0
+            let sa = savedAncho ?? 0, sl = savedLargo ?? 0, sh = savedAlto ?? 0
+            detections.removeAll()
             let det = DetectionInfo(label: "caja",
-                                    size: simd_float3(sl, dist, sa),
+                                    size: simd_float3(sl, sh, sa),
                                     confidence: 1.0)
             detections.append(det)
             status = "✓ \(measureUnit.formatBox(det.size.x, det.size.y, det.size.z))"
             lastTapScreen = nil
             return
-        case .done: return
         }
         tapPhase = .waitingFirst
         status   = currentInstruction
+    }
+
+    // Permite re-medir una dimensión ya guardada tocando su chip
+    func remeasure(_ dim: DimPhase) {
+        guard dim != .done else { return }
+        clearCurrentMarkers()
+        switch dim {
+        case .ancho: savedAncho = nil
+        case .largo: savedLargo = nil
+        case .alto:  savedAlto  = nil
+        case .done:  return
+        }
+        detections.removeAll(); lastDetections3D.removeAll()
+        dimPhase = dim
+        tapPhase = .waitingFirst
+        lastTapScreen = nil
+        status = currentInstruction
     }
 
     // Descarta los 2 puntos del segmento actual y empieza de nuevo esa dimensión

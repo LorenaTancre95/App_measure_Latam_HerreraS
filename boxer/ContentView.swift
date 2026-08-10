@@ -252,15 +252,18 @@ struct ContentView: View {
         let color    = dimColor(phase)
         Group {
             if let v = val {
-                HStack(spacing: 3) {
-                    Image(systemName: "checkmark").font(.system(size: 9, weight: .bold))
-                    Text(viewModel.measureUnit.format(v) + viewModel.measureUnit.rawValue)
-                        .font(.system(size: 11, weight: .bold))
+                // Chip con valor — tocable para re-medir
+                Button(action: { viewModel.remeasure(phase) }) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "pencil").font(.system(size: 8, weight: .bold))
+                        Text(viewModel.measureUnit.format(v) + viewModel.measureUnit.rawValue)
+                            .font(.system(size: 11, weight: .bold))
+                    }
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 10).padding(.vertical, 6)
+                    .background(color.opacity(0.28)).cornerRadius(8)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.85), lineWidth: 1.5))
                 }
-                .foregroundColor(.white)
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .background(color.opacity(0.28)).cornerRadius(8)
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.85), lineWidth: 1))
             } else {
                 Text(name)
                     .font(.system(size: 11, weight: .bold))
