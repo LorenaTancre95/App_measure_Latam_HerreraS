@@ -52,6 +52,17 @@ struct ARViewContainer: UIViewRepresentable {
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
+        // Materializa los ARAnchor "marker" como esferas amarillas.
+        // ARKit reposiciona el nodo automáticamente al refinar el mapa → punto siempre fijo.
+        func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+            guard anchor.name == "marker" else { return nil }
+            let sphere = SCNSphere(radius: 0.006)
+            let mat = SCNMaterial()
+            mat.diffuse.contents = UIColor.systemYellow
+            sphere.materials = [mat]
+            return SCNNode(geometry: sphere)
+        }
+
         @objc func handleScreenTap(_ gesture: UITapGestureRecognizer) {
             guard let vm = viewModel, let sv = sceneView,
                   vm.dimPhase == .alto, vm.tapPhase != .preview else { return }

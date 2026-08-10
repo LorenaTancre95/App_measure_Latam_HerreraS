@@ -174,7 +174,7 @@ final class ARViewModel: ObservableObject {
     private var yoloDetector: YOLODetector?
     private var palletDetector: PalletDetector?
     private var boxNodes: [SCNNode] = []
-    private var markerNodes: [SCNNode] = []
+    private var markerAnchors: [ARAnchor] = []
     private var lineNodes: [SCNNode] = []
     private var lastDetections3D: [Detection3D] = []
 
@@ -339,8 +339,8 @@ final class ARViewModel: ObservableObject {
     }
 
     private func clearCurrentMarkers() {
-        markerNodes.forEach { $0.removeFromParentNode() }; markerNodes.removeAll()
-        lineNodes.forEach   { $0.removeFromParentNode() }; lineNodes.removeAll()
+        markerAnchors.forEach { sceneView?.session.remove(anchor: $0) }; markerAnchors.removeAll()
+        lineNodes.forEach { $0.removeFromParentNode() }; lineNodes.removeAll()
         firstPoint = nil; secondPoint = nil
     }
 
@@ -405,12 +405,11 @@ final class ARViewModel: ObservableObject {
     }
 
     private func placeMarker(at position: simd_float3, in sceneView: ARSCNView) {
-        let sphere = SCNSphere(radius: 0.006)
-        let mat = SCNMaterial()
-        mat.diffuse.contents = UIColor.systemYellow
-        sphere.materials = [mat]
-        let node = SCNNode(geometry: sphere); node.simdPosition = position
-        sceneView.scene.rootNode.addChildNode(node); markerNodes.append(node)
+        var t = matrix_identity_float4x4
+        t.columns.3 = simd_float4(position.x, position.y, position.z, 1)
+        let anchor = ARAnchor(name: "marker", transform: t)
+        sceneView.session.add(anchor: anchor)
+        markerAnchors.append(anchor)
     }
 
     private func drawLine(from a: simd_float3, to b: simd_float3, in sceneView: ARSCNView) {
