@@ -543,9 +543,10 @@ final class ARViewModel: ObservableObject {
                     if let f, f.sceneDepth != nil { let det = await MainActor.run { PalletMeasurer.measure(frame: f, mask: mask) }; if let det { shots.append(det) } }
                     if i < nShots { try? await Task.sleep(nanoseconds: 300_000_000) }
                 }
+                let finalPalletShots = shots
                 await MainActor.run {
-                    if shots.isEmpty { self.status = "Sin geometría — acercate" }
-                    else { self.placeBoxes([self.medianDetection(shots)], in: sceneView) }
+                    if finalPalletShots.isEmpty { self.status = "Sin geometría — acercate" }
+                    else { self.placeBoxes([self.medianDetection(finalPalletShots)], in: sceneView) }
                     self.isProcessing = false
                 }
             } catch { await MainActor.run { self.status = "Error: \(error.localizedDescription)"; self.isProcessing = false } }

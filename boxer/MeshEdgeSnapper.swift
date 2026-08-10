@@ -101,7 +101,7 @@ final class MeshEdgeSnapper {
         tris.reserveCapacity(faceCount); fn.reserveCapacity(faceCount)
 
         for i in 0..<faceCount {
-            let base = fe.offset + i * icp * bpi
+            let base = i * icp * bpi
             func idx(_ j: Int) -> UInt32 {
                 let p = fBase.advanced(by: base + j * bpi)
                 return bpi == 2
