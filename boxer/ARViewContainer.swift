@@ -42,22 +42,14 @@ struct ARViewContainer: UIViewRepresentable {
         weak var viewModel: ARViewModel?
         weak var sceneView: ARSCNView?
         private var lastHitCheck: TimeInterval = 0
+        var cachedLastTap: simd_float3? = nil
 
-        // Punto de snap suavizado con lerp (evita saltos entre frames)
-        private var smoothedSnapPt: CGPoint? = nil
-
-        // Caché del frame anterior para filtrado 3D del snap
-        var cachedLastTap:  simd_float3? = nil
-        var cachedAimPoint: simd_float3? = nil
-
-        // Buffer de los últimos puntos LiDAR para calcular la mediana → punto estable
         private var aimBuffer: [simd_float3] = []
         private let bufferSize = 8
         private let stableThreshold: Float = 0.015
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
-        // Materializa los ARAnchor "marker" como esferas amarillas.
         func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
             guard anchor.name == "marker" else { return nil }
             let sphere = SCNSphere(radius: 0.006)
@@ -86,7 +78,7 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor in self.viewModel?.updateFloorY(y) }
         }
 
-        /// Cada 0.1s: calcula punto estable + snap a feature points o bordes de plano.
+        /// Cada 0.1s: LiDAR en centro de pantalla → buffer mediana → punto estable.
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard time - lastHitCheck > 0.1 else { return }
             lastHitCheck = time
@@ -94,51 +86,7 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
-            // ── SNAP: feature points trackeados por ARKit + bordes de planos detectados ──
-            // Las dos fuentes más estables disponibles sin APIs privadas.
-            var bestSnapWP: simd_float3? = nil
-            if let aim = cachedAimPoint {
-
-                // 1) Feature points de ARKit (trackeados frame a frame, muy estables)
-                //    Se concentran en zonas de alto contraste → esquinas y bordes de cajas
-                var bestFP: Float = 0.035   // 3.5 cm
-                if let pts = frame.rawFeaturePoints?.points {
-                    for p in pts {
-                        let d = simd_distance(p, aim)
-                        if d < bestFP { bestFP = d; bestSnapWP = p }
-                    }
-                }
-
-                // 2) Vértices de borde de planos ARKit (si no hay feature point cercano)
-                //    ARPlaneAnchor.geometry.boundaryVertices = perímetro exacto del plano
-                if bestSnapWP == nil {
-                    var bestBV: Float = 0.05   // 5 cm
-                    for anchor in frame.anchors.compactMap({ $0 as? ARPlaneAnchor }) {
-                        let T = anchor.transform
-                        for v in anchor.geometry.boundaryVertices {
-                            let w  = T * simd_float4(v.x, v.y, v.z, 1)
-                            let wp = simd_float3(w.x, w.y, w.z) / w.w
-                            let d  = simd_distance(aim, wp)
-                            if d < bestBV { bestBV = d; bestSnapWP = wp }
-                        }
-                    }
-                }
-            }
-
-            // Proyectar punto snap 3D → pantalla y suavizar con lerp (evita saltos)
-            let rawSnapPt: CGPoint? = bestSnapWP.flatMap {
-                projectToScreen($0, camera: frame.camera, size: sv.bounds.size)
-            }
-            if let rsp = rawSnapPt {
-                let prev = smoothedSnapPt ?? rsp
-                smoothedSnapPt = CGPoint(x: prev.x + (rsp.x - prev.x) * 0.35,
-                                          y: prev.y + (rsp.y - prev.y) * 0.35)
-            } else {
-                smoothedSnapPt = nil
-            }
-            let snapPt = smoothedSnapPt
-
-            // ── PROFUNDIDAD: LiDAR en centro de pantalla + buffer mediana ──
+            // LiDAR primero, raycast como fallback
             var rawHit: simd_float3? = ARViewModel.lidarPoint(frame: frame,
                                                                screenPoint: center,
                                                                viewportSize: sv.bounds.size)
@@ -168,13 +116,11 @@ struct ARViewContainer: UIViewRepresentable {
                 let zs = aimBuffer.map(\.z).sorted()
                 let mid = aimBuffer.count / 2
                 let med = simd_float3(xs[mid], ys[mid], zs[mid])
-                // Si hay snap cercano, usarlo como punto de medición (más preciso)
-                stablePoint = bestSnapWP ?? med
+                stablePoint = med
                 let maxDist = aimBuffer.map { simd_distance($0, med) }.max() ?? 0
                 isStable = aimBuffer.count >= bufferSize && maxDist < stableThreshold
             }
 
-            // Proyectar el tap anterior a pantalla (para la línea de preview)
             var lastTapScreenPt: CGPoint? = nil
             if let lt = cachedLastTap {
                 let proj = renderer.projectPoint(SCNVector3(lt.x, lt.y, lt.z))
@@ -189,27 +135,9 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.liveAimPoint    = stablePoint
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
-                vm.crosshairSnapPt = snapPt
-                self.cachedLastTap  = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
-                self.cachedAimPoint = stablePoint
+                vm.crosshairSnapPt = nil   // sin snap automático
+                self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
-        }
-
-        // MARK: - Helpers
-
-        private func projectToScreen(_ wp: simd_float3, camera: ARCamera, size: CGSize) -> CGPoint? {
-            let view = simd_inverse(camera.transform)
-            let cam  = view * simd_float4(wp.x, wp.y, wp.z, 1)
-            guard cam.z < -0.05 else { return nil }
-            let proj = camera.projectionMatrix(for: .portrait, viewportSize: size,
-                                               zNear: 0.001, zFar: 100)
-            let clip = proj * cam
-            let ndc  = simd_float2(clip.x, clip.y) / clip.w
-            guard abs(ndc.x) <= 1.3, abs(ndc.y) <= 1.3 else { return nil }
-            return CGPoint(
-                x: CGFloat((ndc.x + 1) * 0.5) * size.width,
-                y: CGFloat((1 - ndc.y) * 0.5) * size.height
-            )
         }
     }
 }
