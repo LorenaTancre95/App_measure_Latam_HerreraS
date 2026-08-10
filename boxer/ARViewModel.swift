@@ -77,9 +77,8 @@ final class ARViewModel: ObservableObject {
         case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
         case (.alto,  .waitingFirst):
             return floorY != nil
-                ? "ALTO  —  tocá la esquina SUPERIOR de la caja"
+                ? "ALTO  —  apuntá a la cara SUPERIOR de la caja"
                 : "ALTO  —  apuntá al piso para detectarlo..."
-        case (.alto,  .waitingSecond): return "ALTO  —  tocá la esquina INFERIOR (piso) con el dedo"
         default: return ""
         }
     }
@@ -271,6 +270,28 @@ final class ARViewModel: ObservableObject {
     func captureCenter() {
         guard !isProcessing, tapPhase != .preview, dimPhase != .done else { return }
 
+        guard let sv = sceneView else { return }
+
+        // ALTO: 1 punto con crosshair → distancia vertical al piso detectado por ARKit
+        if dimPhase == .alto {
+            guard let aim = liveAimPoint else {
+                status = "Sin superficie — apuntá directo a la caja"
+                return
+            }
+            guard let fy = floorY else {
+                status = "Apuntá al piso primero para detectarlo"
+                return
+            }
+            placeMarker(at: aim, in: sv)
+            firstPoint  = aim
+            secondPoint = simd_float3(aim.x, fy, aim.z)
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            return
+        }
+
+        // ANCHO / LARGO: 2 puntos con crosshair
         let pt3D: simd_float3
         if let aim = liveAimPoint {
             pt3D = aim
@@ -283,7 +304,6 @@ final class ARViewModel: ObservableObject {
             pt3D = p
         }
 
-        guard let sv = sceneView else { return }
         placeMarker(at: pt3D, in: sv)
 
         switch tapPhase {
