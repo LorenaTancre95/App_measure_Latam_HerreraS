@@ -21,11 +21,12 @@ final class ARViewModel: ObservableObject {
     @Published var isCalibrated: Bool = false
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil
-    @Published var crosshairHit: Bool = false
-    @Published var liveAimPoint: simd_float3? = nil    // punto estabilizado por mediana
-    @Published var isAimStable:  Bool = false           // true cuando el punto lleva N frames quieto
-    /// Posición en pantalla del último tap colocado (para dibujar la línea de preview)
-    @Published var lastTapScreen: CGPoint? = nil
+    @Published var crosshairHit:    Bool = false
+    @Published var liveAimPoint:   simd_float3? = nil   // punto estabilizado por mediana
+    @Published var isAimStable:    Bool = false          // true cuando el punto lleva N frames quieto
+    @Published var lastTapScreen:  CGPoint? = nil
+    /// Punto de pantalla al que snapeó el crosshair (arista detectada), nil = centro exacto
+    @Published var crosshairSnapPt: CGPoint? = nil
 
     // MARK: - TAP mode: ANCHO · LARGO · ALTO de a uno
     // Cada dimensión: capturá 2 puntos → preview distancia → GUARDAR/BORRAR → siguiente

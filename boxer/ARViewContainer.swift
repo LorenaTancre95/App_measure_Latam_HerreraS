@@ -88,19 +88,21 @@ struct ARViewContainer: UIViewRepresentable {
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard time - lastHitCheck > 0.1 else { return }
             lastHitCheck = time
-            guard let sv = sceneView else { return }
+            guard let sv = sceneView, let frame = sv.session.currentFrame else { return }
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
-            let frame  = sv.session.currentFrame
+
+            // Edge snap: busca la arista más cercana al centro dentro de 44px
+            let snapPt    = EdgeSnapper.nearest(frame: frame, near: center, viewportSize: sv.bounds.size)
+            let measurePt = snapPt ?? center   // mide desde la arista si se detectó
 
             // LiDAR primero (no atraviesa la caja hacia el fondo), raycast como fallback
-            var rawHit: simd_float3? = nil
-            if let f = frame {
-                rawHit = ARViewModel.lidarPoint(frame: f, screenPoint: center, viewportSize: sv.bounds.size)
-            }
+            var rawHit: simd_float3? = ARViewModel.lidarPoint(frame: frame,
+                                                               screenPoint: measurePt,
+                                                               viewportSize: sv.bounds.size)
             if rawHit == nil {
                 for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
-                    if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
+                    if let q = sv.raycastQuery(from: measurePt, allowing: target, alignment: .any),
                        let r = sv.session.raycast(q).first {
                         let c = r.worldTransform.columns.3
                         rawHit = simd_float3(c.x, c.y, c.z)
@@ -143,10 +145,11 @@ struct ARViewContainer: UIViewRepresentable {
 
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
-                vm.crosshairHit  = stablePoint != nil
-                vm.liveAimPoint  = stablePoint          // mediana, no el raw
-                vm.isAimStable   = isStable
-                vm.lastTapScreen = lastTapScreenPt
+                vm.crosshairHit    = stablePoint != nil
+                vm.liveAimPoint    = stablePoint
+                vm.isAimStable     = isStable
+                vm.lastTapScreen   = lastTapScreenPt
+                vm.crosshairSnapPt = snapPt             // arista detectada, nil = centro
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }

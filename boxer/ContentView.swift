@@ -37,7 +37,7 @@ struct ContentView: View {
             // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Crosshair: para ANCHO, LARGO y ALTO
+                // Crosshair: para ANCHO, LARGO y ALTO — snappea a la arista detectada
                 if viewModel.tapPhase != .preview {
                     MeasureCrosshairView(
                         hit:           viewModel.crosshairHit,
@@ -46,7 +46,8 @@ struct ContentView: View {
                         liveDistance:  viewModel.liveDistance,
                         lastTapScreen: viewModel.lastTapScreen,
                         unit:          viewModel.measureUnit,
-                        activeDim:     viewModel.activeDim
+                        activeDim:     viewModel.activeDim,
+                        snapPt:        viewModel.crosshairSnapPt
                     )
                     .ignoresSafeArea().allowsHitTesting(false)
                 }
@@ -223,19 +224,24 @@ struct ContentView: View {
                     .multilineTextAlignment(.center)
                     .frame(minHeight: 18)
 
+                let canCapture = viewModel.crosshairHit &&
+                    (viewModel.dimPhase != .alto || viewModel.floorY != nil)
                 Button(action: { viewModel.captureCenter() }) {
                     HStack(spacing: 8) {
-                        Image(systemName: viewModel.isAimStable ? "checkmark.circle.fill" : "scope")
+                        Image(systemName: canCapture ? "scope" : "arrow.down.to.line")
                             .font(.system(size: 18, weight: .bold))
-                        Text(viewModel.isAimStable ? "CAPTURAR" : "Estabilizando...")
+                        Text(canCapture
+                             ? (viewModel.dimPhase == .alto && viewModel.crosshairSnapPt != nil
+                                ? "CAPTURAR  ·  arista" : "CAPTURAR")
+                             : (viewModel.dimPhase == .alto ? "Detectando piso..." : "Sin superficie"))
                             .font(.system(size: 16, weight: .heavy))
                     }
-                    .foregroundColor(viewModel.isAimStable ? .black : .white.opacity(0.45))
+                    .foregroundColor(canCapture ? .black : .white.opacity(0.45))
                     .frame(maxWidth: .infinity).frame(height: 54)
-                    .background(viewModel.isAimStable ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
+                    .background(canCapture ? dimColor(viewModel.dimPhase) : Color.white.opacity(0.10))
                     .cornerRadius(16)
                 }
-                .disabled(!viewModel.isAimStable)
+                .disabled(!canCapture)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
@@ -315,14 +321,16 @@ struct MeasureCrosshairView: View {
     let lastTapScreen: CGPoint?
     let unit: ARViewModel.MeasureUnit
     let activeDim: String
+    var snapPt: CGPoint? = nil          // arista detectada; nil = centro de pantalla
 
     private let ringSize: CGFloat = 48
     private let lineLen:  CGFloat = 12
 
     var body: some View {
         GeometryReader { geo in
-            let cx = geo.size.width / 2
-            let cy = geo.size.height / 2
+            // Si hay arista detectada, el crosshair salta a ella
+            let cx = snapPt?.x ?? geo.size.width  / 2
+            let cy = snapPt?.y ?? geo.size.height / 2
             ZStack {
                 Canvas { ctx, _ in
                     let color: Color = hit ? dimColor : .white.opacity(0.5)
