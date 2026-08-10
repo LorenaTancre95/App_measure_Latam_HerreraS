@@ -16,12 +16,16 @@ final class MeshEdgeSnapper {
     }
 
     /// Llamar desde el render thread cada 0.1s.
-    /// Devuelve el punto de pantalla de la arista más cercana dentro de `searchRadius` px.
+    /// Si `aimPoint` está disponible (punto LiDAR estabilizado), busca la arista físicamente
+    /// más cercana en 3D — mucho más estable que buscar por radio en pantalla.
+    /// Sin `aimPoint`, cae al modo 2D como fallback.
     func nearest(
         frame: ARFrame,
         near center: CGPoint,
         viewportSize: CGSize,
+        aimPoint: simd_float3? = nil,
         searchRadius: CGFloat = 44,
+        maxDist3D: Float = 0.06,
         time: TimeInterval
     ) -> CGPoint? {
         if time - lastRebuild > rebuildInterval {
@@ -29,13 +33,25 @@ final class MeshEdgeSnapper {
             lastRebuild = time
         }
         guard !sharpEdges.isEmpty else { return nil }
-
-        var bestSq = searchRadius * searchRadius
-        var bestPt: CGPoint? = nil
         let cam = frame.camera
 
+        // Modo 3D: arista físicamente más cercana al punto LiDAR estabilizado
+        if let aim = aimPoint {
+            var bestDist: Float = maxDist3D
+            var bestWorldPt: simd_float3? = nil
+            for (v1, v2) in sharpEdges {
+                let cp = closestOnSegment(aim, v1, v2)
+                let d  = simd_distance(aim, cp)
+                if d < bestDist { bestDist = d; bestWorldPt = cp }
+            }
+            guard let wp = bestWorldPt else { return nil }
+            return project(wp, camera: cam, size: viewportSize)
+        }
+
+        // Modo 2D (fallback cuando aún no hay hit LiDAR)
+        var bestSq = searchRadius * searchRadius
+        var bestPt: CGPoint? = nil
         for (v1, v2) in sharpEdges {
-            // Muestreo en 3 puntos del segmento de arista
             for t: Float in [0, 0.5, 1] {
                 let wp = v1 + t * (v2 - v1)
                 guard let sp = project(wp, camera: cam, size: viewportSize) else { continue }
@@ -45,6 +61,15 @@ final class MeshEdgeSnapper {
             }
         }
         return bestPt
+    }
+
+    /// Punto del segmento [a,b] más cercano a p (pie de perpendicular, clampeado a los extremos).
+    private func closestOnSegment(_ p: simd_float3, _ a: simd_float3, _ b: simd_float3) -> simd_float3 {
+        let ab = b - a
+        let lenSq = simd_dot(ab, ab)
+        guard lenSq > 1e-8 else { return a }
+        let t = simd_clamp(simd_dot(p - a, ab) / lenSq, 0, 1)
+        return a + t * ab
     }
 
     // MARK: - Reconstrucción de aristas

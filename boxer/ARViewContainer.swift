@@ -44,6 +44,7 @@ struct ARViewContainer: UIViewRepresentable {
         weak var sceneView: ARSCNView?
         private var lastHitCheck: TimeInterval = 0
         var cachedLastTap: simd_float3? = nil
+        var cachedAimPoint: simd_float3? = nil   // último punto LiDAR estable → filtro 3D del snapper
 
         // Detección de aristas del mesh LiDAR reconstruido
         private let meshSnapper = MeshEdgeSnapper(minAngleDeg: 25)
@@ -95,9 +96,11 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
-            // Snap a arista del mesh 3D reconstruido (como Measure)
+            // Snap 3D: busca la arista físicamente más cercana al punto LiDAR del frame anterior
             let snapPt    = meshSnapper.nearest(frame: frame, near: center,
-                                                viewportSize: sv.bounds.size, time: time)
+                                                viewportSize: sv.bounds.size,
+                                                aimPoint: cachedAimPoint,
+                                                time: time)
             let measurePt = snapPt ?? center
 
             // LiDAR primero (no atraviesa la caja hacia el fondo), raycast como fallback
@@ -154,7 +157,8 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
                 vm.crosshairSnapPt = snapPt             // arista del mesh, nil = centro
-                self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
+                self.cachedLastTap  = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
+                self.cachedAimPoint = stablePoint       // para el próximo frame de snapping
             }
         }
     }
