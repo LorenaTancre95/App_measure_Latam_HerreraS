@@ -47,7 +47,6 @@ struct ARViewContainer: UIViewRepresentable {
         private var aimBuffer: [simd_float3] = []
         private let bufferSize = 8
         private let stableThreshold: Float = 0.015
-        private var edgeFrameCount = 0
 
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
@@ -79,8 +78,6 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor in self.viewModel?.updateFloorY(y) }
         }
 
-        /// Cada 0.1s: LiDAR en centro de pantalla → buffer mediana → punto estable.
-        /// Cada 0.2s también corre BoxEdgeDetector para el overlay y el CAPTURAR automático.
         func renderer(_ renderer: SCNSceneRenderer, updateAtTime time: TimeInterval) {
             guard time - lastHitCheck > 0.1 else { return }
             lastHitCheck = time
@@ -88,14 +85,6 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
-            // Detección de bordes (cada 2 frames ≈ 0.2s para no saturar CPU)
-            edgeFrameCount += 1
-            var detectedEdges: BoxEdgeDetector.Result? = nil
-            if edgeFrameCount % 2 == 0 {
-                detectedEdges = BoxEdgeDetector.detect(frame: frame, viewportSize: sv.bounds.size)
-            }
-
-            // LiDAR primero, raycast como fallback
             var rawHit: simd_float3? = ARViewModel.lidarPoint(frame: frame,
                                                                screenPoint: center,
                                                                viewportSize: sv.bounds.size)
@@ -145,7 +134,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
                 vm.crosshairSnapPt = nil
-                if let e = detectedEdges { vm.liveEdges = e }
+                vm.liveEdges       = nil
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }
