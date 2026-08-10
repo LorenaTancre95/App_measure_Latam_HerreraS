@@ -231,8 +231,7 @@ struct ContentView: View {
                         Image(systemName: canCapture ? "scope" : "arrow.down.to.line")
                             .font(.system(size: 18, weight: .bold))
                         Text(canCapture
-                             ? (viewModel.dimPhase == .alto && viewModel.crosshairSnapPt != nil
-                                ? "CAPTURAR  ·  arista" : "CAPTURAR")
+                             ? "CAPTURAR"
                              : (viewModel.dimPhase == .alto ? "Detectando piso..." : "Sin superficie"))
                             .font(.system(size: 16, weight: .heavy))
                     }

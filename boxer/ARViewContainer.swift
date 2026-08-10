@@ -92,17 +92,13 @@ struct ARViewContainer: UIViewRepresentable {
 
             let center = CGPoint(x: sv.bounds.midX, y: sv.bounds.midY)
 
-            // Edge snap: busca la arista más cercana al centro dentro de 44px
-            let snapPt    = EdgeSnapper.nearest(frame: frame, near: center, viewportSize: sv.bounds.size)
-            let measurePt = snapPt ?? center   // mide desde la arista si se detectó
-
             // LiDAR primero (no atraviesa la caja hacia el fondo), raycast como fallback
             var rawHit: simd_float3? = ARViewModel.lidarPoint(frame: frame,
-                                                               screenPoint: measurePt,
+                                                               screenPoint: center,
                                                                viewportSize: sv.bounds.size)
             if rawHit == nil {
                 for target: ARRaycastQuery.Target in [.existingPlaneGeometry, .estimatedPlane] {
-                    if let q = sv.raycastQuery(from: measurePt, allowing: target, alignment: .any),
+                    if let q = sv.raycastQuery(from: center, allowing: target, alignment: .any),
                        let r = sv.session.raycast(q).first {
                         let c = r.worldTransform.columns.3
                         rawHit = simd_float3(c.x, c.y, c.z)
@@ -149,7 +145,7 @@ struct ARViewContainer: UIViewRepresentable {
                 vm.liveAimPoint    = stablePoint
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
-                vm.crosshairSnapPt = snapPt             // arista detectada, nil = centro
+                vm.crosshairSnapPt = nil                // sin snap — crosshair fijo en centro
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }
         }
