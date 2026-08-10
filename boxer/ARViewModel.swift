@@ -22,11 +22,12 @@ final class ARViewModel: ObservableObject {
     @Published var measureMode: MeasureMode = .tap
     @Published var segmentationOverlay: UIImage? = nil
     @Published var crosshairHit:    Bool = false
-    @Published var liveAimPoint:   simd_float3? = nil   // punto estabilizado por mediana
-    @Published var isAimStable:    Bool = false          // true cuando el punto lleva N frames quieto
+    @Published var liveAimPoint:   simd_float3? = nil
+    @Published var isAimStable:    Bool = false
     @Published var lastTapScreen:  CGPoint? = nil
-    /// Punto de pantalla al que snapeó el crosshair (arista detectada), nil = centro exacto
     @Published var crosshairSnapPt: CGPoint? = nil
+    /// Bordes detectados en tiempo real (se usan para el overlay y para CAPTURAR)
+    @Published var liveEdges: BoxEdgeDetector.Result? = nil
 
     // MARK: - TAP mode: ANCHO · LARGO · ALTO de a uno
     // Cada dimensión: capturá 2 puntos → preview distancia → GUARDAR/BORRAR → siguiente
@@ -72,11 +73,10 @@ final class ARViewModel: ObservableObject {
     // Instrucción para el tap actual
     var currentInstruction: String {
         switch (dimPhase, tapPhase) {
-        case (.ancho, .waitingFirst):  return "ANCHO  —  tocá el lado IZQUIERDO"
-        case (.ancho, .waitingSecond): return "ANCHO  —  tocá el lado DERECHO"
-        case (.largo, .waitingFirst):  return "LARGO  —  tocá el borde CERCANO"
-        case (.largo, .waitingSecond): return "LARGO  —  tocá el borde LEJANO"
-        case (.alto,  .waitingFirst):  return "ALTO  —  apuntá a la cara SUPERIOR de la caja"
+        case (.ancho, .waitingFirst):  return "ANCHO  —  encarar la caja de FRENTE y CAPTURAR"
+        case (.largo, .waitingFirst):  return "LARGO  —  apuntá el borde MÁS CERCANO"
+        case (.largo, .waitingSecond): return "LARGO  —  apuntá ahora el borde MÁS LEJANO"
+        case (.alto,  .waitingFirst):  return "ALTO  —  apuntá al CENTRO de la cara frontal"
         case (.alto,  .waitingSecond): return "ALTO  —  apuntá ahora a la BASE de la caja"
         default: return ""
         }
@@ -268,32 +268,74 @@ final class ARViewModel: ObservableObject {
 
     func captureCenter() {
         guard !isProcessing, tapPhase != .preview, dimPhase != .done else { return }
+        guard let sv = sceneView, let frame = sv.session.currentFrame else { return }
 
-        guard let sv = sceneView else { return }
-
-        // ALTO: crosshair → distancia vertical al piso
-        // Si ARKit detectó el piso: 1 CAPTURAR en la cara superior → listo
-        // Si no: 1er CAPTURAR = parte superior, 2do = parte inferior (manual)
-        if dimPhase == .alto {
-            guard let aim = liveAimPoint else {
-                status = "Sin superficie — apuntá directo a la caja"
+        // ── ANCHO: auto-detecta borde izquierdo y derecho en el depth map ──────────
+        if dimPhase == .ancho, tapPhase == .waitingFirst {
+            guard let edges = liveEdges else {
+                status = "No se detectaron bordes — centrá más la caja y volvé a intentar"
                 return
             }
-            placeMarker(at: aim, in: sv)
+            guard let left3D  = ARViewModel.lidarPoint(frame: frame, screenPoint: edges.leftScreen,
+                                                        viewportSize: viewportSize),
+                  let right3D = ARViewModel.lidarPoint(frame: frame, screenPoint: edges.rightScreen,
+                                                        viewportSize: viewportSize) else {
+                status = "Sin profundidad LiDAR en los bordes — acercate un poco"
+                return
+            }
+            firstPoint  = left3D
+            secondPoint = right3D
+            placeMarker(at: left3D,  in: sv)
+            placeMarker(at: right3D, in: sv)
+            drawLine(from: left3D, to: right3D, in: sv)
+            tapPhase = .preview
+            let dist = measuredDistance ?? 0
+            status = "ANCHO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+            return
+        }
+
+        // ── ALTO: auto-detecta borde superior + usa piso ARKit ───────────────────
+        if dimPhase == .alto {
             switch tapPhase {
             case .waitingFirst:
-                firstPoint = aim
-                if let fy = floorY {
-                    secondPoint = simd_float3(aim.x, fy, aim.z)
-                    tapPhase = .preview
-                    let dist = measuredDistance ?? 0
-                    status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+                // Intenta auto-detectar el techo con el depth map
+                if let edges = liveEdges,
+                   let top3D = ARViewModel.lidarPoint(frame: frame, screenPoint: edges.topScreen,
+                                                       viewportSize: viewportSize) {
+                    firstPoint = top3D
+                    placeMarker(at: top3D, in: sv)
+                    if let fy = floorY {
+                        let floorPt = simd_float3(top3D.x, fy, top3D.z)
+                        secondPoint = floorPt
+                        tapPhase = .preview
+                        let dist = measuredDistance ?? 0
+                        status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+                    } else {
+                        tapPhase = .waitingSecond
+                        status = "ALTO — apuntá ahora a la BASE de la caja"
+                    }
                 } else {
-                    tapPhase = .waitingSecond
-                    status = "ALTO — apuntá ahora a la BASE de la caja"
+                    // Fallback: usa el liveAimPoint del crosshair
+                    guard let aim = liveAimPoint else {
+                        status = "Sin superficie — apuntá directo a la cara de la caja"
+                        return
+                    }
+                    firstPoint = aim
+                    placeMarker(at: aim, in: sv)
+                    if let fy = floorY {
+                        secondPoint = simd_float3(aim.x, fy, aim.z)
+                        tapPhase = .preview
+                        let dist = measuredDistance ?? 0
+                        status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
+                    } else {
+                        tapPhase = .waitingSecond
+                        status = "ALTO — apuntá ahora a la BASE de la caja"
+                    }
                 }
             case .waitingSecond:
+                guard let aim = liveAimPoint else { return }
                 secondPoint = aim
+                placeMarker(at: aim, in: sv)
                 if let fp = firstPoint { drawLine(from: fp, to: aim, in: sv) }
                 tapPhase = .preview
                 let dist = measuredDistance ?? 0
@@ -303,7 +345,7 @@ final class ARViewModel: ObservableObject {
             return
         }
 
-        // ANCHO / LARGO: 2 puntos con crosshair
+        // ── LARGO: 2 taps manuales (necesita ver el frente y el fondo) ─────────────
         let pt3D: simd_float3
         if let aim = liveAimPoint {
             pt3D = aim
@@ -315,9 +357,7 @@ final class ARViewModel: ObservableObject {
             }
             pt3D = p
         }
-
         placeMarker(at: pt3D, in: sv)
-
         switch tapPhase {
         case .waitingFirst:
             firstPoint = pt3D
@@ -329,8 +369,7 @@ final class ARViewModel: ObservableObject {
             tapPhase = .preview
             let dist = measuredDistance ?? 0
             status = "\(activeDim): \(measureUnit.format(dist)) \(measureUnit.rawValue)"
-        case .preview:
-            break
+        case .preview: break
         }
     }
 

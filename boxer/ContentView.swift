@@ -37,7 +37,7 @@ struct ContentView: View {
             // ── TAP MODE ─────────────────────────────────────────────────────
             if viewModel.measureMode == .tap, !viewModel.isProcessing, viewModel.detections.isEmpty {
 
-                // Crosshair: para ANCHO, LARGO y ALTO — snappea a la arista detectada
+                // Crosshair central
                 if viewModel.tapPhase != .preview {
                     MeasureCrosshairView(
                         hit:           viewModel.crosshairHit,
@@ -47,7 +47,19 @@ struct ContentView: View {
                         lastTapScreen: viewModel.lastTapScreen,
                         unit:          viewModel.measureUnit,
                         activeDim:     viewModel.activeDim,
-                        snapPt:        viewModel.crosshairSnapPt
+                        snapPt:        nil
+                    )
+                    .ignoresSafeArea().allowsHitTesting(false)
+                }
+
+                // Líneas guía de bordes detectados (ANCHO y ALTO)
+                if viewModel.tapPhase != .preview,
+                   let edges = viewModel.liveEdges,
+                   viewModel.dimPhase == .ancho || viewModel.dimPhase == .alto {
+                    EdgeGuideOverlay(
+                        edges:   edges,
+                        phase:   viewModel.dimPhase,
+                        hasEdge: viewModel.liveEdges != nil
                     )
                     .ignoresSafeArea().allowsHitTesting(false)
                 }
@@ -424,6 +436,78 @@ struct DetectionCard: View {
 }
 
 func boxColor(_ index: Int) -> Color { [Color.red, .green, .blue][index % 3] }
+
+// MARK: - Edge Guide Overlay
+
+/// Muestra líneas guía en los bordes detectados por BoxEdgeDetector.
+/// ANCHO: 2 líneas verticales (izq/der)
+/// ALTO:  1 línea horizontal (techo)
+struct EdgeGuideOverlay: View {
+    let edges:   BoxEdgeDetector.Result
+    let phase:   ARViewModel.DimPhase
+    let hasEdge: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            Canvas { ctx, size in
+                let color: Color = phase == .ancho ? .yellow : .orange
+                let alpha: CGFloat = 0.75
+
+                if phase == .ancho {
+                    // Línea vertical izquierda
+                    drawVertical(ctx: ctx, x: edges.leftScreen.x,
+                                 height: size.height, color: color, alpha: alpha)
+                    // Línea vertical derecha
+                    drawVertical(ctx: ctx, x: edges.rightScreen.x,
+                                 height: size.height, color: color, alpha: alpha)
+                    // Distancia estimada entre bordes
+                    let midX = (edges.leftScreen.x + edges.rightScreen.x) / 2
+                    let midY = edges.leftScreen.y < size.height / 2
+                                ? edges.leftScreen.y + 20 : edges.leftScreen.y - 30
+                    drawLabel(ctx: ctx, at: CGPoint(x: midX, y: midY),
+                              text: "← ANCHO →", color: color)
+                }
+
+                if phase == .alto {
+                    // Línea horizontal superior
+                    drawHorizontal(ctx: ctx, y: edges.topScreen.y,
+                                   width: size.width, color: color, alpha: alpha)
+                    drawLabel(ctx: ctx, at: CGPoint(x: 60, y: edges.topScreen.y - 18),
+                              text: "↑ ALTO", color: color)
+                }
+            }
+        }
+        .ignoresSafeArea()
+    }
+
+    private func drawVertical(ctx: GraphicsContext, x: CGFloat,
+                               height: CGFloat, color: Color, alpha: CGFloat) {
+        var p = Path()
+        p.move(to:    CGPoint(x: x, y: 0))
+        p.addLine(to: CGPoint(x: x, y: height))
+        ctx.stroke(p, with: .color(color.opacity(alpha)),
+                   style: StrokeStyle(lineWidth: 2, lineCap: .round,
+                                      dash: [10, 6]))
+    }
+
+    private func drawHorizontal(ctx: GraphicsContext, y: CGFloat,
+                                 width: CGFloat, color: Color, alpha: CGFloat) {
+        var p = Path()
+        p.move(to:    CGPoint(x: 0, y: y))
+        p.addLine(to: CGPoint(x: width, y: y))
+        ctx.stroke(p, with: .color(color.opacity(alpha)),
+                   style: StrokeStyle(lineWidth: 2, lineCap: .round,
+                                      dash: [10, 6]))
+    }
+
+    private func drawLabel(ctx: GraphicsContext, at pt: CGPoint,
+                            text: String, color: Color) {
+        ctx.draw(Text(text)
+            .font(.system(size: 11, weight: .bold))
+            .foregroundColor(color),
+            at: pt, anchor: .center)
+    }
+}
 
 // MARK: - Viewfinder
 
