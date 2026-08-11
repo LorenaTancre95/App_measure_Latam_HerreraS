@@ -33,6 +33,13 @@ jobs:
           key: spm-${{ hashFiles('boxer.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved') }}
           restore-keys: spm-
 
+      - name: Cache DerivedData (compiled objects)
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: deriveddata-${{ runner.os }}-${{ hashFiles('boxer/**/*.swift', 'boxer.xcodeproj/project.pbxproj') }}
+          restore-keys: deriveddata-${{ runner.os }}-
+
       - name: Resolve SPM dependencies
         run: |
           xcodebuild -resolvePackageDependencies \
