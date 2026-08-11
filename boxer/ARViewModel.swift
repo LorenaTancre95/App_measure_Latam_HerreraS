@@ -281,7 +281,10 @@ final class ARViewModel: ObservableObject {
             case .waitingFirst:
                 firstPoint = aim
                 if let fy = floorY {
-                    secondPoint = simd_float3(aim.x, fy, aim.z)
+                    let floorPt = simd_float3(aim.x, fy, aim.z)
+                    secondPoint = floorPt
+                    placeMarker(at: floorPt, in: sv)
+                    drawLine(from: aim, to: floorPt, in: sv)
                     tapPhase = .preview
                     let dist = measuredDistance ?? 0
                     status = "ALTO: \(measureUnit.format(dist)) \(measureUnit.rawValue)"
