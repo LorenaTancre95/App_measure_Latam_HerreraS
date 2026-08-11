@@ -48,6 +48,9 @@ struct ARViewContainer: UIViewRepresentable {
         private let bufferSize = 8
         private let stableThreshold: Float = 0.015
 
+        private let edgeTracker = MeshEdgeTracker()
+        private var lastEdgeUpdate: TimeInterval = 0
+
         init(_ viewModel: ARViewModel) { self.viewModel = viewModel }
 
         func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
@@ -119,6 +122,27 @@ struct ARViewContainer: UIViewRepresentable {
                 isStable = aimBuffer.count >= bufferSize && maxDist < stableThreshold
             }
 
+            // Actualizar tracker de aristas cada 0.25s en background
+            if time - lastEdgeUpdate > 0.25 {
+                lastEdgeUpdate = time
+                let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+                let tracker = edgeTracker
+                Task.detached { tracker.update(meshAnchors: anchors) }
+            }
+
+            // Snap: punto confirmado más cercano al crosshair
+            var snapWorld: simd_float3? = nil
+            var snapScreen: CGPoint? = nil
+            if let aim = stablePoint {
+                if let sp = edgeTracker.snap(to: aim) {
+                    snapWorld = sp
+                    let proj = renderer.projectPoint(SCNVector3(sp.x, sp.y, sp.z))
+                    if proj.z > 0, proj.z < 1 {
+                        snapScreen = CGPoint(x: CGFloat(proj.x), y: CGFloat(proj.y))
+                    }
+                }
+            }
+
             var lastTapScreenPt: CGPoint? = nil
             if let lt = cachedLastTap {
                 let proj = renderer.projectPoint(SCNVector3(lt.x, lt.y, lt.z))
@@ -130,10 +154,10 @@ struct ARViewContainer: UIViewRepresentable {
             Task { @MainActor [weak self] in
                 guard let self, let vm = self.viewModel else { return }
                 vm.crosshairHit    = stablePoint != nil
-                vm.liveAimPoint    = stablePoint
+                vm.liveAimPoint    = snapWorld ?? stablePoint  // snap sobreescribe el centro
                 vm.isAimStable     = isStable
                 vm.lastTapScreen   = lastTapScreenPt
-                vm.crosshairSnapPt = nil
+                vm.crosshairSnapPt = snapScreen
                 vm.liveEdges       = nil
                 self.cachedLastTap = vm.tapPhase == .waitingSecond ? vm.firstPoint : nil
             }

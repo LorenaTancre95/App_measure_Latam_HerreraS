@@ -47,7 +47,7 @@ struct ContentView: View {
                         lastTapScreen: viewModel.lastTapScreen,
                         unit:          viewModel.measureUnit,
                         activeDim:     viewModel.activeDim,
-                        snapPt:        nil
+                        snapPt:        viewModel.crosshairSnapPt
                     )
                     .ignoresSafeArea().allowsHitTesting(false)
                 }
